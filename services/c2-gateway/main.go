@@ -138,7 +138,7 @@ type SessionStream interface {
 
 type C2Task struct {
 	Command   string                 `json:"command"`
-	Arguments map[string]interface{} `json:"arguments"`
+	Arguments map[string]interface{} `json:"args"`
 }
 
 type TaskResult struct {
@@ -767,20 +767,33 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 		}
 
 	case "whoami":
+		// Try GetEnv first, fall back to Execute("whoami")
 		resp, err := p.rpc.GetEnv(ctx, &sliverpb.EnvReq{Name: "USER", Request: req})
-		if err != nil {
-			taskErr = err.Error()
-		} else if resp.GetResponse() != nil && resp.GetResponse().GetErr() != "" {
-			taskErr = resp.GetResponse().GetErr()
-		} else {
+		if err == nil && resp.GetResponse() != nil && resp.GetResponse().GetErr() == "" {
 			for _, v := range resp.GetVariables() {
-				if v.GetKey() == "USER" {
+				if v.GetKey() == "USER" && v.GetValue() != "" {
 					output = v.GetValue()
 					break
 				}
 			}
-			if output == "" {
-				output = "(USER env not set)"
+		}
+		if output == "" {
+			// Fallback: execute whoami command
+			execResp, execErr := p.rpc.Execute(ctx, &sliverpb.ExecuteReq{
+				Path:    "/usr/bin/whoami",
+				Args:    []string{},
+				Output:  true,
+				Request: req,
+			})
+			if execErr != nil {
+				taskErr = execErr.Error()
+			} else if execResp.GetResponse() != nil && execResp.GetResponse().GetErr() != "" {
+				taskErr = execResp.GetResponse().GetErr()
+			} else {
+				output = strings.TrimSpace(string(execResp.GetStdout()))
+				if output == "" {
+					output = strings.TrimSpace(string(execResp.GetStderr()))
+				}
 			}
 		}
 
@@ -861,11 +874,13 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 					baseName = path[idx+1:]
 				}
 				var best []byte
+				var entries []string
 				for {
 					hdr, tarErr := tr.Next()
 					if tarErr != nil {
 						break
 					}
+					entries = append(entries, fmt.Sprintf("%s (type=%d, size=%d)", hdr.Name, hdr.Typeflag, hdr.Size))
 					if hdr.Typeflag == tar.TypeDir {
 						continue
 					}
@@ -877,6 +892,7 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 					}
 					best = fileBytes // fallback: use last regular file
 				}
+				slog.Info("cat tar entries", "requested", path, "baseName", baseName, "entries", entries)
 				if len(best) > 0 {
 					data = best
 				}

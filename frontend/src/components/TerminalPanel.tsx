@@ -84,12 +84,17 @@ export default function TerminalPanel({ sessionId }: TerminalPanelProps) {
     }
 
     ws.onerror = () => {
-      term.writeln('\x1b[31m[!] WebSocket error\x1b[0m')
+      term.writeln('\x1b[31m[!] Interactive shell unavailable\x1b[0m')
+      term.writeln('\x1b[33m    HTTP/HTTPS transport does not support persistent shell.\x1b[0m')
+      term.writeln('\x1b[33m    Use the COMMANDS tab for command execution,\x1b[0m')
+      term.writeln('\x1b[33m    or deploy an MTLS/WireGuard implant for interactive shell.\x1b[0m')
     }
 
     ws.onclose = (event) => {
-      term.writeln('')
-      term.writeln(`\x1b[33m[*] Connection closed (code: ${event.code})\x1b[0m`)
+      if (event.code !== 1006) {
+        term.writeln('')
+        term.writeln(`\x1b[33m[*] Connection closed (code: ${event.code})\x1b[0m`)
+      }
     }
 
     // Send terminal input to WebSocket
