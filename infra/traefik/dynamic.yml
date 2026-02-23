@@ -15,6 +15,22 @@ http:
           - "X-User-Roles"
           - "X-Session-ID"
 
+    cors-headers:
+      headers:
+        accessControlAllowOriginList:
+          - "*"
+        accessControlAllowMethods:
+          - "GET"
+          - "POST"
+          - "PUT"
+          - "PATCH"
+          - "DELETE"
+          - "OPTIONS"
+        accessControlAllowHeaders:
+          - "Authorization"
+          - "Content-Type"
+        accessControlMaxAge: 86400
+
   # ════════════════════════════════════════════
   #  ROUTERS — PUBLIC (no auth required)
   # ════════════════════════════════════════════
@@ -24,14 +40,8 @@ http:
       rule: "PathPrefix(`/api/v1/auth/login`) || PathPrefix(`/api/v1/auth/refresh`)"
       entryPoints: [web]
       service: auth
+      middlewares: [cors-headers]
       priority: 100
-
-    # Health endpoints for all services
-    auth-health:
-      rule: "Path(`/health`) && PathPrefix(`/api/v1/auth`)"
-      entryPoints: [web]
-      service: auth
-      priority: 90
 
     # Frontend SPA — public
     frontend:
@@ -47,63 +57,63 @@ http:
       rule: "PathPrefix(`/api/v1/auth`)"
       entryPoints: [web]
       service: auth
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     workflow:
       rule: "PathPrefix(`/api/v1/workflows`)"
       entryPoints: [web]
       service: workflow
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     ticket:
       rule: "PathPrefix(`/api/v1/tickets`)"
       entryPoints: [web]
       service: ticket
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     dashboard-api:
       rule: "PathPrefix(`/api/v1/dashboards`)"
       entryPoints: [web]
       service: dashboard-api
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     c2:
       rule: "PathPrefix(`/api/v1/c2`)"
       entryPoints: [web]
       service: c2
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     audit:
       rule: "PathPrefix(`/api/v1/audit`)"
       entryPoints: [web]
       service: audit
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     notification:
       rule: "PathPrefix(`/api/v1/notifications`)"
       entryPoints: [web]
       service: notification
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     endpoint:
       rule: "PathPrefix(`/api/v1/endpoints`)"
       entryPoints: [web]
       service: endpoint
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
     ws:
       rule: "PathPrefix(`/ws`)"
       entryPoints: [web]
       service: ws
-      middlewares: [auth-verify]
+      middlewares: [auth-verify, cors-headers]
       priority: 50
 
   # ════════════════════════════════════════════

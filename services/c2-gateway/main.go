@@ -241,6 +241,7 @@ func (s *C2GatewayServer) handleListSessions(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sessions)
 }
 
@@ -250,6 +251,7 @@ func (s *C2GatewayServer) handleListImplants(w http.ResponseWriter, r *http.Requ
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(implants)
 }
 
@@ -259,6 +261,7 @@ func (s *C2GatewayServer) handleListListeners(w http.ResponseWriter, r *http.Req
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(listeners)
 }
 
@@ -273,6 +276,7 @@ func (s *C2GatewayServer) handleCreateListener(w http.ResponseWriter, r *http.Re
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(listener)
 }
@@ -302,6 +306,7 @@ func (s *C2GatewayServer) handleExecuteTask(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(result)
 }
 
@@ -313,6 +318,7 @@ func (s *C2GatewayServer) handleShellSession(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *C2GatewayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   "ok",
 		"provider": s.provider.Name(),

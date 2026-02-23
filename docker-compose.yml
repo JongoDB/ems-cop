@@ -435,6 +435,11 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     container_name: ems-frontend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"

@@ -88,9 +88,9 @@ ems-cop/
 └── scripts/                        # Utility scripts
 ```
 
-## Current State
+## Current State (M2 Complete — 2026-02-23)
 
-**What exists and is production-quality:**
+**Fully implemented:**
 - Complete PostgreSQL schema with all tables, indexes, constraints, triggers, seed data (users, roles, workflows, endpoints, endpoint groups)
 - Complete ClickHouse schema with audit events (hash-chained), C2 telemetry, endpoint health, materialized views
 - Docker Compose with all 20+ services, health checks, network topology, volume mounts, Traefik labels
@@ -99,11 +99,18 @@ ems-cop/
 - Sliver Dockerfile and entrypoint (daemon mode, auto-generates operator config)
 - Endpoint Dockerfiles (Ubuntu + Alpine with SSH, web services, simulated users)
 - Seed data: 7 users (admin, planner1, mc1, sup1, lead1, op1, op2), 6 roles, default workflow (6 stages), 4 endpoints, 2 groups
+- auth-service (Go) — JWT login/refresh/logout, ForwardAuth verify endpoint, Redis sessions, NATS event publishing
+- ticket-service (Node) — full CRUD, 10-state machine transitions, comments, pagination, filtering, search (pg_trgm)
+- audit-service (Go) — NATS consumer subscribing to auth/ticket/workflow/operation/c2/endpoint events, batch insert to ClickHouse, SHA-256 hash chain, query API with filters
+- Frontend SPA — LoginPage, HomePage (ticket queue summary), TicketsPage (table + detail panel + create form), auth flows (Zustand store, token refresh, ProtectedRoute guard), tactical dark theme
+- Traefik ForwardAuth wiring — public routes (login/refresh) at priority 100, protected API routes with auth-verify middleware at priority 50, CORS middleware
 
 **What exists as scaffold (health endpoint only, needs implementation):**
-- auth-service, workflow-engine, audit-service, endpoint-service (Go stubs)
-- ticket-service, dashboard-service, notification-service, ws-relay (Node stubs)
-- Frontend app shell (package.json, Dockerfile — no React app yet)
+- workflow-engine (Go) — DAG engine, approval gates, kickbacks not implemented
+- dashboard-service (Node) — layout/config CRUD not implemented
+- notification-service (Node) — multi-channel dispatch not implemented
+- endpoint-service (Go) — endpoint registry, health/telemetry not implemented
+- ws-relay (Node) — WebSocket fan-out not implemented
 
 ## Design Principles
 
@@ -235,18 +242,24 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - All host ports are parameterized via `.env` to avoid conflicts with other Docker projects. Default dev ports: HTTP=18080, PG=15432, CH=18123, Redis=16379, NATS=14222, MinIO API=19090.
 - ClickHouse TTL expressions must use `toDateTime(timestamp)` — raw `DateTime64` is not supported in TTL.
 
-## Current Progress (M1 Complete — 2026-02-22)
+## Current Progress (M2 Complete — 2026-02-23)
 
-M1 milestone is fully validated:
+M1 milestone fully validated (2026-02-22):
 - All 21 containers start and stay healthy
 - PostgreSQL: 25 tables, 7 users, 6 roles, 4 endpoints seeded
 - ClickHouse: 3 tables + 2 materialized views
 - Traefik: file-based routing to all 10 service paths
 - Sliver: daemon running, gRPC :31337, operator config generated
-- Frontend: React/Vite/Tailwind SPA serves at `/`, login page at `/login`
 
-**Next milestone: M2 — Auth + Tickets** (see roadmap above)
-- Implement auth-service: JWT login/register, RBAC with Casbin, session management
-- Implement ticket-service: CRUD, state machine, search, threading
-- Wire audit events to ClickHouse via NATS
-- All stubs currently return `/health` only — need full API implementations
+M2 milestone fully validated (2026-02-23):
+- Auth service: JWT login/refresh/logout, ForwardAuth verify, Redis sessions
+- Ticket service: CRUD, 10-state machine, comments, pagination, search
+- Audit pipeline: NATS events → audit-service → ClickHouse with hash chain
+- Frontend: LoginPage, HomePage, TicketsPage with full auth flows
+- Traefik ForwardAuth: unauthenticated API calls return 401, public routes stay open
+- E2E tested with Playwright: login, ticket CRUD, transitions, comments, logout
+
+**Next milestone: M3 — Sliver Connected** (see roadmap above)
+- Connect C2 Gateway to Sliver gRPC
+- List implants/sessions, open shell via xterm.js widget
+- Commands logged to audit trail
