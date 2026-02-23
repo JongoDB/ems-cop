@@ -45,3 +45,6 @@ logs/
 # Coverage
 coverage/
 *.lcov
+
+# Screenshots
+*.png
