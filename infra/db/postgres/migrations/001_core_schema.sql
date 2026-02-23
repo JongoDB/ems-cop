@@ -582,14 +582,15 @@ FROM wf, (VALUES
 -- This is done at app layer during workflow instantiation for flexibility
 
 -- Seed users (passwords are bcrypt hashes of 'changeme' — CHANGE IN PROD)
+-- Password for all seed users: changeme
 INSERT INTO users (username, display_name, email, password_hash) VALUES
-('planner1',  'Alex Planner',       'planner1@ems.local',  '$2b$12$LJ3m.H9FjNcM5ViXXGVPO.8FkPMpjQqmF9IH3iE1v5VYx5q4IYZC'),
-('mc1',       'Jordan Commander',   'mc1@ems.local',       '$2b$12$LJ3m.H9FjNcM5ViXXGVPO.8FkPMpjQqmF9IH3iE1v5VYx5q4IYZC'),
-('sup1',      'Morgan Supervisor',  'sup1@ems.local',      '$2b$12$LJ3m.H9FjNcM5ViXXGVPO.8FkPMpjQqmF9IH3iE1v5VYx5q4IYZC'),
-('lead1',     'Taylor Leader',      'lead1@ems.local',     '$2b$12$LJ3m.H9FjNcM5ViXXGVPO.8FkPMpjQqmF9IH3iE1v5VYx5q4IYZC'),
-('op1',       'Casey Operator',     'op1@ems.local',       '$2b$12$LJ3m.H9FjNcM5ViXXGVPO.8FkPMpjQqmF9IH3iE1v5VYx5q4IYZC'),
-('op2',       'Riley Operator',     'op2@ems.local',       '$2b$12$LJ3m.H9FjNcM5ViXXGVPO.8FkPMpjQqmF9IH3iE1v5VYx5q4IYZC'),
-('admin',     'System Admin',       'admin@ems.local',     '$2b$12$LJ3m.H9FjNcM5ViXXGVPO.8FkPMpjQqmF9IH3iE1v5VYx5q4IYZC');
+('planner1',  'Alex Planner',       'planner1@ems.local',  '$2b$12$sTO/l5dvFqlelmerbkPToudfrP1/.2zr4gooHEZprRIxHDFLq66rK'),
+('mc1',       'Jordan Commander',   'mc1@ems.local',       '$2b$12$sTO/l5dvFqlelmerbkPToudfrP1/.2zr4gooHEZprRIxHDFLq66rK'),
+('sup1',      'Morgan Supervisor',  'sup1@ems.local',      '$2b$12$sTO/l5dvFqlelmerbkPToudfrP1/.2zr4gooHEZprRIxHDFLq66rK'),
+('lead1',     'Taylor Leader',      'lead1@ems.local',     '$2b$12$sTO/l5dvFqlelmerbkPToudfrP1/.2zr4gooHEZprRIxHDFLq66rK'),
+('op1',       'Casey Operator',     'op1@ems.local',       '$2b$12$sTO/l5dvFqlelmerbkPToudfrP1/.2zr4gooHEZprRIxHDFLq66rK'),
+('op2',       'Riley Operator',     'op2@ems.local',       '$2b$12$sTO/l5dvFqlelmerbkPToudfrP1/.2zr4gooHEZprRIxHDFLq66rK'),
+('admin',     'System Admin',       'admin@ems.local',     '$2b$12$sTO/l5dvFqlelmerbkPToudfrP1/.2zr4gooHEZprRIxHDFLq66rK');
 
 -- Bind users to roles
 INSERT INTO role_bindings (user_id, role_id, granted_by)

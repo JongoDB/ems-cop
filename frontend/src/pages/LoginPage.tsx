@@ -1,77 +1,101 @@
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { useAuthStore } from '../stores/authStore'
+import { apiFetch, setAccessToken } from '../lib/api'
+import { Shield } from 'lucide-react'
 
 export default function LoginPage() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [error, setError] = useState('')
+  const [isSubmitting, setIsSubmitting] = useState(false)
+  const setAuth = useAuthStore((s) => s.setAuth)
+  const navigate = useNavigate()
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError('')
+    setIsSubmitting(true)
     try {
-      const res = await fetch('/api/v1/auth/login', {
+      const data = await apiFetch<{
+        access_token: string
+        refresh_token: string
+        user: { id: string; username: string; display_name: string; email: string; roles: string[] }
+      }>('/auth/login', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, password }),
       })
-      if (!res.ok) {
-        const data = await res.json().catch(() => null)
-        setError(data?.error?.message || 'Login failed')
-        return
-      }
-      // TODO: Store token and redirect to dashboard
-      window.location.href = '/'
-    } catch {
-      setError('Unable to reach the server')
+      setAccessToken(data.access_token)
+      setAuth(data.user, data.access_token, data.refresh_token)
+      navigate('/')
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed')
+    } finally {
+      setIsSubmitting(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-900">
-      <div className="w-full max-w-sm p-8 bg-gray-800 rounded-lg shadow-lg">
-        <h1 className="text-2xl font-bold text-white text-center mb-2">EMS-COP</h1>
-        <p className="text-gray-400 text-center text-sm mb-6">Common Operating Picture</p>
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="username" className="block text-sm font-medium text-gray-300 mb-1">
-              Username
+    <div className="login-page">
+      {/* Scanline overlay */}
+      <div className="scanline-overlay" />
+
+      <div className="login-container">
+        <div className="login-header">
+          <Shield className="login-icon" size={32} strokeWidth={1.5} />
+          <h1 className="login-title">EMS-COP</h1>
+          <p className="login-subtitle">COMMON OPERATING PICTURE</p>
+          <div className="login-divider" />
+        </div>
+
+        <form onSubmit={handleSubmit} className="login-form">
+          <div className="form-group">
+            <label htmlFor="username" className="form-label">
+              OPERATOR ID
             </label>
             <input
               id="username"
               type="text"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Enter username"
+              className="form-input"
+              placeholder="username"
               autoComplete="username"
               required
+              disabled={isSubmitting}
             />
           </div>
-          <div>
-            <label htmlFor="password" className="block text-sm font-medium text-gray-300 mb-1">
-              Password
+
+          <div className="form-group">
+            <label htmlFor="password" className="form-label">
+              PASSPHRASE
             </label>
             <input
               id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              className="w-full px-3 py-2 bg-gray-700 border border-gray-600 rounded text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-              placeholder="Enter password"
+              className="form-input"
+              placeholder="••••••••"
               autoComplete="current-password"
               required
+              disabled={isSubmitting}
             />
           </div>
+
           {error && (
-            <p className="text-red-400 text-sm">{error}</p>
+            <div className="form-error">
+              <span className="error-indicator">!</span>
+              {error}
+            </div>
           )}
-          <button
-            type="submit"
-            className="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded transition-colors focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-800"
-          >
-            Sign In
+
+          <button type="submit" className="login-button" disabled={isSubmitting}>
+            {isSubmitting ? 'AUTHENTICATING...' : 'AUTHENTICATE'}
           </button>
         </form>
+
+        <p className="login-footer">CLASSIFICATION: UNCLASSIFIED // FOR EXERCISE USE ONLY</p>
       </div>
     </div>
   )

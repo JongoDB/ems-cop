@@ -1,50 +1,114 @@
 # Traefik Dynamic Configuration — EMS-COP Routes
 # Maps API prefixes to backend services via Docker internal DNS
+# Public routes (no auth) use higher priority to match before protected catch-all
 
 http:
+  # ════════════════════════════════════════════
+  #  MIDDLEWARES
+  # ════════════════════════════════════════════
+  middlewares:
+    auth-verify:
+      forwardAuth:
+        address: "http://auth-service:3001/api/v1/auth/verify"
+        authResponseHeaders:
+          - "X-User-ID"
+          - "X-User-Roles"
+          - "X-Session-ID"
+
+  # ════════════════════════════════════════════
+  #  ROUTERS — PUBLIC (no auth required)
+  # ════════════════════════════════════════════
   routers:
-    auth:
-      rule: "PathPrefix(`/api/v1/auth`)"
+    # Auth endpoints (login, refresh) — must be public
+    auth-public:
+      rule: "PathPrefix(`/api/v1/auth/login`) || PathPrefix(`/api/v1/auth/refresh`)"
       entryPoints: [web]
       service: auth
-    workflow:
-      rule: "PathPrefix(`/api/v1/workflows`)"
+      priority: 100
+
+    # Health endpoints for all services
+    auth-health:
+      rule: "Path(`/health`) && PathPrefix(`/api/v1/auth`)"
       entryPoints: [web]
-      service: workflow
-    ticket:
-      rule: "PathPrefix(`/api/v1/tickets`)"
-      entryPoints: [web]
-      service: ticket
-    dashboard-api:
-      rule: "PathPrefix(`/api/v1/dashboards`)"
-      entryPoints: [web]
-      service: dashboard-api
-    c2:
-      rule: "PathPrefix(`/api/v1/c2`)"
-      entryPoints: [web]
-      service: c2
-    audit:
-      rule: "PathPrefix(`/api/v1/audit`)"
-      entryPoints: [web]
-      service: audit
-    notification:
-      rule: "PathPrefix(`/api/v1/notifications`)"
-      entryPoints: [web]
-      service: notification
-    endpoint:
-      rule: "PathPrefix(`/api/v1/endpoints`)"
-      entryPoints: [web]
-      service: endpoint
-    ws:
-      rule: "PathPrefix(`/ws`)"
-      entryPoints: [web]
-      service: ws
+      service: auth
+      priority: 90
+
+    # Frontend SPA — public
     frontend:
       rule: "PathPrefix(`/`)"
       entryPoints: [web]
       service: frontend
       priority: 1
 
+  # ════════════════════════════════════════════
+  #  ROUTERS — PROTECTED (auth-verify middleware)
+  # ════════════════════════════════════════════
+    auth:
+      rule: "PathPrefix(`/api/v1/auth`)"
+      entryPoints: [web]
+      service: auth
+      middlewares: [auth-verify]
+      priority: 50
+
+    workflow:
+      rule: "PathPrefix(`/api/v1/workflows`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify]
+      priority: 50
+
+    ticket:
+      rule: "PathPrefix(`/api/v1/tickets`)"
+      entryPoints: [web]
+      service: ticket
+      middlewares: [auth-verify]
+      priority: 50
+
+    dashboard-api:
+      rule: "PathPrefix(`/api/v1/dashboards`)"
+      entryPoints: [web]
+      service: dashboard-api
+      middlewares: [auth-verify]
+      priority: 50
+
+    c2:
+      rule: "PathPrefix(`/api/v1/c2`)"
+      entryPoints: [web]
+      service: c2
+      middlewares: [auth-verify]
+      priority: 50
+
+    audit:
+      rule: "PathPrefix(`/api/v1/audit`)"
+      entryPoints: [web]
+      service: audit
+      middlewares: [auth-verify]
+      priority: 50
+
+    notification:
+      rule: "PathPrefix(`/api/v1/notifications`)"
+      entryPoints: [web]
+      service: notification
+      middlewares: [auth-verify]
+      priority: 50
+
+    endpoint:
+      rule: "PathPrefix(`/api/v1/endpoints`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify]
+      priority: 50
+
+    ws:
+      rule: "PathPrefix(`/ws`)"
+      entryPoints: [web]
+      service: ws
+      middlewares: [auth-verify]
+      priority: 50
+
+  # ════════════════════════════════════════════
+  #  SERVICES (backend targets)
+  # ════════════════════════════════════════════
   services:
     auth:
       loadBalancer:
