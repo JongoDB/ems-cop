@@ -5,6 +5,7 @@ import { apiFetch } from '../lib/api'
 import {
   Shield, Ticket, LogOut, Terminal, RefreshCw, Wifi, WifiOff,
 } from 'lucide-react'
+import { APP_VERSION } from '../version'
 import TerminalPanel from '../components/TerminalPanel'
 
 interface C2Session {
@@ -110,6 +111,7 @@ export default function C2Page() {
         <div className="navbar-left">
           <Shield size={20} strokeWidth={1.5} className="navbar-icon" />
           <Link to="/" className="navbar-brand">EMS-COP</Link>
+          <span className="navbar-version">{APP_VERSION}</span>
           <span className="navbar-sep">|</span>
           <Link to="/tickets" className="navbar-link">
             <Ticket size={14} />

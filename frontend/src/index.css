@@ -158,6 +158,16 @@ body::before {
   opacity: 0.6;
 }
 
+.login-version {
+  text-align: center;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  color: var(--color-accent);
+  margin: 8px 0 0;
+  opacity: 0.4;
+}
+
 /* ═══════════════════════════════════════════
    FORM ELEMENTS
    ═══════════════════════════════════════════ */
@@ -298,6 +308,18 @@ select.filter-select {
   letter-spacing: 2px;
   color: var(--color-text-bright);
   text-decoration: none;
+}
+
+.navbar-version {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 500;
+  letter-spacing: 1px;
+  color: var(--color-accent);
+  opacity: 0.6;
+  margin-left: 6px;
+  align-self: flex-end;
+  margin-bottom: 1px;
 }
 
 .navbar-sep {

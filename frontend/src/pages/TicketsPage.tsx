@@ -6,6 +6,7 @@ import {
   Shield, Ticket, LogOut, Plus, Search, ChevronLeft, ChevronRight,
   X, MessageSquare, ArrowRight, Terminal,
 } from 'lucide-react'
+import { APP_VERSION } from '../version'
 
 interface TicketRecord {
   id: string
@@ -189,6 +190,7 @@ export default function TicketsPage() {
         <div className="navbar-left">
           <Shield size={20} strokeWidth={1.5} className="navbar-icon" />
           <Link to="/" className="navbar-brand">EMS-COP</Link>
+          <span className="navbar-version">{APP_VERSION}</span>
           <span className="navbar-sep">|</span>
           <Link to="/tickets" className="navbar-link active">
             <Ticket size={14} />

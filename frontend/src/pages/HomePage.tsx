@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { apiFetch } from '../lib/api'
 import { Shield, Ticket, LogOut, ChevronRight, Terminal } from 'lucide-react'
+import { APP_VERSION } from '../version'
 
 interface TicketSummary {
   status: string
@@ -50,6 +51,7 @@ export default function HomePage() {
         <div className="navbar-left">
           <Shield size={20} strokeWidth={1.5} className="navbar-icon" />
           <span className="navbar-brand">EMS-COP</span>
+          <span className="navbar-version">{APP_VERSION}</span>
           <span className="navbar-sep">|</span>
           <Link to="/tickets" className="navbar-link">
             <Ticket size={14} />

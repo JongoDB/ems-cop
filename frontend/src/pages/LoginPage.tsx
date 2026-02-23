@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { apiFetch, setAccessToken } from '../lib/api'
 import { Shield } from 'lucide-react'
+import { APP_VERSION } from '../version'
 
 export default function LoginPage() {
   const [username, setUsername] = useState('')
@@ -96,6 +97,7 @@ export default function LoginPage() {
         </form>
 
         <p className="login-footer">CLASSIFICATION: UNCLASSIFIED // FOR EXERCISE USE ONLY</p>
+        <p className="login-version">{APP_VERSION}</p>
       </div>
     </div>
   )
