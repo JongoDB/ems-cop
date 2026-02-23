@@ -1,0 +1,88 @@
+# Traefik Dynamic Configuration — EMS-COP Routes
+# Maps API prefixes to backend services via Docker internal DNS
+
+http:
+  routers:
+    auth:
+      rule: "PathPrefix(`/api/v1/auth`)"
+      entryPoints: [web]
+      service: auth
+    workflow:
+      rule: "PathPrefix(`/api/v1/workflows`)"
+      entryPoints: [web]
+      service: workflow
+    ticket:
+      rule: "PathPrefix(`/api/v1/tickets`)"
+      entryPoints: [web]
+      service: ticket
+    dashboard-api:
+      rule: "PathPrefix(`/api/v1/dashboards`)"
+      entryPoints: [web]
+      service: dashboard-api
+    c2:
+      rule: "PathPrefix(`/api/v1/c2`)"
+      entryPoints: [web]
+      service: c2
+    audit:
+      rule: "PathPrefix(`/api/v1/audit`)"
+      entryPoints: [web]
+      service: audit
+    notification:
+      rule: "PathPrefix(`/api/v1/notifications`)"
+      entryPoints: [web]
+      service: notification
+    endpoint:
+      rule: "PathPrefix(`/api/v1/endpoints`)"
+      entryPoints: [web]
+      service: endpoint
+    ws:
+      rule: "PathPrefix(`/ws`)"
+      entryPoints: [web]
+      service: ws
+    frontend:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [web]
+      service: frontend
+      priority: 1
+
+  services:
+    auth:
+      loadBalancer:
+        servers:
+          - url: "http://auth-service:3001"
+    workflow:
+      loadBalancer:
+        servers:
+          - url: "http://workflow-engine:3002"
+    ticket:
+      loadBalancer:
+        servers:
+          - url: "http://ticket-service:3003"
+    dashboard-api:
+      loadBalancer:
+        servers:
+          - url: "http://dashboard-service:3004"
+    c2:
+      loadBalancer:
+        servers:
+          - url: "http://c2-gateway:3005"
+    audit:
+      loadBalancer:
+        servers:
+          - url: "http://audit-service:3006"
+    notification:
+      loadBalancer:
+        servers:
+          - url: "http://notification-service:3007"
+    endpoint:
+      loadBalancer:
+        servers:
+          - url: "http://endpoint-service:3008"
+    ws:
+      loadBalancer:
+        servers:
+          - url: "http://ws-relay:3009"
+    frontend:
+      loadBalancer:
+        servers:
+          - url: "http://frontend:80"

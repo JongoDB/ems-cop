@@ -1,0 +1,47 @@
+# Environment
+.env
+*.env.local
+
+# Dependencies
+node_modules/
+vendor/
+
+# Build artifacts
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes (managed by compose)
+postgres-data/
+clickhouse-data/
+redis-data/
+minio-data/
+nats-data/
+
+# Sliver artifacts (sensitive)
+sliver-config/
+sliver-builds/
+builds/
+*.cfg
+
+# Logs
+*.log
+logs/
+
+# Coverage
+coverage/
+*.lcov

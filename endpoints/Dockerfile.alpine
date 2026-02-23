@@ -1,0 +1,36 @@
+# EMS-COP Managed Endpoint — Alpine
+# Simulates a DMZ server (webserver/database)
+
+FROM alpine:3.19
+
+RUN apk add --no-cache \
+    openssh \
+    curl \
+    wget \
+    net-tools \
+    iproute2 \
+    nmap \
+    bash \
+    python3 \
+    nginx \
+    sudo
+
+# Configure SSH
+RUN ssh-keygen -A && \
+    echo 'root:endpoint_password' | chpasswd && \
+    sed -i 's/#PermitRootLogin prohibit-password/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/AllowTcpForwarding no/AllowTcpForwarding yes/' /etc/ssh/sshd_config 2>/dev/null || true
+
+# Create service user
+RUN adduser -D -s /bin/bash svcaccount && \
+    echo 'svcaccount:Service1!' | chpasswd
+
+# Nginx default page (simulating a web service)
+RUN echo "<html><body><h1>DMZ Service - $(hostname)</h1><p>Internal use only</p></body></html>" > /var/lib/nginx/html/index.html
+
+# Entrypoint
+RUN printf '#!/bin/bash\n/usr/sbin/sshd\nnginx\necho "Endpoint $(hostname) ready"\ntail -f /dev/null\n' > /entrypoint.sh && chmod +x /entrypoint.sh
+
+EXPOSE 22 80
+
+CMD ["/entrypoint.sh"]

@@ -1,0 +1,526 @@
+# EMS-COP Docker Compose — POC Environment
+# All services are containerized and connected via internal networks.
+# Run: docker compose up -d --build
+
+x-common-env: &common-env
+  NODE_ENV: production
+  TZ: UTC
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ems
+  POSTGRES_USER: ems_admin
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ems_dev_password_change_me}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-ems_redis_password}@redis:6379
+  NATS_URL: nats://nats:4222
+  CLICKHOUSE_HOST: clickhouse
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DB: ems_audit
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ems_audit_password}
+  MINIO_ENDPOINT: minio:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-ems_minio_admin}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-ems_minio_secret_change_me}
+  JWT_SECRET: ${JWT_SECRET:-ems_jwt_secret_change_me_in_production}
+
+networks:
+  ems-net:
+    name: ems-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.0.0/16
+  endpoint-net:
+    name: endpoint-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.101.0.0/16
+
+volumes:
+  postgres-data:
+  clickhouse-data:
+  redis-data:
+  minio-data:
+  nats-data:
+  sliver-config:
+  sliver-builds:
+
+services:
+
+  # ════════════════════════════════════════════
+  #  INFRASTRUCTURE
+  # ════════════════════════════════════════════
+
+  traefik:
+    image: traefik:v3.3
+    container_name: ems-traefik
+    ports:
+      - "${EMS_HTTP_PORT:-80}:80"
+      - "${EMS_HTTPS_PORT:-443}:443"
+      - "${TRAEFIK_DASHBOARD_PORT:-8080}:8080"  # Traefik dashboard (dev only — remove in prod)
+    volumes:
+      - ./infra/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: ems-postgres
+    environment:
+      POSTGRES_DB: ems
+      POSTGRES_USER: ems_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ems_dev_password_change_me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/db/postgres/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${PG_HOST_PORT:-15432}:5432"  # Dev access — remove in prod
+    networks:
+      - ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ems_admin -d ems"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: ems-clickhouse
+    environment:
+      CLICKHOUSE_DB: ems_audit
+      CLICKHOUSE_USER: ems_audit
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ems_audit_password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./infra/db/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${CH_HTTP_PORT:-18123}:8123"  # HTTP interface (dev only)
+      - "${CH_NATIVE_PORT:-19000}:9000"  # Native protocol
+    networks:
+      - ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -nv -O- 'http://127.0.0.1:8123/ping' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: ems-redis
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-ems_redis_password}
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_HOST_PORT:-16379}:6379"  # Dev access
+    networks:
+      - ems-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-ems_redis_password}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  nats:
+    image: nats:2-alpine
+    container_name: ems-nats
+    command: >
+      --jetstream
+      --store_dir /data
+      --http_port 8222
+    volumes:
+      - nats-data:/data
+    ports:
+      - "${NATS_HOST_PORT:-14222}:4222"   # Client connections
+      - "${NATS_MON_PORT:-18222}:8222"   # HTTP monitoring
+    networks:
+      - ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: ems-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-ems_minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-ems_minio_secret_change_me}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${MINIO_API_PORT:-19090}:9000"  # S3 API
+      - "${MINIO_CONSOLE_PORT:-19001}:9001"  # Console
+    networks:
+      - ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  EMS CORE SERVICES
+  # ════════════════════════════════════════════
+
+  auth-service:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    container_name: ems-auth
+    environment:
+      <<: *common-env
+      SERVICE_NAME: auth-service
+      SERVICE_PORT: "3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.auth.rule=PathPrefix(`/api/v1/auth`)"
+      - "traefik.http.services.auth.loadbalancer.server.port=3001"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  workflow-engine:
+    build:
+      context: ./services/workflow-engine
+      dockerfile: Dockerfile
+    container_name: ems-workflow
+    environment:
+      <<: *common-env
+      SERVICE_NAME: workflow-engine
+      SERVICE_PORT: "3002"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.workflow.rule=PathPrefix(`/api/v1/workflows`)"
+      - "traefik.http.services.workflow.loadbalancer.server.port=3002"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  ticket-service:
+    build:
+      context: ./services/ticket
+      dockerfile: Dockerfile
+    container_name: ems-ticket
+    environment:
+      <<: *common-env
+      SERVICE_NAME: ticket-service
+      SERVICE_PORT: "3003"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ticket.rule=PathPrefix(`/api/v1/tickets`)"
+      - "traefik.http.services.ticket.loadbalancer.server.port=3003"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  dashboard-service:
+    build:
+      context: ./services/dashboard
+      dockerfile: Dockerfile
+    container_name: ems-dashboard
+    environment:
+      <<: *common-env
+      SERVICE_NAME: dashboard-service
+      SERVICE_PORT: "3004"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.dashboard-api.rule=PathPrefix(`/api/v1/dashboards`)"
+      - "traefik.http.services.dashboard-api.loadbalancer.server.port=3004"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  c2-gateway:
+    build:
+      context: ./services/c2-gateway
+      dockerfile: Dockerfile
+    container_name: ems-c2-gateway
+    environment:
+      <<: *common-env
+      SERVICE_NAME: c2-gateway
+      SERVICE_PORT: "3005"
+      SLIVER_GRPC_HOST: sliver-server
+      SLIVER_GRPC_PORT: "31337"
+      SLIVER_OPERATOR_CONFIG: /home/sliver/.sliver/configs/ems-operator.cfg
+    volumes:
+      - sliver-config:/home/sliver/.sliver:ro
+    depends_on:
+      nats:
+        condition: service_healthy
+      sliver-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/api/v1/c2/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.c2.rule=PathPrefix(`/api/v1/c2`)"
+      - "traefik.http.services.c2.loadbalancer.server.port=3005"
+    networks:
+      - ems-net
+      - endpoint-net  # Bridge to endpoint network for C2 traffic
+    restart: unless-stopped
+
+  audit-service:
+    build:
+      context: ./services/audit
+      dockerfile: Dockerfile
+    container_name: ems-audit
+    environment:
+      <<: *common-env
+      SERVICE_NAME: audit-service
+      SERVICE_PORT: "3006"
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3006/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.audit.rule=PathPrefix(`/api/v1/audit`)"
+      - "traefik.http.services.audit.loadbalancer.server.port=3006"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  notification-service:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    container_name: ems-notification
+    environment:
+      <<: *common-env
+      SERVICE_NAME: notification-service
+      SERVICE_PORT: "3007"
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3007/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.notification.rule=PathPrefix(`/api/v1/notifications`)"
+      - "traefik.http.services.notification.loadbalancer.server.port=3007"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  endpoint-service:
+    build:
+      context: ./services/endpoint
+      dockerfile: Dockerfile
+    container_name: ems-endpoint
+    environment:
+      <<: *common-env
+      SERVICE_NAME: endpoint-service
+      SERVICE_PORT: "3008"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3008/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.endpoint.rule=PathPrefix(`/api/v1/endpoints`)"
+      - "traefik.http.services.endpoint.loadbalancer.server.port=3008"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  ws-relay:
+    build:
+      context: ./services/ws-relay
+      dockerfile: Dockerfile
+    container_name: ems-ws-relay
+    environment:
+      <<: *common-env
+      SERVICE_NAME: ws-relay
+      SERVICE_PORT: "3009"
+    depends_on:
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3009/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ws.rule=PathPrefix(`/ws`)"
+      - "traefik.http.services.ws.loadbalancer.server.port=3009"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  FRONTEND
+  # ════════════════════════════════════════════
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ems-frontend
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.frontend.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.frontend.priority=1"  # Lowest priority — catch-all
+      - "traefik.http.services.frontend.loadbalancer.server.port=80"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  SLIVER C2 BACKEND
+  # ════════════════════════════════════════════
+
+  sliver-server:
+    build:
+      context: ./sliver
+      dockerfile: Dockerfile
+    container_name: ems-sliver
+    volumes:
+      - sliver-config:/home/sliver/.sliver
+      - sliver-builds:/home/sliver/builds
+    ports:
+      - "${SLIVER_GRPC_PORT:-31337}:31337"  # gRPC multiplexer (operator access, dev only)
+    networks:
+      ems-net:
+        ipv4_address: 10.100.0.100
+      endpoint-net:
+        ipv4_address: 10.101.0.100
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  MANAGED ENDPOINTS (POC Targets)
+  # ════════════════════════════════════════════
+
+  endpoint-ubuntu-1:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.ubuntu
+    container_name: ems-endpoint-ubuntu-1
+    hostname: corp-ws-001
+    environment:
+      ENDPOINT_ROLE: workstation
+      ENDPOINT_SEGMENT: corp-a
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.1.10
+    restart: unless-stopped
+
+  endpoint-ubuntu-2:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.ubuntu
+    container_name: ems-endpoint-ubuntu-2
+    hostname: corp-ws-002
+    environment:
+      ENDPOINT_ROLE: workstation
+      ENDPOINT_SEGMENT: corp-a
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.1.11
+    restart: unless-stopped
+
+  endpoint-alpine-1:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.alpine
+    container_name: ems-endpoint-alpine-1
+    hostname: dmz-web-001
+    environment:
+      ENDPOINT_ROLE: webserver
+      ENDPOINT_SEGMENT: dmz-b
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.2.10
+    restart: unless-stopped
+
+  endpoint-alpine-2:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.alpine
+    container_name: ems-endpoint-alpine-2
+    hostname: dmz-db-001
+    environment:
+      ENDPOINT_ROLE: database
+      ENDPOINT_SEGMENT: dmz-b
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.2.11
+    restart: unless-stopped
