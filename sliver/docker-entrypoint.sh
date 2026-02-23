@@ -42,7 +42,7 @@ echo "[EMS] Sliver server is running (PID: $SLIVER_PID)"
 if [ ! -f "$OPERATOR_CONFIG" ]; then
     echo "[EMS] Generating EMS operator configuration..."
     mkdir -p "$(dirname "$OPERATOR_CONFIG")"
-    $SLIVER_SERVER operator --name ems-gateway --lhost sliver-server --save "$OPERATOR_CONFIG" 2>/dev/null || true
+    $SLIVER_SERVER operator --name ems-gateway --lhost sliver-server --permissions all --save "$OPERATOR_CONFIG" 2>/dev/null || true
     echo "[EMS] Operator config saved to $OPERATOR_CONFIG"
 fi
 

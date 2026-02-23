@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { apiFetch } from '../lib/api'
-import { Shield, Ticket, LogOut, ChevronRight } from 'lucide-react'
+import { Shield, Ticket, LogOut, ChevronRight, Terminal } from 'lucide-react'
 
 interface TicketSummary {
   status: string
@@ -54,6 +54,10 @@ export default function HomePage() {
           <Link to="/tickets" className="navbar-link">
             <Ticket size={14} />
             TICKETS
+          </Link>
+          <Link to="/c2" className="navbar-link">
+            <Terminal size={14} />
+            C2
           </Link>
         </div>
         <div className="navbar-right">

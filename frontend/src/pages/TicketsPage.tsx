@@ -4,7 +4,7 @@ import { useAuth } from '../hooks/useAuth'
 import { apiFetch } from '../lib/api'
 import {
   Shield, Ticket, LogOut, Plus, Search, ChevronLeft, ChevronRight,
-  X, MessageSquare, ArrowRight,
+  X, MessageSquare, ArrowRight, Terminal,
 } from 'lucide-react'
 
 interface TicketRecord {
@@ -193,6 +193,10 @@ export default function TicketsPage() {
           <Link to="/tickets" className="navbar-link active">
             <Ticket size={14} />
             TICKETS
+          </Link>
+          <Link to="/c2" className="navbar-link">
+            <Terminal size={14} />
+            C2
           </Link>
         </div>
         <div className="navbar-right">

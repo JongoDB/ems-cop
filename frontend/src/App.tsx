@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import LoginPage from './pages/LoginPage'
 import HomePage from './pages/HomePage'
 import TicketsPage from './pages/TicketsPage'
+import C2Page from './pages/C2Page'
 import ProtectedRoute from './components/ProtectedRoute'
 
 const queryClient = new QueryClient()
@@ -26,6 +27,14 @@ function App() {
             element={
               <ProtectedRoute>
                 <TicketsPage />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/c2"
+            element={
+              <ProtectedRoute>
+                <C2Page />
               </ProtectedRoute>
             }
           />
