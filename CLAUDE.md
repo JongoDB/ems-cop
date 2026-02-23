@@ -212,6 +212,8 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - **C2 Provider interface:** `services/c2-gateway/main.go`
 - **Widget catalog:** `frontend/src/components/widgets/WidgetRegistry.ts`
 - **Docker topology:** `docker-compose.yml`
+- **Traefik routing:** `infra/traefik/dynamic.yml` (file-based provider)
+- **Traefik static config:** `infra/traefik/traefik.yml`
 
 ## Testing
 
@@ -228,3 +230,23 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - The `endpoint-net` network is isolated from `ems-net` — only the C2 gateway and Sliver server bridge both. This simulates real network segmentation.
 - ClickHouse audit tables use `MergeTree` engine which is append-only by design. This is intentional for audit integrity. Do NOT use `ReplacingMergeTree` or any engine that allows mutations.
 - The `C2Provider` interface in `c2-gateway/main.go` is the contract. Do not add Sliver-specific types to shared code — keep Sliver details inside `SliverProvider`.
+- Traefik uses a **file-based provider** (not Docker provider) because Docker Desktop for Mac's proxy socket doesn't support the full Docker API. Routes are defined in `infra/traefik/dynamic.yml`.
+- Network subnets: `ems-net` = `10.100.0.0/16`, `endpoint-net` = `10.101.0.0/16`. Endpoints at `10.101.1.x` (ubuntu) and `10.101.2.x` (alpine).
+- All host ports are parameterized via `.env` to avoid conflicts with other Docker projects. Default dev ports: HTTP=18080, PG=15432, CH=18123, Redis=16379, NATS=14222, MinIO API=19090.
+- ClickHouse TTL expressions must use `toDateTime(timestamp)` — raw `DateTime64` is not supported in TTL.
+
+## Current Progress (M1 Complete — 2026-02-22)
+
+M1 milestone is fully validated:
+- All 21 containers start and stay healthy
+- PostgreSQL: 25 tables, 7 users, 6 roles, 4 endpoints seeded
+- ClickHouse: 3 tables + 2 materialized views
+- Traefik: file-based routing to all 10 service paths
+- Sliver: daemon running, gRPC :31337, operator config generated
+- Frontend: React/Vite/Tailwind SPA serves at `/`, login page at `/login`
+
+**Next milestone: M2 — Auth + Tickets** (see roadmap above)
+- Implement auth-service: JWT login/register, RBAC with Casbin, session management
+- Implement ticket-service: CRUD, state machine, search, threading
+- Wire audit events to ClickHouse via NATS
+- All stubs currently return `/health` only — need full API implementations
