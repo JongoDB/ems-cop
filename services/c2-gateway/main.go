@@ -3,6 +3,9 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
@@ -835,7 +838,50 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 		} else if resp.GetResponse() != nil && resp.GetResponse().GetErr() != "" {
 			taskErr = resp.GetResponse().GetErr()
 		} else {
-			output = string(resp.GetData())
+			data := resp.GetData()
+			// Sliver returns file data as nested gzip (outer encoding + inner tar.gz)
+			// Decompress all gzip layers first
+			for i := 0; i < 5 && len(data) > 2 && data[0] == 0x1f && data[1] == 0x8b; i++ {
+				gz, gzErr := gzip.NewReader(bytes.NewReader(data))
+				if gzErr != nil {
+					break
+				}
+				decompressed, readErr := io.ReadAll(gz)
+				gz.Close()
+				if readErr != nil || len(decompressed) == 0 {
+					break
+				}
+				data = decompressed
+			}
+			// Check if result is a tar archive — extract the target file
+			if len(data) > 512 {
+				tr := tar.NewReader(bytes.NewReader(data))
+				baseName := ""
+				if idx := strings.LastIndex(path, "/"); idx >= 0 {
+					baseName = path[idx+1:]
+				}
+				var best []byte
+				for {
+					hdr, tarErr := tr.Next()
+					if tarErr != nil {
+						break
+					}
+					if hdr.Typeflag == tar.TypeDir {
+						continue
+					}
+					fileBytes, _ := io.ReadAll(tr)
+					// Prefer entry matching the requested filename
+					if baseName != "" && strings.HasSuffix(hdr.Name, baseName) {
+						best = fileBytes
+						break
+					}
+					best = fileBytes // fallback: use last regular file
+				}
+				if len(best) > 0 {
+					data = best
+				}
+			}
+			output = string(data)
 		}
 
 	case "upload":

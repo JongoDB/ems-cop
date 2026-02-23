@@ -9,15 +9,14 @@ import TerminalPanel from '../components/TerminalPanel'
 
 interface C2Session {
   id: string
-  name: string
+  implant_id: string
   hostname: string
   os: string
   arch: string
-  remote_address: string
+  remote_addr: string
   transport: string
   is_alive: boolean
   last_message: string
-  first_contact: string
 }
 
 interface CommandResult {
@@ -60,8 +59,8 @@ export default function C2Page() {
 
   const fetchSessions = useCallback(async () => {
     try {
-      const data = await apiFetch<{ data: C2Session[] }>('/c2/sessions')
-      setSessions(data.data || [])
+      const data = await apiFetch<C2Session[]>('/c2/sessions')
+      setSessions(Array.isArray(data) ? data : [])
     } catch {
       setSessions([])
     } finally {
@@ -180,7 +179,7 @@ export default function C2Page() {
                           : 'var(--color-danger)',
                       }}
                     />
-                    <span className="session-hostname">{session.hostname || session.name || session.id.slice(0, 8)}</span>
+                    <span className="session-hostname">{session.hostname || session.implant_id || session.id.slice(0, 8)}</span>
                     {session.is_alive ? (
                       <Wifi size={10} className="session-alive-icon" />
                     ) : (
@@ -190,7 +189,7 @@ export default function C2Page() {
                   <div className="session-info">
                     <span className="session-os">{osLabel(session.os)}</span>
                     <span className="session-sep">&middot;</span>
-                    <span className="session-addr">{session.remote_address || '—'}</span>
+                    <span className="session-addr">{session.remote_addr || '—'}</span>
                   </div>
                   <div className="session-info">
                     <span className="session-last-seen">{timeAgo(session.last_message)}</span>
@@ -216,7 +215,7 @@ export default function C2Page() {
               />
               <span className="c2-banner-host">{selectedSessionData.hostname}</span>
               <span className="c2-banner-detail">
-                {osLabel(selectedSessionData.os)} &middot; {selectedSessionData.arch} &middot; {selectedSessionData.transport} &middot; {selectedSessionData.remote_address}
+                {osLabel(selectedSessionData.os)} &middot; {selectedSessionData.arch} &middot; {selectedSessionData.transport} &middot; {selectedSessionData.remote_addr}
               </span>
             </div>
           )}
