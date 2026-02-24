@@ -10,6 +10,7 @@ import NetworksTab from './pages/operation-tabs/NetworksTab'
 import C2Tab from './pages/operation-tabs/C2Tab'
 import FindingsTab from './pages/operation-tabs/FindingsTab'
 import AuditTab from './pages/operation-tabs/AuditTab'
+import DisplaySchemaEditor from './pages/admin/DisplaySchemaEditor'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppLayout from './components/AppLayout'
 
@@ -58,6 +59,7 @@ function App() {
             <Route path="/tickets" element={<TicketsPage />} />
             <Route path="/c2" element={<C2Page />} />
             <Route path="/dashboards" element={<DashboardsPlaceholder />} />
+            <Route path="/admin/display-schemas" element={<DisplaySchemaEditor />} />
             <Route path="/" element={<Navigate to="/operations" replace />} />
           </Route>
           <Route path="*" element={<Navigate to="/operations" replace />} />

@@ -1,6 +1,6 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard } from 'lucide-react'
+import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings } from 'lucide-react'
 import { APP_VERSION } from '../version'
 
 const NAV_ITEMS = [
@@ -31,6 +31,15 @@ export default function AppLayout() {
               {label}
             </Link>
           ))}
+          {roles.includes('admin') && (
+            <Link
+              to="/admin/display-schemas"
+              className={`navbar-link${location.pathname.startsWith('/admin') ? ' active' : ''}`}
+            >
+              <Settings size={14} />
+              ADMIN
+            </Link>
+          )}
         </div>
         <div className="navbar-right">
           <div className="user-badge">
