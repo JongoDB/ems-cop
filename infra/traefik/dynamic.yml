@@ -145,6 +145,13 @@ http:
       middlewares: [auth-verify, cors-headers]
       priority: 50
 
+    display-schemas:
+      rule: "PathPrefix(`/api/v1/display-schemas`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
     findings:
       rule: "PathPrefix(`/api/v1/findings`)"
       entryPoints: [web]

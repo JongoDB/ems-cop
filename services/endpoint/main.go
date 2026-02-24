@@ -143,6 +143,31 @@ type CreateEdgeRequest struct {
 	Metadata     any     `json:"metadata"`
 }
 
+// Display schema types
+
+type DisplaySchema struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	SchemaType string `json:"schema_type"`
+	Definition any    `json:"definition"`
+	IsDefault  bool   `json:"is_default"`
+	CreatedBy  *string `json:"created_by"`
+	CreatedAt  string `json:"created_at"`
+	UpdatedAt  string `json:"updated_at"`
+}
+
+type CreateDisplaySchemaRequest struct {
+	Name       string `json:"name"`
+	SchemaType string `json:"schema_type"`
+	Definition any    `json:"definition"`
+}
+
+type UpdateDisplaySchemaRequest struct {
+	Name       *string `json:"name"`
+	SchemaType *string `json:"schema_type"`
+	Definition any     `json:"definition"`
+}
+
 // ---------------------------------------------------------------------------
 // Valid enum values
 // ---------------------------------------------------------------------------
@@ -1636,6 +1661,256 @@ func (s *Server) findOrCreateNode(ctx context.Context, networkID, ip, defaultTyp
 }
 
 // ---------------------------------------------------------------------------
+// Handlers — Display Schemas
+// ---------------------------------------------------------------------------
+
+func scanDisplaySchema(scanner interface{ Scan(dest ...any) error }) (DisplaySchema, error) {
+	var ds DisplaySchema
+	var (
+		definition []byte
+		createdBy  *string
+		createdAt  time.Time
+		updatedAt  time.Time
+	)
+	err := scanner.Scan(&ds.ID, &ds.Name, &ds.SchemaType, &definition, &ds.IsDefault, &createdBy, &createdAt, &updatedAt)
+	if err != nil {
+		return ds, err
+	}
+	ds.Definition = parseJSONB(definition)
+	ds.CreatedBy = createdBy
+	ds.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	ds.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return ds, nil
+}
+
+func (s *Server) handleListDisplaySchemas(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(r.Context(),
+		`SELECT id, name, schema_type, definition, is_default, created_by, created_at, updated_at
+		 FROM display_schemas ORDER BY created_at DESC`)
+	if err != nil {
+		s.logger.Error("list display schemas failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to query display schemas")
+		return
+	}
+	defer rows.Close()
+
+	var schemas []DisplaySchema
+	for rows.Next() {
+		ds, err := scanDisplaySchema(rows)
+		if err != nil {
+			s.logger.Error("scan display schema failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to scan display schema")
+			return
+		}
+		schemas = append(schemas, ds)
+	}
+	if schemas == nil {
+		schemas = []DisplaySchema{}
+	}
+
+	writeJSON(w, http.StatusOK, schemas)
+}
+
+func (s *Server) handleGetDisplaySchema(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		`SELECT id, name, schema_type, definition, is_default, created_by, created_at, updated_at
+		 FROM display_schemas WHERE id = $1`, id)
+	ds, err := scanDisplaySchema(row)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Display schema not found")
+			return
+		}
+		s.logger.Error("get display schema failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get display schema")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, ds)
+}
+
+func (s *Server) handleCreateDisplaySchema(w http.ResponseWriter, r *http.Request) {
+	var req CreateDisplaySchemaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "name is required")
+		return
+	}
+	if req.SchemaType == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "schema_type is required")
+		return
+	}
+
+	definitionBytes := marshalJSONB(req.Definition)
+	if definitionBytes == nil {
+		definitionBytes = []byte("{}")
+	}
+
+	userID := getUserID(r)
+
+	var dsID string
+	err := s.db.QueryRow(r.Context(),
+		`INSERT INTO display_schemas (name, schema_type, definition, is_default, created_by)
+		 VALUES ($1, $2, $3, false, $4) RETURNING id`,
+		req.Name, req.SchemaType, definitionBytes, userID).Scan(&dsID)
+	if err != nil {
+		s.logger.Error("create display schema failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create display schema")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		`SELECT id, name, schema_type, definition, is_default, created_by, created_at, updated_at
+		 FROM display_schemas WHERE id = $1`, dsID)
+	ds, err := scanDisplaySchema(row)
+	if err != nil {
+		s.logger.Error("fetch created display schema failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch created display schema")
+		return
+	}
+
+	s.publishEvent("display_schema.created", ds)
+	writeJSON(w, http.StatusCreated, ds)
+}
+
+func (s *Server) handleUpdateDisplaySchema(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	// Check if schema is a default — immutable
+	var isDefault bool
+	err := s.db.QueryRow(r.Context(),
+		`SELECT is_default FROM display_schemas WHERE id = $1`, id).Scan(&isDefault)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Display schema not found")
+			return
+		}
+		s.logger.Error("check display schema default failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to check display schema")
+		return
+	}
+	if isDefault {
+		writeError(w, http.StatusForbidden, "IMMUTABLE", "Default schemas cannot be modified. Clone it instead.")
+		return
+	}
+
+	var req UpdateDisplaySchemaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	setClauses := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Name != nil {
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
+		args = append(args, *req.Name)
+		argIdx++
+	}
+	if req.SchemaType != nil {
+		setClauses = append(setClauses, fmt.Sprintf("schema_type = $%d", argIdx))
+		args = append(args, *req.SchemaType)
+		argIdx++
+	}
+	if req.Definition != nil {
+		defBytes := marshalJSONB(req.Definition)
+		setClauses = append(setClauses, fmt.Sprintf("definition = $%d", argIdx))
+		args = append(args, defBytes)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "No fields to update")
+		return
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+
+	query := fmt.Sprintf("UPDATE display_schemas SET %s WHERE id = $%d",
+		strings.Join(setClauses, ", "), argIdx)
+	args = append(args, id)
+
+	result, err := s.db.Exec(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("update display schema failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to update display schema")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Display schema not found")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		`SELECT id, name, schema_type, definition, is_default, created_by, created_at, updated_at
+		 FROM display_schemas WHERE id = $1`, id)
+	ds, err := scanDisplaySchema(row)
+	if err != nil {
+		s.logger.Error("fetch updated display schema failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch updated display schema")
+		return
+	}
+
+	s.publishEvent("display_schema.updated", ds)
+	writeJSON(w, http.StatusOK, ds)
+}
+
+func (s *Server) handleDeleteDisplaySchema(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	// Check if schema is a default — immutable
+	var isDefault bool
+	err := s.db.QueryRow(r.Context(),
+		`SELECT is_default FROM display_schemas WHERE id = $1`, id).Scan(&isDefault)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Display schema not found")
+			return
+		}
+		s.logger.Error("check display schema default failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to check display schema")
+		return
+	}
+	if isDefault {
+		writeError(w, http.StatusForbidden, "IMMUTABLE", "Default schemas cannot be modified. Clone it instead.")
+		return
+	}
+
+	result, err := s.db.Exec(r.Context(), "DELETE FROM display_schemas WHERE id = $1", id)
+	if err != nil {
+		s.logger.Error("delete display schema failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to delete display schema")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Display schema not found")
+		return
+	}
+
+	s.publishEvent("display_schema.deleted", map[string]string{"id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
 // Server startup
 // ---------------------------------------------------------------------------
 
@@ -1663,6 +1938,13 @@ func (s *Server) Start() {
 	mux.HandleFunc("GET /api/v1/networks/{id}/edges", s.handleListEdges)
 	mux.HandleFunc("POST /api/v1/networks/{id}/edges", s.handleCreateEdge)
 	mux.HandleFunc("DELETE /api/v1/edges/{id}", s.handleDeleteEdge)
+
+	// Display Schemas
+	mux.HandleFunc("GET /api/v1/display-schemas", s.handleListDisplaySchemas)
+	mux.HandleFunc("GET /api/v1/display-schemas/{id}", s.handleGetDisplaySchema)
+	mux.HandleFunc("POST /api/v1/display-schemas", s.handleCreateDisplaySchema)
+	mux.HandleFunc("PATCH /api/v1/display-schemas/{id}", s.handleUpdateDisplaySchema)
+	mux.HandleFunc("DELETE /api/v1/display-schemas/{id}", s.handleDeleteDisplaySchema)
 
 	s.logger.Info("starting endpoint-service", "port", s.port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%s", s.port), mux); err != nil {
