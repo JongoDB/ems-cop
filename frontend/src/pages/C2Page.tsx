@@ -1,12 +1,10 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
-import { Link } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { apiFetch } from '../lib/api'
 import {
-  Shield, Ticket, LogOut, Terminal, RefreshCw, Wifi, WifiOff,
+  Terminal, RefreshCw, Wifi, WifiOff,
   Plus, Lock, Pencil, Trash2, X,
 } from 'lucide-react'
-import { APP_VERSION } from '../version'
 import TerminalPanel from '../components/TerminalPanel'
 
 interface C2Session {
@@ -76,7 +74,7 @@ function osLabel(os: string): string {
 }
 
 export default function C2Page() {
-  const { user, roles, logout } = useAuth()
+  const { user, roles } = useAuth()
   const [sessions, setSessions] = useState<C2Session[]>([])
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<'terminal' | 'commands'>('terminal')
@@ -231,40 +229,8 @@ export default function C2Page() {
   const aliveSessions = sessions.filter((s) => s.is_alive).length
 
   return (
-    <div className="app-shell">
-      {/* Navbar */}
-      <nav className="navbar">
-        <div className="navbar-left">
-          <Shield size={20} strokeWidth={1.5} className="navbar-icon" />
-          <Link to="/" className="navbar-brand">EMS-COP</Link>
-          <span className="navbar-version">{APP_VERSION}</span>
-          <span className="navbar-sep">|</span>
-          <Link to="/tickets" className="navbar-link">
-            <Ticket size={14} />
-            TICKETS
-          </Link>
-          <Link to="/c2" className="navbar-link active">
-            <Terminal size={14} />
-            C2
-          </Link>
-        </div>
-        <div className="navbar-right">
-          <div className="user-badge">
-            <span className="user-name">{user?.display_name}</span>
-            <div className="role-tags">
-              {roles.map((role) => (
-                <span key={role} className="role-tag">{role.toUpperCase()}</span>
-              ))}
-            </div>
-          </div>
-          <button onClick={logout} className="logout-btn" title="Logout">
-            <LogOut size={16} />
-          </button>
-        </div>
-      </nav>
-
-      {/* C2 Layout */}
-      <div className="c2-layout">
+    <>
+    <div className="c2-layout" style={{ margin: '-24px', height: 'calc(100vh - 48px)' }}>
         {/* Left Sidebar — Sessions */}
         <aside className="c2-sidebar">
           <div className="c2-sidebar-header">
@@ -512,6 +478,6 @@ export default function C2Page() {
           </div>
         </div>
       )}
-    </div>
+    </>
   )
 }

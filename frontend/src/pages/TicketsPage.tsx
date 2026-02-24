@@ -1,12 +1,10 @@
 import { useState, useCallback, useEffect } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
-import { useAuth } from '../hooks/useAuth'
+import { useSearchParams } from 'react-router-dom'
 import { apiFetch } from '../lib/api'
 import {
-  Shield, Ticket, LogOut, Plus, Search, ChevronLeft, ChevronRight,
-  X, MessageSquare, ArrowRight, Terminal,
+  Plus, Search, ChevronLeft, ChevronRight,
+  X, MessageSquare, ArrowRight,
 } from 'lucide-react'
-import { APP_VERSION } from '../version'
 
 interface TicketRecord {
   id: string
@@ -74,7 +72,6 @@ const TRANSITIONS: Record<string, { action: string; label: string }[]> = {
 }
 
 export default function TicketsPage() {
-  const { user, roles, logout } = useAuth()
   const [searchParams, setSearchParams] = useSearchParams()
 
   const [tickets, setTickets] = useState<TicketRecord[]>([])
@@ -184,40 +181,8 @@ export default function TicketsPage() {
   const totalPages = Math.max(1, Math.ceil(total / limit))
 
   return (
-    <div className="app-shell">
-      {/* Navbar */}
-      <nav className="navbar">
-        <div className="navbar-left">
-          <Shield size={20} strokeWidth={1.5} className="navbar-icon" />
-          <Link to="/" className="navbar-brand">EMS-COP</Link>
-          <span className="navbar-version">{APP_VERSION}</span>
-          <span className="navbar-sep">|</span>
-          <Link to="/tickets" className="navbar-link active">
-            <Ticket size={14} />
-            TICKETS
-          </Link>
-          <Link to="/c2" className="navbar-link">
-            <Terminal size={14} />
-            C2
-          </Link>
-        </div>
-        <div className="navbar-right">
-          <div className="user-badge">
-            <span className="user-name">{user?.display_name}</span>
-            <div className="role-tags">
-              {roles.map((role) => (
-                <span key={role} className="role-tag">{role.toUpperCase()}</span>
-              ))}
-            </div>
-          </div>
-          <button onClick={logout} className="logout-btn" title="Logout">
-            <LogOut size={16} />
-          </button>
-        </div>
-      </nav>
-
-      <main className="main-content">
-        <div className="tickets-layout">
+    <>
+      <div className="tickets-layout">
           {/* Toolbar */}
           <div className="tickets-toolbar">
             <div className="toolbar-left">
@@ -460,7 +425,6 @@ export default function TicketsPage() {
             ) : null}
           </div>
         )}
-      </main>
-    </div>
+    </>
   )
 }
