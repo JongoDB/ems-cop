@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -158,6 +161,75 @@ var validEdgeTypes = map[string]bool{
 
 var validDiscoveredBy = map[string]bool{
 	"import": true, "scan": true, "c2_activity": true, "manual": true,
+}
+
+// ---------------------------------------------------------------------------
+// Nmap XML structures
+// ---------------------------------------------------------------------------
+
+type NmapRun struct {
+	XMLName xml.Name   `xml:"nmaprun"`
+	Hosts   []NmapHost `xml:"host"`
+}
+
+type NmapHost struct {
+	Status    NmapStatus    `xml:"status"`
+	Addresses []NmapAddress `xml:"address"`
+	Hostnames struct {
+		Names []NmapHostname `xml:"hostname"`
+	} `xml:"hostnames"`
+	Ports struct {
+		Ports []NmapPort `xml:"port"`
+	} `xml:"ports"`
+	OS struct {
+		Matches []NmapOSMatch `xml:"osmatch"`
+	} `xml:"os"`
+}
+
+type NmapStatus struct {
+	State string `xml:"state,attr"`
+}
+
+type NmapAddress struct {
+	Addr     string `xml:"addr,attr"`
+	AddrType string `xml:"addrtype,attr"`
+	Vendor   string `xml:"vendor,attr"`
+}
+
+type NmapHostname struct {
+	Name string `xml:"name,attr"`
+	Type string `xml:"type,attr"`
+}
+
+type NmapPort struct {
+	Protocol string      `xml:"protocol,attr"`
+	PortID   int         `xml:"portid,attr"`
+	State    NmapState   `xml:"state"`
+	Service  NmapService `xml:"service"`
+}
+
+type NmapState struct {
+	State string `xml:"state,attr"`
+}
+
+type NmapService struct {
+	Name    string `xml:"name,attr"`
+	Product string `xml:"product,attr"`
+	Version string `xml:"version,attr"`
+	OSType  string `xml:"ostype,attr"`
+}
+
+type NmapOSMatch struct {
+	Name     string `xml:"name,attr"`
+	Accuracy int    `xml:"accuracy,attr"`
+}
+
+type ImportResult struct {
+	Format       string `json:"format"`
+	NodesCreated int    `json:"nodes_created"`
+	NodesUpdated int    `json:"nodes_updated"`
+	TotalHosts   int    `json:"total_hosts"`
+	HostsSkipped int    `json:"hosts_skipped"`
 }
 
 // ---------------------------------------------------------------------------
@@ -1110,6 +1182,209 @@ func (s *Server) handleGetTopology(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Handlers — Import
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleImportFile(w http.ResponseWriter, r *http.Request) {
+	networkID := r.PathValue("id")
+
+	// Verify network exists
+	var netName string
+	err := s.db.QueryRow(r.Context(), "SELECT name FROM networks WHERE id = $1", networkID).Scan(&netName)
+	if err != nil {
+		writeError(w, 404, "NOT_FOUND", "Network not found")
+		return
+	}
+
+	// Parse multipart form (max 50MB)
+	if err := r.ParseMultipartForm(50 << 20); err != nil {
+		writeError(w, 400, "BAD_REQUEST", "Invalid multipart form: "+err.Error())
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		writeError(w, 400, "BAD_REQUEST", "Missing 'file' field")
+		return
+	}
+	defer file.Close()
+
+	// Read file content
+	data, err := io.ReadAll(file)
+	if err != nil {
+		writeError(w, 500, "INTERNAL", "Failed to read file")
+		return
+	}
+
+	s.logger.Info("import file received", "network", networkID, "filename", header.Filename, "size", len(data))
+
+	// Detect format and parse
+	var result ImportResult
+	peekLen := len(data)
+	if peekLen > 500 {
+		peekLen = 500
+	}
+	if bytes.Contains(data[:peekLen], []byte("<nmaprun")) {
+		result, err = s.importNmapXML(r.Context(), networkID, data)
+	} else {
+		writeError(w, 400, "UNSUPPORTED_FORMAT", "Only Nmap XML format is currently supported. File must contain <nmaprun> root element.")
+		return
+	}
+
+	if err != nil {
+		s.logger.Error("import failed", "error", err)
+		writeError(w, 500, "IMPORT_FAILED", err.Error())
+		return
+	}
+
+	// Update network import_source
+	s.db.Exec(r.Context(), "UPDATE networks SET import_source = 'nmap' WHERE id = $1", networkID)
+
+	// Publish event
+	s.publishEvent("network.imported", map[string]any{
+		"network_id":    networkID,
+		"format":        "nmap",
+		"nodes_created": result.NodesCreated,
+		"nodes_updated": result.NodesUpdated,
+	})
+
+	writeJSON(w, 200, result)
+}
+
+func (s *Server) importNmapXML(ctx context.Context, networkID string, data []byte) (ImportResult, error) {
+	var nmapRun NmapRun
+	if err := xml.Unmarshal(data, &nmapRun); err != nil {
+		return ImportResult{}, fmt.Errorf("parse nmap XML: %w", err)
+	}
+
+	result := ImportResult{Format: "nmap", TotalHosts: len(nmapRun.Hosts)}
+
+	for _, host := range nmapRun.Hosts {
+		// Skip hosts that aren't "up"
+		if host.Status.State != "up" {
+			result.HostsSkipped++
+			continue
+		}
+
+		// Extract IPv4 address
+		var ipAddr, macAddr, vendor string
+		for _, addr := range host.Addresses {
+			switch addr.AddrType {
+			case "ipv4", "ipv6":
+				if ipAddr == "" {
+					ipAddr = addr.Addr
+				}
+			case "mac":
+				macAddr = addr.Addr
+				vendor = addr.Vendor
+			}
+		}
+		if ipAddr == "" {
+			result.HostsSkipped++
+			continue
+		}
+
+		// Extract hostname
+		var hostname string
+		for _, h := range host.Hostnames.Names {
+			hostname = h.Name
+			break
+		}
+
+		// Extract OS (highest accuracy match)
+		var osName, osVersion string
+		bestAccuracy := 0
+		for _, m := range host.OS.Matches {
+			if m.Accuracy > bestAccuracy {
+				osName = m.Name
+				bestAccuracy = m.Accuracy
+			}
+		}
+		// Also check service OS type as fallback
+		if osName == "" {
+			for _, p := range host.Ports.Ports {
+				if p.Service.OSType != "" {
+					osName = p.Service.OSType
+					break
+				}
+			}
+		}
+		if osName == "" {
+			osName = "unknown"
+		}
+
+		// Extract services from open ports
+		var services []map[string]any
+		for _, p := range host.Ports.Ports {
+			if p.State.State != "open" {
+				continue
+			}
+			svc := map[string]any{
+				"port":     p.PortID,
+				"protocol": p.Protocol,
+				"state":    p.State.State,
+				"service":  p.Service.Name,
+			}
+			if p.Service.Product != "" {
+				svc["product"] = p.Service.Product
+			}
+			if p.Service.Version != "" {
+				svc["version"] = p.Service.Version
+			}
+			services = append(services, svc)
+		}
+		if services == nil {
+			services = []map[string]any{}
+		}
+
+		servicesJSON, _ := json.Marshal(services)
+
+		// Determine node_type heuristic
+		nodeType := "host"
+		for _, svc := range services {
+			name, _ := svc["service"].(string)
+			switch name {
+			case "http", "https", "ssh", "mysql", "postgresql", "mssql", "oracle", "mongodb":
+				nodeType = "server"
+			}
+		}
+
+		// Build metadata
+		metadata := map[string]any{}
+		if vendor != "" {
+			metadata["mac_vendor"] = vendor
+		}
+		if bestAccuracy > 0 {
+			metadata["os_accuracy"] = bestAccuracy
+		}
+		metadataJSON, _ := json.Marshal(metadata)
+
+		// Upsert node (ON CONFLICT update)
+		var nodeID string
+		err := s.db.QueryRow(ctx, `
+			INSERT INTO network_nodes (network_id, ip_address, hostname, mac_address, os, os_version, status, node_type, services, metadata)
+			VALUES ($1, $2, $3, NULLIF($4,''), $5, $6, 'alive', $7, $8::jsonb, $9::jsonb)
+			ON CONFLICT (network_id, ip_address) DO UPDATE SET
+				hostname = CASE WHEN EXCLUDED.hostname != '' THEN EXCLUDED.hostname ELSE network_nodes.hostname END,
+				mac_address = COALESCE(EXCLUDED.mac_address, network_nodes.mac_address),
+				os = CASE WHEN EXCLUDED.os != 'unknown' THEN EXCLUDED.os ELSE network_nodes.os END,
+				services = EXCLUDED.services,
+				metadata = network_nodes.metadata || EXCLUDED.metadata,
+				updated_at = NOW()
+			RETURNING id
+		`, networkID, ipAddr, hostname, macAddr, osName, osVersion, nodeType, string(servicesJSON), string(metadataJSON)).Scan(&nodeID)
+
+		if err != nil {
+			s.logger.Error("upsert node failed", "ip", ipAddr, "error", err)
+			continue
+		}
+		result.NodesCreated++
+	}
+
+	return result, nil
+}
+
+// ---------------------------------------------------------------------------
 // Server startup
 // ---------------------------------------------------------------------------
 
@@ -1125,6 +1400,7 @@ func (s *Server) Start() {
 	mux.HandleFunc("PATCH /api/v1/networks/{id}", s.handleUpdateNetwork)
 	mux.HandleFunc("DELETE /api/v1/networks/{id}", s.handleDeleteNetwork)
 	mux.HandleFunc("GET /api/v1/networks/{id}/topology", s.handleGetTopology)
+	mux.HandleFunc("POST /api/v1/networks/{id}/import", s.handleImportFile)
 
 	// Nodes
 	mux.HandleFunc("GET /api/v1/networks/{id}/nodes", s.handleListNodes)
