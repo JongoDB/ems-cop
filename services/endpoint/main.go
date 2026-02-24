@@ -168,6 +168,38 @@ type UpdateDisplaySchemaRequest struct {
 	Definition any     `json:"definition"`
 }
 
+// Import parser types
+
+type ImportParser struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Format      string `json:"format"`
+	Version     int    `json:"version"`
+	Definition  any    `json:"definition"`
+	SampleData  string `json:"sample_data,omitempty"`
+	IsDefault   bool   `json:"is_default"`
+	CreatedBy   string `json:"created_by,omitempty"`
+	CreatedAt   string `json:"created_at"`
+	UpdatedAt   string `json:"updated_at"`
+}
+
+type CreateImportParserRequest struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	Format      string `json:"format"`
+	Definition  any    `json:"definition"`
+	SampleData  string `json:"sample_data,omitempty"`
+}
+
+type UpdateImportParserRequest struct {
+	Name        *string `json:"name"`
+	Description *string `json:"description"`
+	Format      *string `json:"format"`
+	Definition  any     `json:"definition"`
+	SampleData  *string `json:"sample_data"`
+}
+
 // ---------------------------------------------------------------------------
 // Valid enum values
 // ---------------------------------------------------------------------------
@@ -187,6 +219,10 @@ var validEdgeTypes = map[string]bool{
 
 var validDiscoveredBy = map[string]bool{
 	"import": true, "scan": true, "c2_activity": true, "manual": true,
+}
+
+var validImportParserFormats = map[string]bool{
+	"xml": true, "json": true, "csv": true, "tsv": true, "custom": true,
 }
 
 // ---------------------------------------------------------------------------
@@ -1911,6 +1947,326 @@ func (s *Server) handleDeleteDisplaySchema(w http.ResponseWriter, r *http.Reques
 }
 
 // ---------------------------------------------------------------------------
+// Handlers — Import Parsers
+// ---------------------------------------------------------------------------
+
+func scanImportParser(scanner interface{ Scan(dest ...any) error }) (ImportParser, error) {
+	var p ImportParser
+	var (
+		definition []byte
+		sampleData *string
+		createdBy  *string
+		createdAt  time.Time
+		updatedAt  time.Time
+	)
+	err := scanner.Scan(&p.ID, &p.Name, &p.Description, &p.Format, &p.Version,
+		&definition, &sampleData, &p.IsDefault, &createdBy, &createdAt, &updatedAt)
+	if err != nil {
+		return p, err
+	}
+	p.Definition = parseJSONB(definition)
+	if sampleData != nil {
+		p.SampleData = *sampleData
+	}
+	if createdBy != nil {
+		p.CreatedBy = *createdBy
+	}
+	p.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	p.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return p, nil
+}
+
+const importParserSelectCols = `id, name, description, format, version, definition, sample_data, is_default, created_by, created_at, updated_at`
+
+func (s *Server) handleListImportParsers(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(r.Context(),
+		fmt.Sprintf(`SELECT %s FROM import_parsers ORDER BY created_at DESC`, importParserSelectCols))
+	if err != nil {
+		s.logger.Error("list import parsers failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to query import parsers")
+		return
+	}
+	defer rows.Close()
+
+	var parsers []ImportParser
+	for rows.Next() {
+		p, err := scanImportParser(rows)
+		if err != nil {
+			s.logger.Error("scan import parser failed", "error", err)
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to scan import parser")
+			return
+		}
+		parsers = append(parsers, p)
+	}
+	if parsers == nil {
+		parsers = []ImportParser{}
+	}
+
+	writeJSON(w, http.StatusOK, parsers)
+}
+
+func (s *Server) handleGetImportParser(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT %s FROM import_parsers WHERE id = $1`, importParserSelectCols), id)
+	p, err := scanImportParser(row)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Import parser not found")
+			return
+		}
+		s.logger.Error("get import parser failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get import parser")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) handleCreateImportParser(w http.ResponseWriter, r *http.Request) {
+	var req CreateImportParserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "name is required")
+		return
+	}
+	if req.Format == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "format is required")
+		return
+	}
+	if !validImportParserFormats[req.Format] {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"Invalid format. Must be one of: xml, json, csv, tsv, custom")
+		return
+	}
+
+	definitionBytes := marshalJSONB(req.Definition)
+	if definitionBytes == nil {
+		definitionBytes = []byte("{}")
+	}
+
+	userID := getUserID(r)
+
+	var sampleData *string
+	if req.SampleData != "" {
+		sampleData = &req.SampleData
+	}
+
+	var parserID string
+	err := s.db.QueryRow(r.Context(),
+		`INSERT INTO import_parsers (name, description, format, definition, sample_data, is_default, created_by)
+		 VALUES ($1, $2, $3, $4, $5, false, $6) RETURNING id`,
+		req.Name, req.Description, req.Format, definitionBytes, sampleData, userID).Scan(&parserID)
+	if err != nil {
+		s.logger.Error("create import parser failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create import parser")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT %s FROM import_parsers WHERE id = $1`, importParserSelectCols), parserID)
+	p, err := scanImportParser(row)
+	if err != nil {
+		s.logger.Error("fetch created import parser failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch created import parser")
+		return
+	}
+
+	s.publishEvent("import_parser.created", p)
+	writeJSON(w, http.StatusCreated, p)
+}
+
+func (s *Server) handleUpdateImportParser(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	// Check if parser is a default — immutable
+	var isDefault bool
+	err := s.db.QueryRow(r.Context(),
+		`SELECT is_default FROM import_parsers WHERE id = $1`, id).Scan(&isDefault)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Import parser not found")
+			return
+		}
+		s.logger.Error("check import parser default failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to check import parser")
+		return
+	}
+	if isDefault {
+		writeError(w, http.StatusForbidden, "IMMUTABLE", "Default parsers cannot be modified. Clone it instead.")
+		return
+	}
+
+	var req UpdateImportParserRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	setClauses := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Name != nil {
+		setClauses = append(setClauses, fmt.Sprintf("name = $%d", argIdx))
+		args = append(args, *req.Name)
+		argIdx++
+	}
+	if req.Description != nil {
+		setClauses = append(setClauses, fmt.Sprintf("description = $%d", argIdx))
+		args = append(args, *req.Description)
+		argIdx++
+	}
+	if req.Format != nil {
+		if !validImportParserFormats[*req.Format] {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+				"Invalid format. Must be one of: xml, json, csv, tsv, custom")
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("format = $%d", argIdx))
+		args = append(args, *req.Format)
+		argIdx++
+	}
+	if req.Definition != nil {
+		defBytes := marshalJSONB(req.Definition)
+		setClauses = append(setClauses, fmt.Sprintf("definition = $%d", argIdx))
+		args = append(args, defBytes)
+		argIdx++
+	}
+	if req.SampleData != nil {
+		setClauses = append(setClauses, fmt.Sprintf("sample_data = $%d", argIdx))
+		args = append(args, *req.SampleData)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "No fields to update")
+		return
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+
+	query := fmt.Sprintf("UPDATE import_parsers SET %s WHERE id = $%d",
+		strings.Join(setClauses, ", "), argIdx)
+	args = append(args, id)
+
+	result, err := s.db.Exec(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("update import parser failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to update import parser")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Import parser not found")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf(`SELECT %s FROM import_parsers WHERE id = $1`, importParserSelectCols), id)
+	p, err := scanImportParser(row)
+	if err != nil {
+		s.logger.Error("fetch updated import parser failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch updated import parser")
+		return
+	}
+
+	s.publishEvent("import_parser.updated", p)
+	writeJSON(w, http.StatusOK, p)
+}
+
+func (s *Server) handleDeleteImportParser(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	// Check if parser is a default — immutable
+	var isDefault bool
+	err := s.db.QueryRow(r.Context(),
+		`SELECT is_default FROM import_parsers WHERE id = $1`, id).Scan(&isDefault)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Import parser not found")
+			return
+		}
+		s.logger.Error("check import parser default failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to check import parser")
+		return
+	}
+	if isDefault {
+		writeError(w, http.StatusForbidden, "IMMUTABLE", "Default parsers cannot be deleted.")
+		return
+	}
+
+	result, err := s.db.Exec(r.Context(), "DELETE FROM import_parsers WHERE id = $1", id)
+	if err != nil {
+		s.logger.Error("delete import parser failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to delete import parser")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Import parser not found")
+		return
+	}
+
+	s.publishEvent("import_parser.deleted", map[string]string{"id": id})
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleTestImportParser(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	// Verify parser exists
+	var parserName string
+	err := s.db.QueryRow(r.Context(),
+		`SELECT name FROM import_parsers WHERE id = $1`, id).Scan(&parserName)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Import parser not found")
+			return
+		}
+		s.logger.Error("check import parser for test failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to check import parser")
+		return
+	}
+
+	// Parse multipart form (max 10MB for test files)
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid multipart form: "+err.Error())
+		return
+	}
+
+	_, _, err = r.FormFile("file")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Missing 'file' field")
+		return
+	}
+
+	// Stub response — actual parsing logic to be implemented later
+	writeJSON(w, http.StatusOK, map[string]string{
+		"preview":   "Test endpoint placeholder",
+		"parser_id": id,
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Server startup
 // ---------------------------------------------------------------------------
 
@@ -1945,6 +2301,14 @@ func (s *Server) Start() {
 	mux.HandleFunc("POST /api/v1/display-schemas", s.handleCreateDisplaySchema)
 	mux.HandleFunc("PATCH /api/v1/display-schemas/{id}", s.handleUpdateDisplaySchema)
 	mux.HandleFunc("DELETE /api/v1/display-schemas/{id}", s.handleDeleteDisplaySchema)
+
+	// Import Parsers
+	mux.HandleFunc("GET /api/v1/import-parsers", s.handleListImportParsers)
+	mux.HandleFunc("GET /api/v1/import-parsers/{id}", s.handleGetImportParser)
+	mux.HandleFunc("POST /api/v1/import-parsers", s.handleCreateImportParser)
+	mux.HandleFunc("PATCH /api/v1/import-parsers/{id}", s.handleUpdateImportParser)
+	mux.HandleFunc("DELETE /api/v1/import-parsers/{id}", s.handleDeleteImportParser)
+	mux.HandleFunc("POST /api/v1/import-parsers/{id}/test", s.handleTestImportParser)
 
 	s.logger.Info("starting endpoint-service", "port", s.port)
 	if err := http.ListenAndServe(fmt.Sprintf(":%s", s.port), mux); err != nil {

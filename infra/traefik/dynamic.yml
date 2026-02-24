@@ -152,6 +152,13 @@ http:
       middlewares: [auth-verify, cors-headers]
       priority: 50
 
+    import-parsers:
+      rule: "PathPrefix(`/api/v1/import-parsers`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
     findings:
       rule: "PathPrefix(`/api/v1/findings`)"
       entryPoints: [web]
