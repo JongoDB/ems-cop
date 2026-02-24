@@ -415,10 +415,14 @@ func (s *Server) signAccessToken(userID string, roles []string, sessionID string
 
 func (s *Server) extractClaims(r *http.Request) (*Claims, error) {
 	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
+	var tokenStr string
+	if strings.HasPrefix(auth, "Bearer ") {
+		tokenStr = strings.TrimPrefix(auth, "Bearer ")
+	} else if t := r.URL.Query().Get("token"); t != "" {
+		tokenStr = t
+	} else {
 		return nil, fmt.Errorf("missing bearer token")
 	}
-	tokenStr := strings.TrimPrefix(auth, "Bearer ")
 
 	token, err := jwt.ParseWithClaims(tokenStr, &Claims{}, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {

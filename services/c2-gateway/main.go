@@ -22,7 +22,8 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/bishopfox/sliver/protobuf/clientpb" // required for gRPC type registration
+	"github.com/bishopfox/sliver/protobuf/clientpb"
+	jwtv5 "github.com/golang-jwt/jwt/v5"
 	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/bishopfox/sliver/protobuf/sliverpb"
@@ -290,6 +291,23 @@ type AuditEvent struct {
 	Timestamp    string `json:"timestamp"`
 }
 
+func (s *C2GatewayServer) validateJWT(tokenStr string) (string, error) {
+	token, err := jwtv5.Parse(tokenStr, func(t *jwtv5.Token) (any, error) {
+		if _, ok := t.Method.(*jwtv5.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
+		}
+		return s.jwtSecret, nil
+	})
+	if err != nil {
+		return "", fmt.Errorf("parse token: %w", err)
+	}
+	sub, err := token.Claims.GetSubject()
+	if err != nil || sub == "" {
+		return "", fmt.Errorf("missing subject claim")
+	}
+	return sub, nil
+}
+
 func (s *C2GatewayServer) publishAudit(eventType string, r *http.Request, resourceID, action, details string) {
 	if s.nc == nil {
 		return
@@ -316,14 +334,15 @@ func (s *C2GatewayServer) publishAudit(eventType string, r *http.Request, resour
 // ════════════════════════════════════════════
 
 type C2GatewayServer struct {
-	provider C2Provider
-	port     string
-	nc       *nats.Conn
-	logger   *slog.Logger
+	provider  C2Provider
+	port      string
+	nc        *nats.Conn
+	logger    *slog.Logger
+	jwtSecret []byte
 }
 
-func NewC2GatewayServer(provider C2Provider, port string, nc *nats.Conn, logger *slog.Logger) *C2GatewayServer {
-	return &C2GatewayServer{provider: provider, port: port, nc: nc, logger: logger}
+func NewC2GatewayServer(provider C2Provider, port string, nc *nats.Conn, logger *slog.Logger, jwtSecret string) *C2GatewayServer {
+	return &C2GatewayServer{provider: provider, port: port, nc: nc, logger: logger, jwtSecret: []byte(jwtSecret)}
 }
 
 func (s *C2GatewayServer) Start() error {
@@ -334,6 +353,7 @@ func (s *C2GatewayServer) Start() error {
 	mux.HandleFunc("GET /api/v1/c2/implants", s.handleListImplants)
 	mux.HandleFunc("GET /api/v1/c2/listeners", s.handleListListeners)
 	mux.HandleFunc("POST /api/v1/c2/listeners", s.handleCreateListener)
+	mux.HandleFunc("POST /api/v1/c2/implants/generate", s.handleGenerateImplant)
 
 	// Task execution (goes through approval check)
 	mux.HandleFunc("POST /api/v1/c2/sessions/{sessionID}/execute", s.handleExecuteTask)
@@ -399,6 +419,26 @@ func (s *C2GatewayServer) handleCreateListener(w http.ResponseWriter, r *http.Re
 	json.NewEncoder(w).Encode(listener)
 }
 
+func (s *C2GatewayServer) handleGenerateImplant(w http.ResponseWriter, r *http.Request) {
+	var spec ImplantSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	binary, err := s.provider.GenerateImplant(r.Context(), spec)
+	if err != nil {
+		s.logger.Error("generate implant failed", "error", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.publishAudit("c2.implant_generated", r, spec.Transport, "generate_implant",
+		fmt.Sprintf("os=%s arch=%s transport=%s format=%s", spec.OS, spec.Arch, spec.Transport, spec.Format))
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", binary.Name))
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(binary.Data)))
+	w.Write(binary.Data)
+}
+
 func (s *C2GatewayServer) handleExecuteTask(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("sessionID")
 
@@ -436,11 +476,21 @@ var upgrader = websocket.Upgrader{
 func (s *C2GatewayServer) handleShellSession(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.PathValue("sessionID")
 
-	// Auth check: ForwardAuth sets X-User-ID on the HTTP upgrade request
+	// Auth check: ForwardAuth sets X-User-ID, or validate JWT from query param (WebSocket)
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		sub, err := s.validateJWT(tokenStr)
+		if err != nil {
+			s.logger.Error("shell auth failed", "error", err)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		userID = sub
 	}
 
 	// Upgrade to WebSocket
@@ -679,7 +729,61 @@ func (p *SliverProvider) ListImplants(ctx context.Context, filter *ImplantFilter
 }
 
 func (p *SliverProvider) GenerateImplant(ctx context.Context, spec ImplantSpec) (*ImplantBinary, error) {
-	return nil, fmt.Errorf("not yet implemented")
+	if !p.IsConnected() {
+		return nil, fmt.Errorf("not connected to sliver")
+	}
+
+	goos := spec.OS
+	if goos == "" {
+		goos = "linux"
+	}
+	goarch := spec.Arch
+	if goarch == "" {
+		goarch = "amd64"
+	}
+
+	c2URL := spec.C2URL
+	if c2URL == "" {
+		return nil, fmt.Errorf("c2_url is required (e.g. mtls://sliver-server:8888)")
+	}
+
+	var format clientpb.OutputFormat
+	switch strings.ToLower(spec.Format) {
+	case "shared", "shared_lib":
+		format = clientpb.OutputFormat_SHARED_LIB
+	case "shellcode":
+		format = clientpb.OutputFormat_SHELLCODE
+	case "service":
+		format = clientpb.OutputFormat_SERVICE
+	default:
+		format = clientpb.OutputFormat_EXECUTABLE
+	}
+
+	config := &clientpb.ImplantConfig{
+		GOOS:             goos,
+		GOARCH:           goarch,
+		Format:           format,
+		ObfuscateSymbols: !spec.SkipSymbols,
+		C2: []*clientpb.ImplantC2{
+			{Priority: 0, URL: c2URL},
+		},
+	}
+
+	resp, err := p.rpc.Generate(ctx, &clientpb.GenerateReq{Config: config})
+	if err != nil {
+		return nil, fmt.Errorf("generate implant: %w", err)
+	}
+
+	file := resp.GetFile()
+	if file == nil {
+		return nil, fmt.Errorf("generate returned empty file")
+	}
+
+	return &ImplantBinary{
+		Name: file.GetName(),
+		Data: file.GetData(),
+		Size: int64(len(file.GetData())),
+	}, nil
 }
 
 // ── ListListeners ───────────────────────────
@@ -711,11 +815,98 @@ func (p *SliverProvider) ListListeners(ctx context.Context) ([]Listener, error) 
 }
 
 func (p *SliverProvider) CreateListener(ctx context.Context, spec ListenerSpec) (*Listener, error) {
-	return nil, fmt.Errorf("not yet implemented")
+	if !p.IsConnected() {
+		return nil, fmt.Errorf("not connected to sliver")
+	}
+
+	host := spec.Host
+	if host == "" {
+		host = "0.0.0.0"
+	}
+
+	switch strings.ToLower(spec.Protocol) {
+	case "mtls":
+		port := spec.Port
+		if port == 0 {
+			port = 8888
+		}
+		resp, err := p.rpc.StartMTLSListener(ctx, &clientpb.MTLSListenerReq{
+			Host:       host,
+			Port:       uint32(port),
+			Persistent: false,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("start mtls listener: %w", err)
+		}
+		return &Listener{
+			ID:        fmt.Sprintf("%d", resp.GetJobID()),
+			Protocol:  "mtls",
+			Host:      host,
+			Port:      port,
+			IsRunning: true,
+		}, nil
+
+	case "http":
+		port := spec.Port
+		if port == 0 {
+			port = 80
+		}
+		resp, err := p.rpc.StartHTTPListener(ctx, &clientpb.HTTPListenerReq{
+			Host: host,
+			Port: uint32(port),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("start http listener: %w", err)
+		}
+		return &Listener{
+			ID:        fmt.Sprintf("%d", resp.GetJobID()),
+			Protocol:  "http",
+			Host:      host,
+			Port:      port,
+			IsRunning: true,
+		}, nil
+
+	case "https":
+		port := spec.Port
+		if port == 0 {
+			port = 443
+		}
+		resp, err := p.rpc.StartHTTPSListener(ctx, &clientpb.HTTPListenerReq{
+			Host: host,
+			Port: uint32(port),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("start https listener: %w", err)
+		}
+		return &Listener{
+			ID:        fmt.Sprintf("%d", resp.GetJobID()),
+			Protocol:  "https",
+			Host:      host,
+			Port:      port,
+			IsRunning: true,
+		}, nil
+
+	default:
+		return nil, fmt.Errorf("unsupported listener protocol: %s", spec.Protocol)
+	}
 }
 
 func (p *SliverProvider) DeleteListener(ctx context.Context, listenerID string) error {
-	return fmt.Errorf("not yet implemented")
+	if !p.IsConnected() {
+		return fmt.Errorf("not connected to sliver")
+	}
+	var id uint32
+	if _, err := fmt.Sscanf(listenerID, "%d", &id); err != nil {
+		return fmt.Errorf("invalid listener ID: %w", err)
+	}
+	resp, err := p.rpc.KillJob(ctx, &clientpb.KillJobReq{ID: id})
+	if err != nil {
+		return fmt.Errorf("kill job: %w", err)
+	}
+	if !resp.GetSuccess() {
+		return fmt.Errorf("failed to kill job %d", id)
+	}
+	return nil
 }
 
 // ── ExecuteTask ─────────────────────────────
@@ -900,13 +1091,11 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 					baseName = path[idx+1:]
 				}
 				var best []byte
-				var entries []string
 				for {
 					hdr, tarErr := tr.Next()
 					if tarErr != nil {
 						break
 					}
-					entries = append(entries, fmt.Sprintf("%s (type=%d, size=%d)", hdr.Name, hdr.Typeflag, hdr.Size))
 					if hdr.Typeflag == tar.TypeDir {
 						continue
 					}
@@ -918,7 +1107,6 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 					}
 					best = fileBytes // fallback: use last regular file
 				}
-				slog.Info("cat tar entries", "requested", path, "baseName", baseName, "entries", entries)
 				if len(best) > 0 {
 					data = best
 				}
@@ -1064,16 +1252,18 @@ func formatNetstatOutput(resp *sliverpb.Netstat) string {
 
 // SliverSessionStream wraps a Sliver tunnel for the SessionStream interface
 type SliverSessionStream struct {
-	tunnelID uint64
-	rpc      rpcpb.SliverRPCClient
-	stream   rpcpb.SliverRPC_TunnelDataClient
-	cancel   context.CancelFunc
+	tunnelID  uint64
+	sessionID string
+	rpc       rpcpb.SliverRPCClient
+	stream    rpcpb.SliverRPC_TunnelDataClient
+	cancel    context.CancelFunc
 }
 
 func (s *SliverSessionStream) Send(input string) error {
 	return s.stream.Send(&sliverpb.TunnelData{
-		TunnelID: s.tunnelID,
-		Data:     []byte(input),
+		TunnelID:  s.tunnelID,
+		SessionID: s.sessionID,
+		Data:      []byte(input),
 	})
 }
 
@@ -1095,31 +1285,56 @@ func (p *SliverProvider) OpenSession(ctx context.Context, sessionID string) (Ses
 		return nil, fmt.Errorf("not connected to sliver")
 	}
 
-	req := &commonpb.Request{SessionID: sessionID, Timeout: 0}
-	shell, err := p.rpc.Shell(ctx, &sliverpb.ShellReq{
-		Path:      "/bin/sh",
-		EnablePTY: true,
-		Request:   req,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("open shell: %w", err)
-	}
-	if shell.GetResponse() != nil && shell.GetResponse().GetErr() != "" {
-		return nil, fmt.Errorf("shell error: %s", shell.GetResponse().GetErr())
-	}
-
+	// Create a bidirectional tunnel data stream first
 	streamCtx, cancel := context.WithCancel(context.Background())
 	stream, err := p.rpc.TunnelData(streamCtx)
 	if err != nil {
 		cancel()
-		return nil, fmt.Errorf("open tunnel: %w", err)
+		return nil, fmt.Errorf("open tunnel stream: %w", err)
+	}
+
+	// Pre-allocate a tunnel on the server
+	tunnel, err := p.rpc.CreateTunnel(ctx, &sliverpb.Tunnel{
+		SessionID: sessionID,
+	})
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("create tunnel: %w", err)
+	}
+	tunnelID := tunnel.GetTunnelID()
+
+	// Register this stream with the tunnel
+	if err := stream.Send(&sliverpb.TunnelData{
+		TunnelID:  tunnelID,
+		SessionID: sessionID,
+	}); err != nil {
+		cancel()
+		return nil, fmt.Errorf("register tunnel: %w", err)
+	}
+
+	// Now open the shell using the pre-allocated tunnel
+	req := &commonpb.Request{SessionID: sessionID, Timeout: 0}
+	shell, err := p.rpc.Shell(ctx, &sliverpb.ShellReq{
+		Path:      "/bin/sh",
+		EnablePTY: true,
+		TunnelID:  tunnelID,
+		Request:   req,
+	})
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("open shell: %w", err)
+	}
+	if shell.GetResponse() != nil && shell.GetResponse().GetErr() != "" {
+		cancel()
+		return nil, fmt.Errorf("shell error: %s", shell.GetResponse().GetErr())
 	}
 
 	return &SliverSessionStream{
-		tunnelID: shell.GetTunnelID(),
-		rpc:      p.rpc,
-		stream:   stream,
-		cancel:   cancel,
+		tunnelID:  tunnelID,
+		sessionID: sessionID,
+		rpc:       p.rpc,
+		stream:    stream,
+		cancel:    cancel,
 	}, nil
 }
 
@@ -1194,7 +1409,11 @@ func main() {
 	}
 
 	// Start HTTP server
-	server := NewC2GatewayServer(provider, port, nc, logger)
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = "ems_jwt_secret_change_me_in_production"
+	}
+	server := NewC2GatewayServer(provider, port, nc, logger, jwtSecret)
 
 	// Graceful shutdown
 	go func() {

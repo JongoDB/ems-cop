@@ -174,6 +174,7 @@ ems-cop/
 - `operation.*` — created, status_changed, phase_changed
 - `c2.*` — command_executed, session_opened, session_closed, implant_checkin
 - `endpoint.*` — registered, status_changed, health_updated
+- `command_preset.*` — created, updated, deleted
 - `audit.*` — catch-all for audit service consumption
 
 ### Database Conventions
@@ -197,11 +198,11 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 
 ## Milestone Roadmap
 
-**M1 — Skeleton (Current target):** All containers start, health checks pass, Traefik routes, frontend loads login page, DB schemas applied, seed data loaded.
+**M1 — Skeleton (Complete):** All containers start, health checks pass, Traefik routes, frontend loads login page, DB schemas applied, seed data loaded.
 
-**M2 — Auth + Tickets:** Users can register/login (JWT), RBAC enforced at gateway, ticket CRUD, audit events flowing to ClickHouse.
+**M2 — Auth + Tickets (Complete):** Users can login (JWT), RBAC enforced at gateway via ForwardAuth, ticket CRUD with 10-state machine, audit events flowing to ClickHouse.
 
-**M3 — Sliver Connected:** C2 Gateway connects to Sliver gRPC. List implants, open shell via xterm.js widget. Commands logged.
+**M3 — Sliver Connected (Complete):** C2 Gateway connects to Sliver gRPC. List sessions, execute commands via C2 page. Configurable command presets. Commands logged to audit.
 
 **M4 — Dashboards:** Drag/drop dashboard with tabs, core widgets (terminal, topology, tickets, audit log, endpoints, notes), echelon templates.
 
@@ -221,6 +222,10 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - **Docker topology:** `docker-compose.yml`
 - **Traefik routing:** `infra/traefik/dynamic.yml` (file-based provider)
 - **Traefik static config:** `infra/traefik/traefik.yml`
+- **Command presets migration:** `infra/db/postgres/migrations/003_command_presets.sql`
+- **Auth service:** `services/auth/main.go`
+- **Ticket + commands API:** `services/ticket/src/index.js`
+- **Audit service:** `services/audit/main.go`
 
 ## Testing
 
@@ -242,7 +247,7 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - All host ports are parameterized via `.env` to avoid conflicts with other Docker projects. Default dev ports: HTTP=18080, PG=15432, CH=18123, Redis=16379, NATS=14222, MinIO API=19090.
 - ClickHouse TTL expressions must use `toDateTime(timestamp)` — raw `DateTime64` is not supported in TTL.
 
-## Current Progress (M2 Complete — 2026-02-23)
+## Current Progress (M3 Complete — 2026-02-23)
 
 M1 milestone fully validated (2026-02-22):
 - All 21 containers start and stay healthy
@@ -257,9 +262,22 @@ M2 milestone fully validated (2026-02-23):
 - Audit pipeline: NATS events → audit-service → ClickHouse with hash chain
 - Frontend: LoginPage, HomePage, TicketsPage with full auth flows
 - Traefik ForwardAuth: unauthenticated API calls return 401, public routes stay open
-- E2E tested with Playwright: login, ticket CRUD, transitions, comments, logout
 
-**Next milestone: M3 — Sliver Connected** (see roadmap above)
-- Connect C2 Gateway to Sliver gRPC
-- List implants/sessions, open shell via xterm.js widget
-- Commands logged to audit trail
+M3 milestone fully validated (2026-02-23):
+- C2 Gateway: Sliver gRPC connected, SliverProvider implements full C2Provider interface
+- Sessions: list sessions, session details, OS/arch/transport metadata
+- Commands: execute via Sliver RPC (ls, cat, ps, whoami, pwd, ifconfig, netstat, upload, download, shell)
+- Command string parsing: compound commands like `cat /etc/hostname` auto-split into command + args
+- Generic shell fallback: unknown commands execute via `/bin/sh -c` on implant
+- Command timeout: 120s (for HTTP transport polling latency)
+- Configurable command presets: PostgreSQL-backed, OS-aware (36 seed commands across linux/windows/macos)
+- Two-tier presets: admin global presets + user personal presets with CRUD API
+- Frontend C2 page: session list, command output, dynamic preset grid, add/edit/delete presets
+- Audit: all C2 commands and command_preset changes flow to ClickHouse via NATS
+- HTTP implant auto-deployed to ubuntu-workstation-1, verified end-to-end
+
+**Known M3 limitations:**
+- HTTP/HTTPS transport does not support persistent interactive shell (WebSocket terminal). Requires MTLS/WireGuard implant.
+- Implant check-in interval means command responses have polling latency (~5-10s)
+
+**Next milestone: M4 — Dashboards** (see roadmap above)

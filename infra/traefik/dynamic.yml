@@ -43,6 +43,14 @@ http:
       middlewares: [cors-headers]
       priority: 100
 
+    # C2 shell WebSocket — auth handled by c2-gateway via query param token
+    c2-shell:
+      rule: "PathRegexp(`/api/v1/c2/sessions/.+/shell`)"
+      entryPoints: [web]
+      service: c2
+      middlewares: [cors-headers]
+      priority: 90
+
     # Frontend SPA — public
     frontend:
       rule: "PathPrefix(`/`)"
