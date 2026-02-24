@@ -731,6 +731,32 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 	var output string
 	var taskErr string
 
+	// Parse compound command strings like "cat /etc/hostname" into command + args
+	if task.Arguments == nil {
+		task.Arguments = make(map[string]interface{})
+	}
+	parts := strings.Fields(task.Command)
+	if len(parts) > 1 {
+		task.Command = parts[0]
+		// Auto-populate args from the command string for known commands
+		switch parts[0] {
+		case "cat":
+			if _, ok := task.Arguments["path"]; !ok {
+				task.Arguments["path"] = strings.Join(parts[1:], " ")
+			}
+		case "ls", "cd":
+			if _, ok := task.Arguments["path"]; !ok {
+				task.Arguments["path"] = strings.Join(parts[1:], " ")
+			}
+		default:
+			// For unknown commands or commands with args, rejoin as the full command
+			// so the execute handler can run it as a shell command
+			if _, ok := task.Arguments["raw"]; !ok {
+				task.Arguments["raw"] = strings.Join(parts, " ")
+			}
+		}
+	}
+
 	switch task.Command {
 	case "ls":
 		path, _ := task.Arguments["path"].(string)
@@ -938,7 +964,37 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 		}
 
 	default:
-		taskErr = fmt.Sprintf("unsupported command: %s", task.Command)
+		// Generic command execution — run via shell
+		fullCmd := task.Command
+		if raw, ok := task.Arguments["raw"].(string); ok {
+			fullCmd = raw
+		}
+		resp, err := p.rpc.Execute(ctx, &sliverpb.ExecuteReq{
+			Path:    "/bin/sh",
+			Args:    []string{"-c", fullCmd},
+			Output:  true,
+			Request: req,
+		})
+		if err != nil {
+			taskErr = err.Error()
+		} else if resp.GetResponse() != nil && resp.GetResponse().GetErr() != "" {
+			taskErr = resp.GetResponse().GetErr()
+		} else {
+			stdout := string(resp.GetStdout())
+			stderr := string(resp.GetStderr())
+			if stdout != "" {
+				output = stdout
+			}
+			if stderr != "" {
+				if output != "" {
+					output += "\n"
+				}
+				output += stderr
+			}
+			if output == "" {
+				output = "(no output)"
+			}
+		}
 	}
 
 	return &TaskResult{

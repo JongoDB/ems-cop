@@ -114,7 +114,7 @@ func main() {
 	srv.recoverLastHash(ctx)
 
 	// Subscribe to audit-relevant NATS subjects
-	subjects := []string{"auth.>", "ticket.>", "workflow.>", "operation.>", "c2.>", "endpoint.>"}
+	subjects := []string{"auth.>", "ticket.>", "workflow.>", "operation.>", "c2.>", "endpoint.>", "command_preset.>"}
 	for _, subj := range subjects {
 		_, err := nc.Subscribe(subj, func(msg *nats.Msg) {
 			srv.handleEvent(msg)

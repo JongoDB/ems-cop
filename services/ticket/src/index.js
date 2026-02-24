@@ -51,7 +51,7 @@ function publishEvent(eventType, actorId, actorRoles, resourceId, details) {
     actor_username: '',
     actor_ip: '',
     session_id: '',
-    resource_type: 'ticket',
+    resource_type: eventType.startsWith('command_preset') ? 'command_preset' : 'ticket',
     resource_id: resourceId || '',
     action: eventType.split('.')[1] || eventType,
     details: JSON.stringify(details || {}),
@@ -329,6 +329,136 @@ app.get('/api/v1/tickets/:id/comments', async (req, res) => {
   } catch (err) {
     console.error('[ticket] list comments error:', err.message);
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list comments');
+  }
+});
+
+// LIST COMMAND PRESETS
+app.get('/api/v1/commands/presets', async (req, res) => {
+  const { userId } = getUserContext(req);
+  if (!userId) return sendError(res, 401, 'UNAUTHORIZED', 'Missing user context');
+
+  const validOs = ['linux', 'windows', 'macos'];
+  const os = validOs.includes(req.query.os) ? req.query.os : 'linux';
+
+  try {
+    const result = await pool.query(
+      `SELECT * FROM command_presets WHERE os = $1 AND (scope = 'global' OR (scope = 'user' AND created_by = $2)) ORDER BY sort_order ASC, name ASC`,
+      [os, userId]
+    );
+    res.json({ data: result.rows });
+  } catch (err) {
+    console.error('[ticket] list command presets error:', err.message);
+    sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list command presets');
+  }
+});
+
+// CREATE COMMAND PRESET
+app.post('/api/v1/commands/presets', async (req, res) => {
+  const { userId, roles } = getUserContext(req);
+  if (!userId) return sendError(res, 401, 'UNAUTHORIZED', 'Missing user context');
+
+  const { name, command, description, os, scope: rawScope } = req.body;
+  const validOs = ['linux', 'windows', 'macos'];
+
+  if (!name) return sendError(res, 400, 'VALIDATION_ERROR', 'Name is required');
+  if (!command) return sendError(res, 400, 'VALIDATION_ERROR', 'Command is required');
+  if (!os || !validOs.includes(os)) return sendError(res, 400, 'VALIDATION_ERROR', 'OS must be linux, windows, or macos');
+
+  const scope = rawScope || 'user';
+  if (scope === 'global' && !roles.includes('admin')) {
+    return sendError(res, 403, 'FORBIDDEN', 'Only admins can create global presets');
+  }
+
+  const createdBy = scope === 'global' ? null : userId;
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO command_presets (name, command, description, os, scope, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
+      [name, command, description || '', os, scope, createdBy]
+    );
+    const preset = result.rows[0];
+    publishEvent('command_preset.created', userId, roles, preset.id, { name, os, scope });
+    res.status(201).json({ data: preset });
+  } catch (err) {
+    console.error('[ticket] create command preset error:', err.message);
+    sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create command preset');
+  }
+});
+
+// UPDATE COMMAND PRESET
+app.patch('/api/v1/commands/presets/:id', async (req, res) => {
+  const { userId, roles } = getUserContext(req);
+  if (!userId) return sendError(res, 401, 'UNAUTHORIZED', 'Missing user context');
+
+  try {
+    const existing = await pool.query('SELECT * FROM command_presets WHERE id = $1', [req.params.id]);
+    if (existing.rows.length === 0) {
+      return sendError(res, 404, 'NOT_FOUND', 'Command preset not found');
+    }
+
+    const preset = existing.rows[0];
+    if (preset.scope === 'global' && !roles.includes('admin')) {
+      return sendError(res, 403, 'FORBIDDEN', 'Only admins can update global presets');
+    }
+    if (preset.scope === 'user' && preset.created_by !== userId) {
+      return sendError(res, 403, 'FORBIDDEN', 'You can only update your own presets');
+    }
+
+    const allowed = ['name', 'command', 'description', 'sort_order'];
+    const sets = [];
+    const params = [];
+    let paramIdx = 1;
+
+    for (const field of allowed) {
+      if (req.body[field] !== undefined) {
+        sets.push(`${field} = $${paramIdx++}`);
+        params.push(req.body[field]);
+      }
+    }
+    if (sets.length === 0) {
+      return sendError(res, 400, 'VALIDATION_ERROR', 'No valid fields to update');
+    }
+
+    params.push(req.params.id);
+    const result = await pool.query(
+      `UPDATE command_presets SET ${sets.join(', ')} WHERE id = $${paramIdx} RETURNING *`,
+      params
+    );
+
+    publishEvent('command_preset.updated', userId, roles, req.params.id, { fields: Object.keys(req.body) });
+    res.json({ data: result.rows[0] });
+  } catch (err) {
+    console.error('[ticket] update command preset error:', err.message);
+    sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update command preset');
+  }
+});
+
+// DELETE COMMAND PRESET
+app.delete('/api/v1/commands/presets/:id', async (req, res) => {
+  const { userId, roles } = getUserContext(req);
+  if (!userId) return sendError(res, 401, 'UNAUTHORIZED', 'Missing user context');
+
+  try {
+    const existing = await pool.query('SELECT * FROM command_presets WHERE id = $1', [req.params.id]);
+    if (existing.rows.length === 0) {
+      return sendError(res, 404, 'NOT_FOUND', 'Command preset not found');
+    }
+
+    const preset = existing.rows[0];
+    if (preset.scope === 'global' && !roles.includes('admin')) {
+      return sendError(res, 403, 'FORBIDDEN', 'Only admins can delete global presets');
+    }
+    if (preset.scope === 'user' && preset.created_by !== userId) {
+      return sendError(res, 403, 'FORBIDDEN', 'You can only delete your own presets');
+    }
+
+    await pool.query('DELETE FROM command_presets WHERE id = $1', [req.params.id]);
+    publishEvent('command_preset.deleted', userId, roles, req.params.id, { name: preset.name });
+    res.json({ data: { deleted: true } });
+  } catch (err) {
+    console.error('[ticket] delete command preset error:', err.message);
+    sendError(res, 500, 'INTERNAL_ERROR', 'Failed to delete command preset');
   }
 });
 
