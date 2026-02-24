@@ -117,6 +117,41 @@ http:
       middlewares: [auth-verify, cors-headers]
       priority: 50
 
+    operations:
+      rule: "PathPrefix(`/api/v1/operations`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
+    networks:
+      rule: "PathPrefix(`/api/v1/networks`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
+    nodes:
+      rule: "PathPrefix(`/api/v1/nodes`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
+    edges:
+      rule: "PathPrefix(`/api/v1/edges`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
+    findings:
+      rule: "PathPrefix(`/api/v1/findings`)"
+      entryPoints: [web]
+      service: ticket
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
     endpoint:
       rule: "PathPrefix(`/api/v1/endpoints`)"
       entryPoints: [web]
