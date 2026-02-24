@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect, useRef } from 'react'
 import { useOutletContext } from 'react-router-dom'
+import cytoscape from 'cytoscape'
 import { apiFetch, getAccessToken } from '../../lib/api'
-import { Network, Plus, Upload, Server, Shield, X } from 'lucide-react'
+import { Network, Plus, Upload, Server, Shield, X, ChevronLeft, Wifi, Monitor, Activity } from 'lucide-react'
 
 interface NetworkRecord {
   id: string
@@ -26,6 +27,117 @@ interface ImportResult {
   hosts_skipped: number
 }
 
+interface NetworkNodeRecord {
+  id: string
+  network_id: string
+  endpoint_id: string | null
+  ip_address: string
+  hostname: string
+  mac_address: string | null
+  os: string
+  os_version: string
+  status: string
+  node_type: string
+  position_x: number | null
+  position_y: number | null
+  services: ServiceEntry[] | null
+  metadata: unknown
+  created_at: string
+  updated_at: string
+}
+
+interface ServiceEntry {
+  port: number
+  protocol: string
+  service: string
+  product: string
+  version: string
+}
+
+interface NetworkEdgeRecord {
+  id: string
+  network_id: string
+  source_node_id: string
+  target_node_id: string
+  edge_type: string
+  label: string | null
+  confidence: number
+  discovered_by: string
+  metadata: unknown
+  created_at: string
+  updated_at: string
+}
+
+interface TopologyResponse {
+  network: NetworkRecord
+  nodes: NetworkNodeRecord[]
+  edges: NetworkEdgeRecord[]
+}
+
+// Cytoscape dark theme stylesheet
+const cyStyle: cytoscape.StylesheetJsonBlock[] = [
+  {
+    selector: 'node',
+    style: {
+      'background-color': '#161d28',
+      'border-width': 2,
+      'border-color': '#5c6b7f',
+      'label': 'data(label)',
+      'font-size': '10px',
+      'font-family': 'JetBrains Mono, monospace',
+      'color': '#c5cdd8',
+      'text-valign': 'bottom',
+      'text-margin-y': 6,
+      'width': 40,
+      'height': 40,
+      'text-outline-width': 2,
+      'text-outline-color': '#0a0e14',
+    }
+  },
+  { selector: 'node[nodeType="server"]', style: { shape: 'rectangle' } },
+  { selector: 'node[nodeType="router"]', style: { shape: 'diamond' } },
+  { selector: 'node[nodeType="firewall"]', style: { shape: 'hexagon' } },
+  { selector: 'node[nodeType="workstation"]', style: { shape: 'ellipse' } },
+  { selector: 'node[status="alive"]', style: { 'border-color': '#40c057' } },
+  { selector: 'node[status="compromised"]', style: { 'border-color': '#ff6b6b', 'border-width': 3 } },
+  { selector: 'node[status="offline"]', style: { 'border-color': '#1e2a3a', opacity: 0.5 } },
+  { selector: 'node:selected', style: { 'border-color': '#4dabf7', 'border-width': 3 } },
+  {
+    selector: 'edge',
+    style: {
+      'width': 1.5,
+      'line-color': '#2a3a4e',
+      'target-arrow-color': '#2a3a4e',
+      'target-arrow-shape': 'triangle',
+      'curve-style': 'bezier',
+      'opacity': 0.7,
+      'line-style': 'solid',
+    }
+  },
+  { selector: 'edge[edgeType="c2_callback"]', style: { 'line-color': '#ff6b6b', 'target-arrow-color': '#ff6b6b', 'line-style': 'dashed' } },
+  { selector: 'edge[edgeType="lateral_movement"]', style: { 'line-color': '#f59e0b', 'target-arrow-color': '#f59e0b' } },
+  { selector: 'edge[edgeType="tunnel"]', style: { 'line-color': '#4dabf7', 'target-arrow-color': '#4dabf7', 'line-style': 'dashed' } },
+]
+
+function getNodeTypeIcon(nodeType: string) {
+  switch (nodeType) {
+    case 'server': return Server
+    case 'router': return Wifi
+    case 'firewall': return Shield
+    case 'workstation': return Monitor
+    default: return Network
+  }
+}
+
+function getStatusColor(status: string) {
+  switch (status) {
+    case 'alive': return 'var(--color-success)'
+    case 'compromised': return 'var(--color-danger)'
+    case 'offline': return 'var(--color-border)'
+    default: return 'var(--color-text-muted)'
+  }
+}
+
 export default function NetworksTab() {
   const { operation, refresh } = useOutletContext<{
     operation: { id: string; name: string; status: string }
@@ -48,6 +160,14 @@ export default function NetworksTab() {
   const [showImportResult, setShowImportResult] = useState(false)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
+  // Map view state
+  const [selectedNetworkId, setSelectedNetworkId] = useState<string | null>(null)
+  const [topology, setTopology] = useState<TopologyResponse | null>(null)
+  const [topoLoading, setTopoLoading] = useState(false)
+  const [selectedNode, setSelectedNode] = useState<NetworkNodeRecord | null>(null)
+  const cyContainerRef = useRef<HTMLDivElement>(null)
+  const cyRef = useRef<cytoscape.Core | null>(null)
+
   const fetchNetworks = useCallback(async () => {
     setLoading(true)
     try {
@@ -65,6 +185,109 @@ export default function NetworksTab() {
   useEffect(() => {
     fetchNetworks()
   }, [fetchNetworks])
+
+  // Fetch topology when a network is selected
+  useEffect(() => {
+    if (!selectedNetworkId) {
+      setTopology(null)
+      return
+    }
+    let cancelled = false
+    setTopoLoading(true)
+    setSelectedNode(null)
+    apiFetch<TopologyResponse>(`/networks/${selectedNetworkId}/topology`)
+      .then((data) => {
+        if (!cancelled) setTopology(data)
+      })
+      .catch(() => {
+        if (!cancelled) setTopology(null)
+      })
+      .finally(() => {
+        if (!cancelled) setTopoLoading(false)
+      })
+    return () => { cancelled = true }
+  }, [selectedNetworkId])
+
+  // Initialize Cytoscape when topology data is ready
+  useEffect(() => {
+    if (!topology || !cyContainerRef.current) return
+
+    // Destroy previous instance
+    if (cyRef.current) {
+      cyRef.current.destroy()
+      cyRef.current = null
+    }
+
+    const nodes = topology.nodes || []
+    const edges = topology.edges || []
+
+    if (nodes.length === 0) return
+
+    const elements: cytoscape.ElementDefinition[] = [
+      ...nodes.map((n) => ({
+        data: {
+          id: n.id,
+          label: n.hostname || n.ip_address,
+          nodeType: n.node_type,
+          status: n.status,
+        },
+        position: n.position_x != null && n.position_y != null
+          ? { x: n.position_x, y: n.position_y }
+          : undefined,
+      })),
+      ...edges.map((e) => ({
+        data: {
+          id: e.id,
+          source: e.source_node_id,
+          target: e.target_node_id,
+          edgeType: e.edge_type,
+          label: e.label || '',
+        },
+      })),
+    ]
+
+    const hasPositions = nodes.some((n) => n.position_x != null && n.position_y != null)
+
+    const cy = cytoscape({
+      container: cyContainerRef.current,
+      elements,
+      style: cyStyle,
+      layout: hasPositions
+        ? { name: 'preset' }
+        : {
+            name: 'cose',
+            animate: true,
+            animationDuration: 500,
+            nodeRepulsion: () => 8000,
+            idealEdgeLength: () => 120,
+            gravity: 0.3,
+          } as cytoscape.LayoutOptions,
+      minZoom: 0.2,
+      maxZoom: 4,
+      wheelSensitivity: 0.3,
+    })
+
+    // Node click
+    cy.on('tap', 'node', (evt) => {
+      const nodeId = evt.target.data('id') as string
+      const nodeData = (topology.nodes || []).find((n) => n.id === nodeId) || null
+      setSelectedNode(nodeData)
+    })
+
+    // Background click
+    cy.on('tap', (evt) => {
+      if (evt.target === cy) {
+        setSelectedNode(null)
+      }
+    })
+
+    cyRef.current = cy
+
+    return () => {
+      cy.destroy()
+      cyRef.current = null
+    }
+  }, [topology])
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -130,13 +353,21 @@ export default function NetworksTab() {
       console.error('Import failed:', err)
     } finally {
       setImportingId(null)
-      // Reset file input so same file can be re-selected
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
 
   const handleCardClick = (networkId: string) => {
-    console.log('Navigate to network map:', networkId)
+    setSelectedNetworkId(networkId)
+  }
+
+  const handleBackToGrid = () => {
+    setSelectedNetworkId(null)
+    setSelectedNode(null)
+    if (cyRef.current) {
+      cyRef.current.destroy()
+      cyRef.current = null
+    }
   }
 
   // Loading state
@@ -189,7 +420,6 @@ export default function NetworksTab() {
           CREATE FIRST NETWORK
         </button>
 
-        {/* Create modal rendered here too */}
         {renderCreateModal()}
       </div>
     )
@@ -314,6 +544,400 @@ export default function NetworksTab() {
     )
   }
 
+  function renderNodeDetailPanel() {
+    if (!selectedNode) return null
+    const NodeIcon = getNodeTypeIcon(selectedNode.node_type)
+    const statusColor = getStatusColor(selectedNode.status)
+    const services: ServiceEntry[] = Array.isArray(selectedNode.services)
+      ? selectedNode.services
+      : []
+
+    return (
+      <div style={{
+        width: 320,
+        flexShrink: 0,
+        background: 'var(--color-bg-elevated)',
+        borderLeft: '1px solid var(--color-border)',
+        display: 'flex',
+        flexDirection: 'column',
+        overflow: 'hidden',
+      }}>
+        {/* Panel header */}
+        <div style={{
+          padding: '14px 16px',
+          borderBottom: '1px solid var(--color-border)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+        }}>
+          <span style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            letterSpacing: 1,
+            color: 'var(--color-text-muted)',
+          }}>
+            NODE DETAILS
+          </span>
+          <button
+            onClick={() => setSelectedNode(null)}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              color: 'var(--color-text-muted)',
+              padding: 2,
+              display: 'flex',
+              alignItems: 'center',
+            }}
+          >
+            <X size={14} />
+          </button>
+        </div>
+
+        {/* Panel body */}
+        <div style={{
+          flex: 1,
+          overflowY: 'auto',
+          padding: 16,
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 16,
+        }}>
+          {/* Hostname + IP */}
+          <div>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              marginBottom: 6,
+            }}>
+              <NodeIcon size={16} style={{ color: 'var(--color-accent)', flexShrink: 0 }} />
+              <span style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 14,
+                fontWeight: 600,
+                color: 'var(--color-text-bright)',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+              }}>
+                {selectedNode.hostname || selectedNode.ip_address}
+              </span>
+            </div>
+            {selectedNode.hostname && (
+              <span style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 12,
+                color: 'var(--color-text)',
+                display: 'block',
+                marginLeft: 24,
+              }}>
+                {selectedNode.ip_address}
+              </span>
+            )}
+          </div>
+
+          {/* Status + Type badges */}
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              letterSpacing: 0.5,
+              color: statusColor,
+              background: 'var(--color-bg-surface)',
+              border: `1px solid ${statusColor}`,
+              borderRadius: 'var(--radius)',
+              padding: '3px 8px',
+              textTransform: 'uppercase',
+            }}>
+              {selectedNode.status}
+            </span>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              letterSpacing: 0.5,
+              color: 'var(--color-accent)',
+              background: 'rgba(77, 171, 247, 0.08)',
+              border: '1px solid rgba(77, 171, 247, 0.2)',
+              borderRadius: 'var(--radius)',
+              padding: '3px 8px',
+              textTransform: 'uppercase',
+            }}>
+              {selectedNode.node_type}
+            </span>
+          </div>
+
+          {/* OS info */}
+          {(selectedNode.os || selectedNode.os_version) && (
+            <div>
+              <span style={detailLabelStyle}>OS</span>
+              <span style={detailValueStyle}>
+                {[selectedNode.os, selectedNode.os_version].filter(Boolean).join(' ')}
+              </span>
+            </div>
+          )}
+
+          {/* MAC Address */}
+          {selectedNode.mac_address && (
+            <div>
+              <span style={detailLabelStyle}>MAC ADDRESS</span>
+              <span style={detailValueStyle}>{selectedNode.mac_address}</span>
+            </div>
+          )}
+
+          {/* Services */}
+          {services.length > 0 && (
+            <div>
+              <span style={detailLabelStyle}>
+                SERVICES ({services.length})
+              </span>
+              <div style={{
+                display: 'flex',
+                flexDirection: 'column',
+                gap: 6,
+                marginTop: 6,
+              }}>
+                {services.map((svc, i) => (
+                  <div
+                    key={i}
+                    style={{
+                      background: 'var(--color-bg-surface)',
+                      border: '1px solid var(--color-border)',
+                      borderRadius: 'var(--radius)',
+                      padding: '8px 10px',
+                    }}
+                  >
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      marginBottom: 2,
+                    }}>
+                      <span style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 11,
+                        fontWeight: 600,
+                        color: 'var(--color-text-bright)',
+                      }}>
+                        {svc.service || 'unknown'}
+                      </span>
+                      <span style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        color: 'var(--color-accent)',
+                      }}>
+                        {svc.port}/{svc.protocol}
+                      </span>
+                    </div>
+                    {(svc.product || svc.version) && (
+                      <span style={{
+                        fontFamily: 'var(--font-mono)',
+                        fontSize: 10,
+                        color: 'var(--color-text-muted)',
+                      }}>
+                        {[svc.product, svc.version].filter(Boolean).join(' ')}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Timestamps */}
+          <div style={{ marginTop: 'auto', paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
+              <span style={detailLabelStyle}>DISCOVERED</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>
+                {new Date(selectedNode.created_at).toLocaleString()}
+              </span>
+            </div>
+            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+              <span style={detailLabelStyle}>UPDATED</span>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>
+                {new Date(selectedNode.updated_at).toLocaleString()}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  function renderMapView() {
+    const networkName = networks.find((n) => n.id === selectedNetworkId)?.name || 'Network'
+    const hasNodes = topology && topology.nodes && topology.nodes.length > 0
+
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        flex: 1,
+        minHeight: 0,
+        animation: 'fadeIn 0.3s ease',
+      }}>
+        {/* Map toolbar */}
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          marginBottom: 12,
+          flexShrink: 0,
+        }}>
+          <button
+            onClick={handleBackToGrid}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 4,
+              background: 'transparent',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius)',
+              padding: '6px 10px',
+              cursor: 'pointer',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              letterSpacing: 0.5,
+              color: 'var(--color-text-muted)',
+              transition: 'border-color 0.15s ease, color 0.15s ease',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.borderColor = 'var(--color-accent)'
+              e.currentTarget.style.color = 'var(--color-accent)'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.borderColor = 'var(--color-border)'
+              e.currentTarget.style.color = 'var(--color-text-muted)'
+            }}
+          >
+            <ChevronLeft size={14} />
+            NETWORKS
+          </button>
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 8,
+          }}>
+            <Activity size={14} style={{ color: 'var(--color-accent)' }} />
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 13,
+              fontWeight: 600,
+              color: 'var(--color-text-bright)',
+              letterSpacing: 0.5,
+            }}>
+              {networkName}
+            </span>
+            {topology && topology.nodes && (
+              <span style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 10,
+                color: 'var(--color-text-muted)',
+                letterSpacing: 0.5,
+              }}>
+                {topology.nodes.length} NODE{topology.nodes.length !== 1 ? 'S' : ''}
+              </span>
+            )}
+          </div>
+        </div>
+
+        {/* Map content */}
+        {topoLoading ? (
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flex: 1,
+            color: 'var(--color-text-muted)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 12,
+            letterSpacing: 1,
+          }}>
+            LOADING TOPOLOGY...
+          </div>
+        ) : !hasNodes ? (
+          <div style={{
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            flex: 1,
+            background: 'var(--color-bg-elevated)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius)',
+          }}>
+            <Network size={36} style={{ color: 'var(--color-border-strong)', marginBottom: 14 }} />
+            <p style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 12,
+              letterSpacing: 1,
+              color: 'var(--color-text-muted)',
+              margin: '0 0 6px 0',
+            }}>
+              NO NODES DISCOVERED
+            </p>
+            <p style={{
+              fontFamily: 'var(--font-body, var(--font-mono))',
+              fontSize: 12,
+              color: 'var(--color-text-muted)',
+              margin: 0,
+              opacity: 0.7,
+            }}>
+              Import an Nmap scan to populate the topology.
+            </p>
+          </div>
+        ) : (
+          <div style={{
+            display: 'flex',
+            flex: 1,
+            minHeight: 0,
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius)',
+            overflow: 'hidden',
+          }}>
+            {/* Cytoscape canvas */}
+            <div
+              ref={cyContainerRef}
+              style={{
+                flex: 1,
+                minHeight: 0,
+                position: 'relative',
+                background: '#0a0e14',
+              }}
+            />
+            {/* Node detail panel */}
+            {renderNodeDetailPanel()}
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  // If a network is selected, show the map view
+  if (selectedNetworkId) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        flex: 1,
+        minHeight: 0,
+      }}>
+        {/* Hidden file input */}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xml,.nmap,.json"
+          style={{ display: 'none' }}
+          onChange={handleFileSelected}
+        />
+        {renderMapView()}
+        {renderCreateModal()}
+        {renderImportResultModal()}
+      </div>
+    )
+  }
+
+  // Grid view (original)
   return (
     <div style={{ animation: 'fadeIn 0.3s ease' }}>
       {/* Hidden file input for imports */}
@@ -593,4 +1217,21 @@ const statValueStyle: React.CSSProperties = {
   fontSize: 16,
   fontWeight: 600,
   color: 'var(--color-text-bright)',
+}
+
+// Style constants for node detail panel
+const detailLabelStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: 9,
+  letterSpacing: 1,
+  color: 'var(--color-text-muted)',
+  display: 'block',
+  marginBottom: 4,
+}
+
+const detailValueStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: 12,
+  color: 'var(--color-text)',
+  display: 'block',
 }
