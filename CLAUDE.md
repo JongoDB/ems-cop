@@ -171,10 +171,12 @@ ems-cop/
 - `auth.*` — login, logout, role changes
 - `ticket.*` — created, updated, status_changed, commented
 - `workflow.*` — stage_entered, approved, rejected, kickback, escalated
-- `operation.*` — created, status_changed, phase_changed
+- `operation.*` — created, updated, status_changed, member_added, member_removed
 - `c2.*` — command_executed, session_opened, session_closed, implant_checkin
 - `endpoint.*` — registered, status_changed, health_updated
 - `command_preset.*` — created, updated, deleted
+- `network.*` — created, imported, deleted, node_added, node_updated, edge_added
+- `finding.*` — created, updated
 - `audit.*` — catch-all for audit service consumption
 
 ### Database Conventions
@@ -204,7 +206,7 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 
 **M3 — Sliver Connected (Complete):** C2 Gateway connects to Sliver gRPC. List sessions, execute commands via C2 page. Configurable command presets. Commands logged to audit.
 
-**M4 — Dashboards:** Drag/drop dashboard with tabs, core widgets (terminal, topology, tickets, audit log, endpoints, notes), echelon templates.
+**M4 — Operations & Network Maps (In Progress):** Operations-centric navigation, network topology maps (Cytoscape.js), Nmap/Nessus import, findings management, auto-enrichment from C2 activity, dashboards with echelon templates.
 
 **M5 — Workflows:** Linear workflow engine. Task → approval → execute flow. Kickback + conditional branch support. Visual editor.
 
@@ -226,6 +228,9 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - **Auth service:** `services/auth/main.go`
 - **Ticket + commands API:** `services/ticket/src/index.js`
 - **Audit service:** `services/audit/main.go`
+- **Workflow engine (operations CRUD):** `services/workflow-engine/main.go`
+- **Networks migration:** `infra/db/postgres/migrations/004_networks_and_findings.sql`
+- **M4 design doc:** `docs/plans/2026-02-23-m4-operations-networks-design.md`
 
 ## Testing
 
@@ -247,7 +252,7 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - All host ports are parameterized via `.env` to avoid conflicts with other Docker projects. Default dev ports: HTTP=18080, PG=15432, CH=18123, Redis=16379, NATS=14222, MinIO API=19090.
 - ClickHouse TTL expressions must use `toDateTime(timestamp)` — raw `DateTime64` is not supported in TTL.
 
-## Current Progress (M3 Complete — 2026-02-23)
+## Current Progress (M4a Complete — 2026-02-24)
 
 M1 milestone fully validated (2026-02-22):
 - All 21 containers start and stay healthy
@@ -280,4 +285,12 @@ M3 milestone fully validated (2026-02-23):
 - HTTP/HTTPS transport does not support persistent interactive shell (WebSocket terminal). Requires MTLS/WireGuard implant.
 - Implant check-in interval means command responses have polling latency (~5-10s)
 
-**Next milestone: M4 — Dashboards** (see roadmap above)
+M4a milestone (Operations + Navigation) validated (2026-02-24):
+- Migration 004: networks, network_nodes, network_edges, operation_members tables + findings enhancements
+- Workflow engine: full operations CRUD API (create, list, get, update, transition, members) with pgx + NATS
+- Traefik: routes for /api/v1/operations, /api/v1/networks, /api/v1/nodes, /api/v1/edges, /api/v1/findings
+- Frontend: operations-centric nav (OPERATIONS, TICKETS, DASHBOARDS), OperationsPage, OperationDetailPage with 5 tab sub-routes
+- Seed data: "Training Exercise" operation with Corp LAN (2 nodes) and DMZ (2 nodes) networks
+- Version bumped to v0.4.0
+
+**Next: M4b — Network Map Core** (Cytoscape.js topology, Nmap XML import, endpoint-service CRUD)
