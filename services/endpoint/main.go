@@ -184,6 +184,7 @@ type NmapHost struct {
 	OS struct {
 		Matches []NmapOSMatch `xml:"osmatch"`
 	} `xml:"os"`
+	Trace NmapTrace `xml:"trace"`
 }
 
 type NmapStatus struct {
@@ -222,6 +223,17 @@ type NmapService struct {
 type NmapOSMatch struct {
 	Name     string `xml:"name,attr"`
 	Accuracy int    `xml:"accuracy,attr"`
+}
+
+type NmapTrace struct {
+	Hops []NmapHop `xml:"hop"`
+}
+
+type NmapHop struct {
+	TTL    int    `xml:"ttl,attr"`
+	IPAddr string `xml:"ipaddr,attr"`
+	RTT    string `xml:"rtt,attr"`
+	Host   string `xml:"host,attr"`
 }
 
 type ImportResult struct {
@@ -1251,6 +1263,63 @@ func (s *Server) handleImportFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, result)
 }
 
+func classifyNodeType(services []map[string]any, osName string, vendor string) string {
+	portSet := make(map[int]bool)
+	serviceSet := make(map[string]bool)
+	for _, svc := range services {
+		if p, ok := svc["port"].(float64); ok {
+			portSet[int(p)] = true
+		} else if p, ok := svc["port"].(int); ok {
+			portSet[p] = true
+		}
+		if s, ok := svc["service"].(string); ok {
+			serviceSet[strings.ToLower(s)] = true
+		}
+	}
+
+	osLower := strings.ToLower(osName)
+	vendorLower := strings.ToLower(vendor)
+
+	// Router: BGP, OSPF, RIP
+	if portSet[179] || portSet[89] || portSet[520] {
+		return "router"
+	}
+	// Firewall: known vendors
+	for _, fv := range []string{"cisco asa", "pfsense", "palo alto", "fortinet", "sonicwall", "checkpoint"} {
+		if strings.Contains(osLower, fv) || strings.Contains(vendorLower, fv) {
+			return "firewall"
+		}
+	}
+	// Printer
+	if portSet[631] || portSet[515] || portSet[9100] || serviceSet["ipp"] || serviceSet["printer"] {
+		return "printer"
+	}
+	// VPN
+	if portSet[1194] || (portSet[500] && portSet[4500]) || portSet[51820] {
+		return "vpn"
+	}
+	// IoT
+	if portSet[1883] || portSet[5683] || serviceSet["mqtt"] || serviceSet["coap"] {
+		return "iot"
+	}
+	// Workstation: RDP/VNC + desktop OS
+	desktopOs := strings.Contains(osLower, "windows") || strings.Contains(osLower, "mac")
+	if (portSet[3389] || portSet[5900]) && desktopOs {
+		return "workstation"
+	}
+	// Server
+	serverPorts := []int{80, 443, 22, 3306, 5432, 27017, 6379, 8080, 8443, 9200}
+	for _, sp := range serverPorts {
+		if portSet[sp] {
+			return "server"
+		}
+	}
+	if serviceSet["http"] || serviceSet["https"] || serviceSet["ssh"] {
+		return "server"
+	}
+	return "host"
+}
+
 func (s *Server) importNmapXML(ctx context.Context, networkID string, data []byte) (ImportResult, error) {
 	var nmapRun NmapRun
 	if err := xml.Unmarshal(data, &nmapRun); err != nil {
@@ -1339,15 +1408,7 @@ func (s *Server) importNmapXML(ctx context.Context, networkID string, data []byt
 
 		servicesJSON, _ := json.Marshal(services)
 
-		// Determine node_type heuristic
-		nodeType := "host"
-		for _, svc := range services {
-			name, _ := svc["service"].(string)
-			switch name {
-			case "http", "https", "ssh", "mysql", "postgresql", "mssql", "oracle", "mongodb":
-				nodeType = "server"
-			}
-		}
+		nodeType := classifyNodeType(services, osName, vendor)
 
 		// Build metadata
 		metadata := map[string]any{}
