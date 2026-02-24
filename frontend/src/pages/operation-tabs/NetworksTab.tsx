@@ -900,6 +900,7 @@ export default function NetworksTab() {
               ref={cyContainerRef}
               style={{
                 flex: 1,
+                minWidth: 0,
                 minHeight: 0,
                 position: 'relative',
                 background: '#0a0e14',
@@ -920,6 +921,7 @@ export default function NetworksTab() {
         display: 'flex',
         flexDirection: 'column',
         flex: 1,
+        minWidth: 0,
         minHeight: 0,
       }}>
         {/* Hidden file input */}

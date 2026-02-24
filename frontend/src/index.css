@@ -399,15 +399,20 @@ select.filter-select {
    ═══════════════════════════════════════════ */
 .app-shell {
   min-height: 100vh;
+  display: flex;
+  flex-direction: column;
   position: relative;
   z-index: 1;
 }
 
 .main-content {
   display: flex;
+  flex: 1;
+  min-height: 0;
   padding: 24px;
   gap: 24px;
   max-width: 1400px;
+  width: 100%;
   margin: 0 auto;
 }
 

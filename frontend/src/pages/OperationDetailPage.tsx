@@ -86,7 +86,7 @@ export default function OperationDetailPage() {
   }
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 0, animation: 'fadeIn 0.3s ease' }}>
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 0, minHeight: 0, minWidth: 0, overflow: 'hidden', animation: 'fadeIn 0.3s ease' }}>
       {/* Header */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginBottom: 0 }}>
         <Link
@@ -146,7 +146,7 @@ export default function OperationDetailPage() {
       </div>
 
       {/* Tab Content */}
-      <div style={{ flex: 1, padding: '24px 0', minHeight: 0 }}>
+      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', padding: '24px 0', minHeight: 0 }}>
         <Outlet context={{ operation, refresh: fetchOperation }} />
       </div>
     </div>
