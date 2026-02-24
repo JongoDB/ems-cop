@@ -726,7 +726,7 @@ func (p *SliverProvider) ExecuteTask(ctx context.Context, sessionID string, task
 	}
 
 	started := time.Now()
-	req := &commonpb.Request{SessionID: sessionID, Timeout: 30}
+	req := &commonpb.Request{SessionID: sessionID, Timeout: 120}
 
 	var output string
 	var taskErr string
