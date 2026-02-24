@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -302,8 +304,79 @@ type ImportResult struct {
 	Format       string `json:"format"`
 	NodesCreated int    `json:"nodes_created"`
 	NodesUpdated int    `json:"nodes_updated"`
+	EdgesCreated int    `json:"edges_created"`
 	TotalHosts   int    `json:"total_hosts"`
 	HostsSkipped int    `json:"hosts_skipped"`
+}
+
+// ---------------------------------------------------------------------------
+// Parser engine types
+// ---------------------------------------------------------------------------
+
+type ParserDefinition struct {
+	Version        int                   `json:"version"`
+	RootElement    string                `json:"root_element,omitempty"`
+	HostElement    string                `json:"host_element,omitempty"`
+	RootPath       string                `json:"root_path,omitempty"`
+	CommentPrefix  string                `json:"comment_prefix,omitempty"`
+	Separator      string                `json:"separator,omitempty"`
+	HeaderLine     string                `json:"header_line,omitempty"`
+	SkipWhen       []SkipCondition       `json:"skip_when,omitempty"`
+	FieldMappings  []FieldMapping        `json:"field_mappings"`
+	EdgeMappings   []EdgeMapping         `json:"edge_mappings,omitempty"`
+	NodeTypeRules  []NodeTypeRule        `json:"node_type_rules"`
+	CreatesEdges   bool                  `json:"creates_edges,omitempty"`
+	EdgeGeneration *EdgeGenerationConfig `json:"edge_generation,omitempty"`
+}
+
+type SkipCondition struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"` // "equals", "contains", "not_equals"
+	Value    string `json:"value"`
+}
+
+type FieldMapping struct {
+	Source      string         `json:"source"`
+	Target      string         `json:"target"`
+	Filter      *FieldFilter   `json:"filter,omitempty"`
+	Transform   string         `json:"transform,omitempty"` // to_integer, to_float, to_lowercase, to_uppercase
+	Default     string         `json:"default,omitempty"`
+	SubMappings []FieldMapping `json:"sub_mappings,omitempty"`
+}
+
+type FieldFilter struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"`
+	Value    string `json:"value"`
+}
+
+type EdgeMapping struct {
+	Source   string `json:"source"`
+	SourceIP string `json:"source_ip"`
+	TargetIP string `json:"target_ip"`
+	EdgeType string `json:"edge_type"`
+}
+
+type NodeTypeRule struct {
+	Field    string `json:"field"`
+	Operator string `json:"operator"` // "contains", "equals", "port_open", "service_running"
+	Value    string `json:"value"`
+	NodeType string `json:"node_type"`
+}
+
+type EdgeGenerationConfig struct {
+	Strategy string `json:"strategy"` // "subnet", "connection_log"
+	SourceIP string `json:"source_ip,omitempty"`
+	DestIP   string `json:"dest_ip,omitempty"`
+}
+
+// XMLElement is a generic tree representation of an XML document for the
+// data-driven parser engine.
+type XMLElement struct {
+	Name     string
+	Attrs    map[string]string
+	Children []XMLElement
+	Text     string
 }
 
 // ---------------------------------------------------------------------------
@@ -1261,6 +1334,7 @@ func (s *Server) handleGetTopology(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleImportFile(w http.ResponseWriter, r *http.Request) {
 	networkID := r.PathValue("id")
+	parserID := r.URL.Query().Get("parser_id")
 
 	// Verify network exists
 	var netName string
@@ -1292,34 +1366,87 @@ func (s *Server) handleImportFile(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info("import file received", "network", networkID, "filename", header.Filename, "size", len(data))
 
-	// Detect format and parse
 	var result ImportResult
-	peekLen := len(data)
-	if peekLen > 500 {
-		peekLen = 500
-	}
-	if bytes.Contains(data[:peekLen], []byte("<nmaprun")) {
-		result, err = s.importNmapXML(r.Context(), networkID, data)
+	var importErr error
+	var importFormat string
+
+	if parserID != "" {
+		// Load parser from DB and execute
+		var format string
+		var defJSON []byte
+		qErr := s.db.QueryRow(r.Context(),
+			"SELECT format, definition FROM import_parsers WHERE id=$1", parserID).Scan(&format, &defJSON)
+		if qErr != nil {
+			writeError(w, 404, "NOT_FOUND", "Parser not found")
+			return
+		}
+		var def ParserDefinition
+		if err := json.Unmarshal(defJSON, &def); err != nil {
+			writeError(w, 500, "INTERNAL", "Invalid parser definition: "+err.Error())
+			return
+		}
+		result, importErr = s.executeParser(r.Context(), networkID, data, format, def)
+		importFormat = format
 	} else {
-		writeError(w, 400, "UNSUPPORTED_FORMAT", "Only Nmap XML format is currently supported. File must contain <nmaprun> root element.")
-		return
+		// Auto-detect format
+		peekLen := len(data)
+		if peekLen > 500 {
+			peekLen = 500
+		}
+		peek := string(data[:peekLen])
+
+		var format string
+		if bytes.Contains(data[:peekLen], []byte("<?xml")) || bytes.Contains(data[:peekLen], []byte("<")) && bytes.Contains(data[:peekLen], []byte(">")) {
+			format = "xml"
+		} else if len(data) > 0 && (data[0] == '{' || data[0] == '[') {
+			format = "json"
+		} else if strings.Contains(peek, "\t") {
+			format = "tsv"
+		} else {
+			format = "csv"
+		}
+
+		// Try default parser for this format
+		var defJSON []byte
+		dbErr := s.db.QueryRow(r.Context(),
+			"SELECT definition FROM import_parsers WHERE format=$1 AND is_default=true LIMIT 1", format).Scan(&defJSON)
+		if dbErr == nil {
+			var def ParserDefinition
+			if json.Unmarshal(defJSON, &def) == nil {
+				result, importErr = s.executeParser(r.Context(), networkID, data, format, def)
+				importFormat = format
+			}
+		}
+
+		// Fallback to hardcoded Nmap parser
+		if importFormat == "" {
+			if format == "xml" && bytes.Contains(data[:peekLen], []byte("<nmaprun")) {
+				result, importErr = s.importNmapXML(r.Context(), networkID, data)
+				importFormat = "nmap"
+			} else {
+				writeError(w, 400, "UNSUPPORTED_FORMAT",
+					"No parser found for this format. Upload an XML (Nmap), JSON, or CSV/TSV file, or specify a parser_id.")
+				return
+			}
+		}
 	}
 
-	if err != nil {
-		s.logger.Error("import failed", "error", err)
-		writeError(w, 500, "IMPORT_FAILED", err.Error())
+	if importErr != nil {
+		s.logger.Error("import failed", "error", importErr)
+		writeError(w, 500, "IMPORT_FAILED", importErr.Error())
 		return
 	}
 
 	// Update network import_source
-	s.db.Exec(r.Context(), "UPDATE networks SET import_source = 'nmap' WHERE id = $1", networkID)
+	_, _ = s.db.Exec(r.Context(), "UPDATE networks SET import_source = $1 WHERE id = $2", importFormat, networkID)
 
 	// Publish event
 	s.publishEvent("network.imported", map[string]any{
 		"network_id":    networkID,
-		"format":        "nmap",
+		"format":        importFormat,
 		"nodes_created": result.NodesCreated,
 		"nodes_updated": result.NodesUpdated,
+		"edges_created": result.EdgesCreated,
 	})
 
 	writeJSON(w, 200, result)
@@ -1381,6 +1508,798 @@ func classifyNodeType(services []map[string]any, osName string, vendor string) s
 	}
 	return "host"
 }
+
+// ---------------------------------------------------------------------------
+// Generic Parser Engine
+// ---------------------------------------------------------------------------
+
+func (s *Server) executeParser(ctx context.Context, networkID string, data []byte, format string, def ParserDefinition) (ImportResult, error) {
+	switch format {
+	case "xml":
+		return s.executeXMLParser(ctx, networkID, data, def)
+	case "json":
+		return s.executeJSONParser(ctx, networkID, data, def)
+	case "csv", "tsv":
+		return s.executeCSVParser(ctx, networkID, data, def)
+	default:
+		return ImportResult{}, fmt.Errorf("unsupported format: %s", format)
+	}
+}
+
+// parseXMLTree parses raw XML bytes into a generic XMLElement tree.
+func parseXMLTree(data []byte) (XMLElement, error) {
+	decoder := xml.NewDecoder(bytes.NewReader(data))
+	var stack []XMLElement
+	var root XMLElement
+	rootSet := false
+
+	for {
+		tok, err := decoder.Token()
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return XMLElement{}, fmt.Errorf("xml decode: %w", err)
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			el := XMLElement{
+				Name:  t.Name.Local,
+				Attrs: make(map[string]string, len(t.Attr)),
+			}
+			for _, a := range t.Attr {
+				el.Attrs[a.Name.Local] = a.Value
+			}
+			stack = append(stack, el)
+		case xml.EndElement:
+			if len(stack) == 0 {
+				continue
+			}
+			finished := stack[len(stack)-1]
+			stack = stack[:len(stack)-1]
+			if len(stack) > 0 {
+				stack[len(stack)-1].Children = append(stack[len(stack)-1].Children, finished)
+			} else {
+				root = finished
+				rootSet = true
+			}
+		case xml.CharData:
+			text := strings.TrimSpace(string(t))
+			if text != "" && len(stack) > 0 {
+				stack[len(stack)-1].Text = text
+			}
+		}
+	}
+
+	if !rootSet {
+		return XMLElement{}, fmt.Errorf("no root element found in XML")
+	}
+	return root, nil
+}
+
+// xmlFindChildren returns all direct children matching the given element name.
+func xmlFindChildren(el XMLElement, name string) []XMLElement {
+	var result []XMLElement
+	for _, c := range el.Children {
+		if c.Name == name {
+			result = append(result, c)
+		}
+	}
+	return result
+}
+
+// xmlNavigate walks a dot-separated path (e.g. "hostnames.hostname") and
+// returns all matching elements.  Each segment may match multiple children,
+// so the result is a flat list of all leaf matches.
+func xmlNavigate(el XMLElement, path string) []XMLElement {
+	parts := strings.Split(path, ".")
+	current := []XMLElement{el}
+	for _, p := range parts {
+		var next []XMLElement
+		for _, c := range current {
+			next = append(next, xmlFindChildren(c, p)...)
+		}
+		current = next
+		if len(current) == 0 {
+			return nil
+		}
+	}
+	return current
+}
+
+// xmlExtractValue extracts a string value from an XMLElement given a source
+// specifier. The source may be:
+//   - An attribute reference like "@attr"
+//   - A dot-path to a child element
+//   - A dot-path ending in "@attr" for a nested attribute
+//
+// If filter is provided, only elements matching the filter are considered.
+func xmlExtractValue(el XMLElement, source string, filter *FieldFilter) string {
+	// Direct attribute on the element itself
+	if strings.HasPrefix(source, "@") {
+		return el.Attrs[source[1:]]
+	}
+
+	// Check for embedded attribute reference: "addresses.address@addr"
+	if idx := strings.LastIndex(source, "@"); idx > 0 {
+		pathPart := source[:idx]
+		attrName := source[idx+1:]
+		// Remove trailing dot if present
+		pathPart = strings.TrimSuffix(pathPart, ".")
+		targets := xmlNavigate(el, pathPart)
+		for _, t := range targets {
+			if filter != nil && !xmlMatchFilter(t, filter) {
+				continue
+			}
+			if v, ok := t.Attrs[attrName]; ok && v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	// Navigate to child element(s) and return text or first match
+	targets := xmlNavigate(el, source)
+	for _, t := range targets {
+		if filter != nil && !xmlMatchFilter(t, filter) {
+			continue
+		}
+		if t.Text != "" {
+			return t.Text
+		}
+	}
+	return ""
+}
+
+// xmlMatchFilter checks if an XMLElement matches a FieldFilter condition.
+func xmlMatchFilter(el XMLElement, f *FieldFilter) bool {
+	// The filter field may refer to an attribute (@attr) or a child element
+	var val string
+	if strings.HasPrefix(f.Field, "@") {
+		val = el.Attrs[f.Field[1:]]
+	} else {
+		children := xmlNavigate(el, f.Field)
+		if len(children) > 0 {
+			val = children[0].Text
+		}
+	}
+
+	switch f.Operator {
+	case "equals":
+		return val == f.Value
+	case "not_equals":
+		return val != f.Value
+	case "contains":
+		return strings.Contains(val, f.Value)
+	default:
+		return false
+	}
+}
+
+// applyTransform applies a named transformation to a string value.
+func applyTransform(value, transform string) string {
+	switch transform {
+	case "to_integer":
+		if _, err := strconv.Atoi(value); err == nil {
+			return value
+		}
+		return "0"
+	case "to_float":
+		if _, err := strconv.ParseFloat(value, 64); err == nil {
+			return value
+		}
+		return "0"
+	case "to_lowercase":
+		return strings.ToLower(value)
+	case "to_uppercase":
+		return strings.ToUpper(value)
+	default:
+		return value
+	}
+}
+
+// evaluateNodeTypeRules determines the node type for a record based on the
+// parser definition's NodeTypeRules.  extracted is a map of target field →
+// value pairs. Returns "host" if no rule matches.
+func evaluateNodeTypeRules(rules []NodeTypeRule, extracted map[string]string, services []map[string]any) string {
+	for _, rule := range rules {
+		switch rule.Operator {
+		case "equals":
+			if extracted[rule.Field] == rule.Value {
+				return rule.NodeType
+			}
+		case "contains":
+			if strings.Contains(strings.ToLower(extracted[rule.Field]), strings.ToLower(rule.Value)) {
+				return rule.NodeType
+			}
+		case "port_open":
+			port, err := strconv.Atoi(rule.Value)
+			if err != nil {
+				continue
+			}
+			for _, svc := range services {
+				if p, ok := svc["port"].(float64); ok && int(p) == port {
+					return rule.NodeType
+				}
+				if p, ok := svc["port"].(int); ok && p == port {
+					return rule.NodeType
+				}
+			}
+		case "service_running":
+			for _, svc := range services {
+				if s, ok := svc["service"].(string); ok && strings.EqualFold(s, rule.Value) {
+					return rule.NodeType
+				}
+			}
+		}
+	}
+	return "host"
+}
+
+// evaluateSkipConditions checks if a record should be skipped.
+func evaluateSkipConditions(conditions []SkipCondition, extracted map[string]string) bool {
+	for _, cond := range conditions {
+		val := extracted[cond.Field]
+		switch cond.Operator {
+		case "equals":
+			if val == cond.Value {
+				return true
+			}
+		case "not_equals":
+			if val != cond.Value {
+				return true
+			}
+		case "contains":
+			if strings.Contains(val, cond.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// upsertParsedNode inserts or updates a network node from extracted field data.
+// Returns the node ID and whether it was newly created.
+func (s *Server) upsertParsedNode(ctx context.Context, networkID string, extracted map[string]string, services []map[string]any, nodeType string) (string, bool, error) {
+	ipAddr := extracted["ip_address"]
+	if ipAddr == "" {
+		return "", false, fmt.Errorf("ip_address is required")
+	}
+
+	hostname := extracted["hostname"]
+	macAddr := extracted["mac_address"]
+	osName := extracted["os"]
+	if osName == "" {
+		osName = "unknown"
+	}
+	osVersion := extracted["os_version"]
+	status := extracted["status"]
+	if status == "" {
+		status = "alive"
+	}
+	if !validNodeStatuses[status] {
+		status = "alive"
+	}
+
+	if services == nil {
+		services = []map[string]any{}
+	}
+	servicesJSON, _ := json.Marshal(services)
+
+	metadata := map[string]any{}
+	if extracted["vendor"] != "" {
+		metadata["mac_vendor"] = extracted["vendor"]
+	}
+	metadataJSON, _ := json.Marshal(metadata)
+
+	var nodeID string
+	err := s.db.QueryRow(ctx, `
+		INSERT INTO network_nodes (network_id, ip_address, hostname, mac_address, os, os_version, status, node_type, services, metadata)
+		VALUES ($1, $2, $3, NULLIF($4,''), $5, $6, $7, $8, $9::jsonb, $10::jsonb)
+		ON CONFLICT (network_id, ip_address) DO UPDATE SET
+			hostname = CASE WHEN EXCLUDED.hostname != '' THEN EXCLUDED.hostname ELSE network_nodes.hostname END,
+			mac_address = COALESCE(EXCLUDED.mac_address, network_nodes.mac_address),
+			os = CASE WHEN EXCLUDED.os != 'unknown' THEN EXCLUDED.os ELSE network_nodes.os END,
+			os_version = CASE WHEN EXCLUDED.os_version != '' THEN EXCLUDED.os_version ELSE network_nodes.os_version END,
+			services = EXCLUDED.services,
+			metadata = network_nodes.metadata || EXCLUDED.metadata,
+			updated_at = NOW()
+		RETURNING id
+	`, networkID, ipAddr, hostname, macAddr, osName, osVersion, status, nodeType, string(servicesJSON), string(metadataJSON)).Scan(&nodeID)
+	if err != nil {
+		return "", false, fmt.Errorf("upsert node %s: %w", ipAddr, err)
+	}
+
+	// Track enrichment source
+	enrichment := map[string]any{
+		"source":      "parser_engine",
+		"imported_at": time.Now().UTC().Format(time.RFC3339),
+	}
+	enrichmentJSON, _ := json.Marshal(enrichment)
+	_, _ = s.db.Exec(ctx, `
+		UPDATE network_nodes SET
+			metadata = jsonb_set(
+				COALESCE(metadata, '{}'),
+				'{enrichment_sources}',
+				COALESCE(metadata->'enrichment_sources', '[]'::jsonb) || $1::jsonb
+			)
+		WHERE id = $2
+	`, string(enrichmentJSON), nodeID)
+
+	return nodeID, true, nil
+}
+
+// executeXMLParser processes XML data using a ParserDefinition.
+func (s *Server) executeXMLParser(ctx context.Context, networkID string, data []byte, def ParserDefinition) (ImportResult, error) {
+	root, err := parseXMLTree(data)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("parse XML: %w", err)
+	}
+
+	result := ImportResult{Format: "xml"}
+
+	// Find host elements
+	hostElement := def.HostElement
+	if hostElement == "" {
+		hostElement = "host"
+	}
+
+	var hosts []XMLElement
+	if def.RootElement != "" && root.Name != def.RootElement {
+		return ImportResult{}, fmt.Errorf("expected root element %q, got %q", def.RootElement, root.Name)
+	}
+	hosts = xmlNavigate(root, hostElement)
+	result.TotalHosts = len(hosts)
+
+	for _, host := range hosts {
+		// Extract fields
+		extracted := make(map[string]string)
+		var services []map[string]any
+
+		for _, fm := range def.FieldMappings {
+			if fm.Target == "services" {
+				// Handle services as a sub-mapping array
+				services = s.extractXMLServices(host, fm)
+				continue
+			}
+			val := xmlExtractValue(host, fm.Source, fm.Filter)
+			if val == "" && fm.Default != "" {
+				val = fm.Default
+			}
+			if fm.Transform != "" {
+				val = applyTransform(val, fm.Transform)
+			}
+			extracted[fm.Target] = val
+		}
+
+		// Check skip conditions
+		if evaluateSkipConditions(def.SkipWhen, extracted) {
+			result.HostsSkipped++
+			continue
+		}
+
+		if extracted["ip_address"] == "" {
+			result.HostsSkipped++
+			continue
+		}
+
+		// Classify node type
+		nodeType := evaluateNodeTypeRules(def.NodeTypeRules, extracted, services)
+
+		// Upsert node
+		nodeID, _, err := s.upsertParsedNode(ctx, networkID, extracted, services, nodeType)
+		if err != nil {
+			s.logger.Error("parser engine: upsert node failed", "error", err)
+			continue
+		}
+		_ = nodeID
+		result.NodesCreated++
+	}
+
+	// Process edge mappings (e.g. traceroute hops)
+	for _, em := range def.EdgeMappings {
+		for _, host := range hosts {
+			hopElements := xmlNavigate(host, em.Source)
+			if len(hopElements) < 2 {
+				continue
+			}
+			for i := 0; i < len(hopElements)-1; i++ {
+				srcIP := hopElements[i].Attrs[em.SourceIP]
+				dstIP := hopElements[i+1].Attrs[em.TargetIP]
+				if srcIP == "" || dstIP == "" || srcIP == "*" || dstIP == "*" {
+					continue
+				}
+				edgeType := em.EdgeType
+				if edgeType == "" {
+					edgeType = "network_adjacency"
+				}
+				srcNodeID := s.findOrCreateNode(ctx, networkID, srcIP, "router")
+				dstNodeID := s.findOrCreateNode(ctx, networkID, dstIP, "")
+				if srcNodeID != "" && dstNodeID != "" {
+					if err := s.createEdgeIfNotExists(ctx, networkID, srcNodeID, dstNodeID, edgeType, 0.95, "import"); err == nil {
+						result.EdgesCreated++
+					}
+				}
+			}
+		}
+	}
+
+	// Run subnet edge generation if configured
+	if def.EdgeGeneration != nil && def.EdgeGeneration.Strategy == "subnet" {
+		s.generateSubnetEdges(ctx, networkID)
+	}
+
+	return result, nil
+}
+
+// extractXMLServices handles the services sub-mapping for XML hosts.
+func (s *Server) extractXMLServices(host XMLElement, fm FieldMapping) []map[string]any {
+	var services []map[string]any
+
+	// Navigate to the container of service items
+	elements := xmlNavigate(host, fm.Source)
+	for _, el := range elements {
+		svc := make(map[string]any)
+		for _, sub := range fm.SubMappings {
+			val := xmlExtractValue(el, sub.Source, sub.Filter)
+			if val == "" && sub.Default != "" {
+				val = sub.Default
+			}
+			if sub.Transform != "" {
+				val = applyTransform(val, sub.Transform)
+			}
+			// Convert numeric fields
+			if sub.Transform == "to_integer" {
+				if v, err := strconv.Atoi(val); err == nil {
+					svc[sub.Target] = v
+					continue
+				}
+			}
+			svc[sub.Target] = val
+		}
+		if len(svc) > 0 {
+			services = append(services, svc)
+		}
+	}
+	return services
+}
+
+// executeJSONParser processes JSON data using a ParserDefinition.
+func (s *Server) executeJSONParser(ctx context.Context, networkID string, data []byte, def ParserDefinition) (ImportResult, error) {
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return ImportResult{}, fmt.Errorf("parse JSON: %w", err)
+	}
+
+	result := ImportResult{Format: "json"}
+
+	// Navigate to root path
+	items := jsonNavigateToArray(raw, def.RootPath)
+	if items == nil {
+		return ImportResult{}, fmt.Errorf("root_path %q did not resolve to an array", def.RootPath)
+	}
+
+	result.TotalHosts = len(items)
+
+	for _, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			result.HostsSkipped++
+			continue
+		}
+
+		extracted := make(map[string]string)
+		var services []map[string]any
+
+		for _, fm := range def.FieldMappings {
+			if fm.Target == "services" {
+				services = extractJSONServices(obj, fm)
+				continue
+			}
+			val := jsonExtractValue(obj, fm.Source)
+			if val == "" && fm.Default != "" {
+				val = fm.Default
+			}
+			if fm.Transform != "" {
+				val = applyTransform(val, fm.Transform)
+			}
+			extracted[fm.Target] = val
+		}
+
+		if evaluateSkipConditions(def.SkipWhen, extracted) {
+			result.HostsSkipped++
+			continue
+		}
+
+		if extracted["ip_address"] == "" {
+			result.HostsSkipped++
+			continue
+		}
+
+		nodeType := evaluateNodeTypeRules(def.NodeTypeRules, extracted, services)
+
+		_, _, err := s.upsertParsedNode(ctx, networkID, extracted, services, nodeType)
+		if err != nil {
+			s.logger.Error("parser engine JSON: upsert node failed", "error", err)
+			continue
+		}
+		result.NodesCreated++
+	}
+
+	// Edge generation
+	if def.EdgeGeneration != nil && def.EdgeGeneration.Strategy == "subnet" {
+		s.generateSubnetEdges(ctx, networkID)
+	}
+
+	return result, nil
+}
+
+// jsonNavigateToArray walks a dot-separated path through nested maps/arrays
+// and returns the result as a slice.
+func jsonNavigateToArray(raw any, path string) []any {
+	if path == "" {
+		if arr, ok := raw.([]any); ok {
+			return arr
+		}
+		// If the root is an object with a single array value, try that
+		if obj, ok := raw.(map[string]any); ok {
+			for _, v := range obj {
+				if arr, ok := v.([]any); ok {
+					return arr
+				}
+			}
+		}
+		return nil
+	}
+
+	parts := strings.Split(path, ".")
+	current := raw
+	for _, p := range parts {
+		switch v := current.(type) {
+		case map[string]any:
+			current = v[p]
+		default:
+			return nil
+		}
+	}
+
+	if arr, ok := current.([]any); ok {
+		return arr
+	}
+	return nil
+}
+
+// jsonExtractValue extracts a string value from a JSON object using a
+// dot-separated path.
+func jsonExtractValue(obj map[string]any, source string) string {
+	if source == "" {
+		return ""
+	}
+
+	parts := strings.Split(source, ".")
+	var current any = obj
+
+	for _, p := range parts {
+		switch v := current.(type) {
+		case map[string]any:
+			current = v[p]
+		default:
+			return ""
+		}
+	}
+
+	switch v := current.(type) {
+	case string:
+		return v
+	case float64:
+		if v == float64(int(v)) {
+			return strconv.Itoa(int(v))
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(v)
+	case nil:
+		return ""
+	default:
+		b, _ := json.Marshal(v)
+		return string(b)
+	}
+}
+
+// extractJSONServices handles the services sub-mapping for JSON records.
+func extractJSONServices(obj map[string]any, fm FieldMapping) []map[string]any {
+	val := obj
+	// Navigate to the source array
+	parts := strings.Split(fm.Source, ".")
+	var current any = val
+	for _, p := range parts {
+		switch v := current.(type) {
+		case map[string]any:
+			current = v[p]
+		default:
+			return nil
+		}
+	}
+
+	arr, ok := current.([]any)
+	if !ok {
+		return nil
+	}
+
+	var services []map[string]any
+	for _, item := range arr {
+		itemObj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		svc := make(map[string]any)
+		for _, sub := range fm.SubMappings {
+			sv := jsonExtractValue(itemObj, sub.Source)
+			if sv == "" && sub.Default != "" {
+				sv = sub.Default
+			}
+			if sub.Transform == "to_integer" {
+				if v, err := strconv.Atoi(sv); err == nil {
+					svc[sub.Target] = v
+					continue
+				}
+			}
+			svc[sub.Target] = sv
+		}
+		if len(svc) > 0 {
+			services = append(services, svc)
+		}
+	}
+	return services
+}
+
+// executeCSVParser processes CSV/TSV data using a ParserDefinition.
+func (s *Server) executeCSVParser(ctx context.Context, networkID string, data []byte, def ParserDefinition) (ImportResult, error) {
+	format := "csv"
+	separator := ','
+	if def.Separator == "\t" || def.Separator == "tab" {
+		separator = '\t'
+		format = "tsv"
+	} else if def.Separator != "" && len(def.Separator) == 1 {
+		separator = rune(def.Separator[0])
+	}
+
+	result := ImportResult{Format: format}
+
+	// Pre-filter: skip comment lines and blank lines
+	var cleanLines []string
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	commentPrefix := def.CommentPrefix
+	for scanner.Scan() {
+		line := scanner.Text()
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		if commentPrefix != "" && strings.HasPrefix(trimmed, commentPrefix) {
+			continue
+		}
+		cleanLines = append(cleanLines, line)
+	}
+
+	if len(cleanLines) == 0 {
+		return result, nil
+	}
+
+	// Parse using encoding/csv
+	csvReader := csv.NewReader(strings.NewReader(strings.Join(cleanLines, "\n")))
+	csvReader.Comma = separator
+	csvReader.LazyQuotes = true
+	csvReader.TrimLeadingSpace = true
+
+	records, err := csvReader.ReadAll()
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("parse CSV/TSV: %w", err)
+	}
+
+	if len(records) == 0 {
+		return result, nil
+	}
+
+	// Determine header
+	var headers []string
+	if def.HeaderLine != "" {
+		// Use explicit header definition
+		headerReader := csv.NewReader(strings.NewReader(def.HeaderLine))
+		headerReader.Comma = separator
+		headerRow, err := headerReader.Read()
+		if err == nil {
+			headers = headerRow
+		}
+	}
+	if headers == nil {
+		// Use first row as header
+		headers = records[0]
+		records = records[1:]
+	}
+
+	// Normalize headers
+	for i, h := range headers {
+		headers[i] = strings.TrimSpace(h)
+	}
+
+	// Build column index
+	colIndex := make(map[string]int, len(headers))
+	for i, h := range headers {
+		colIndex[h] = i
+	}
+
+	result.TotalHosts = len(records)
+
+	for _, row := range records {
+		extracted := make(map[string]string)
+		var services []map[string]any
+
+		for _, fm := range def.FieldMappings {
+			if fm.Target == "services" {
+				// For CSV, services can be a semicolon-delimited string in a single column
+				idx, ok := colIndex[fm.Source]
+				if ok && idx < len(row) {
+					val := strings.TrimSpace(row[idx])
+					if val != "" {
+						// Try to parse as JSON array
+						var svcList []map[string]any
+						if json.Unmarshal([]byte(val), &svcList) == nil {
+							services = svcList
+						}
+					}
+				}
+				continue
+			}
+
+			idx, ok := colIndex[fm.Source]
+			if !ok || idx >= len(row) {
+				if fm.Default != "" {
+					extracted[fm.Target] = fm.Default
+				}
+				continue
+			}
+			val := strings.TrimSpace(row[idx])
+			if val == "" && fm.Default != "" {
+				val = fm.Default
+			}
+			if fm.Transform != "" {
+				val = applyTransform(val, fm.Transform)
+			}
+			extracted[fm.Target] = val
+		}
+
+		if evaluateSkipConditions(def.SkipWhen, extracted) {
+			result.HostsSkipped++
+			continue
+		}
+
+		if extracted["ip_address"] == "" {
+			result.HostsSkipped++
+			continue
+		}
+
+		nodeType := evaluateNodeTypeRules(def.NodeTypeRules, extracted, services)
+
+		_, _, err := s.upsertParsedNode(ctx, networkID, extracted, services, nodeType)
+		if err != nil {
+			s.logger.Error("parser engine CSV: upsert node failed", "error", err)
+			continue
+		}
+		result.NodesCreated++
+	}
+
+	// Edge generation
+	if def.EdgeGeneration != nil && def.EdgeGeneration.Strategy == "subnet" {
+		s.generateSubnetEdges(ctx, networkID)
+	}
+
+	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Nmap XML import (legacy/fallback)
+// ---------------------------------------------------------------------------
 
 func (s *Server) importNmapXML(ctx context.Context, networkID string, data []byte) (ImportResult, error) {
 	var nmapRun NmapRun
