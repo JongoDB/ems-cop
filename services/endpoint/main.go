@@ -1446,6 +1446,25 @@ func (s *Server) importNmapXML(ctx context.Context, networkID string, data []byt
 	// Auto-generate edges from subnet CIDR ranges
 	s.generateSubnetEdges(ctx, networkID)
 
+	// Process traceroute data to infer network adjacency edges
+	for _, host := range nmapRun.Hosts {
+		if len(host.Trace.Hops) < 2 {
+			continue
+		}
+		for i := 0; i < len(host.Trace.Hops)-1; i++ {
+			srcIP := host.Trace.Hops[i].IPAddr
+			dstIP := host.Trace.Hops[i+1].IPAddr
+			if srcIP == "" || dstIP == "" || srcIP == "*" || dstIP == "*" {
+				continue
+			}
+			srcNodeID := s.findOrCreateNode(ctx, networkID, srcIP, "router")
+			dstNodeID := s.findOrCreateNode(ctx, networkID, dstIP, "")
+			if srcNodeID != "" && dstNodeID != "" {
+				_ = s.createEdgeIfNotExists(ctx, networkID, srcNodeID, dstNodeID, "network_adjacency", 0.95, "import")
+			}
+		}
+	}
+
 	return result, nil
 }
 
@@ -1566,6 +1585,36 @@ func (s *Server) generateSubnetEdges(ctx context.Context, networkID string) {
 	}
 
 	s.logger.Info("generateSubnetEdges completed", "network_id", networkID)
+}
+
+// findOrCreateNode looks up a node by IP in the given network, creating it if
+// it does not exist. Returns the node ID or empty string on failure.
+func (s *Server) findOrCreateNode(ctx context.Context, networkID, ip, defaultType string) string {
+	var nodeID string
+	err := s.db.QueryRow(ctx,
+		`SELECT id FROM network_nodes WHERE network_id=$1 AND ip_address=$2`,
+		networkID, ip,
+	).Scan(&nodeID)
+	if err == nil {
+		return nodeID
+	}
+
+	// Node not found — create it
+	nodeType := defaultType
+	if nodeType == "" {
+		nodeType = "host"
+	}
+
+	err = s.db.QueryRow(ctx, `
+		INSERT INTO network_nodes (network_id, ip_address, hostname, os, status, node_type, services, metadata)
+		VALUES ($1, $2, '', 'unknown', 'discovered', $3, '[]'::jsonb, '{}'::jsonb)
+		RETURNING id
+	`, networkID, ip, nodeType).Scan(&nodeID)
+	if err != nil {
+		s.logger.Error("findOrCreateNode: insert failed", "ip", ip, "error", err)
+		return ""
+	}
+	return nodeID
 }
 
 // ---------------------------------------------------------------------------
