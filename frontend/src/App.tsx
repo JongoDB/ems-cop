@@ -14,6 +14,7 @@ import DisplaySchemaEditor from './pages/admin/DisplaySchemaEditor'
 import ParserWorkbench from './pages/admin/ParserWorkbench'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppLayout from './components/AppLayout'
+import AdminLayout from './components/AdminLayout'
 
 const queryClient = new QueryClient()
 
@@ -60,8 +61,11 @@ function App() {
             <Route path="/tickets" element={<TicketsPage />} />
             <Route path="/c2" element={<C2Page />} />
             <Route path="/dashboards" element={<DashboardsPlaceholder />} />
-            <Route path="/admin/display-schemas" element={<DisplaySchemaEditor />} />
-            <Route path="/admin/import-parsers" element={<ParserWorkbench />} />
+            <Route path="/admin" element={<AdminLayout />}>
+              <Route index element={<Navigate to="display-schemas" replace />} />
+              <Route path="display-schemas" element={<DisplaySchemaEditor />} />
+              <Route path="import-parsers" element={<ParserWorkbench />} />
+            </Route>
             <Route path="/" element={<Navigate to="/operations" replace />} />
           </Route>
           <Route path="*" element={<Navigate to="/operations" replace />} />
