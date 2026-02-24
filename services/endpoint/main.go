@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -1442,7 +1443,129 @@ func (s *Server) importNmapXML(ctx context.Context, networkID string, data []byt
 		result.NodesCreated++
 	}
 
+	// Auto-generate edges from subnet CIDR ranges
+	s.generateSubnetEdges(ctx, networkID)
+
 	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// Edge + Node helpers for auto-generation
+// ---------------------------------------------------------------------------
+
+// createEdgeIfNotExists inserts a network edge if one does not already exist
+// between the given source and target nodes in the specified network.
+func (s *Server) createEdgeIfNotExists(ctx context.Context, networkID, srcID, dstID, edgeType string, confidence float64, discoveredBy string) error {
+	var existingID string
+	err := s.db.QueryRow(ctx,
+		`SELECT id FROM network_edges WHERE network_id=$1 AND source_node_id=$2 AND target_node_id=$3`,
+		networkID, srcID, dstID,
+	).Scan(&existingID)
+	if err == nil {
+		// Edge already exists
+		return nil
+	}
+
+	_, err = s.db.Exec(ctx, `
+		INSERT INTO network_edges (network_id, source_node_id, target_node_id, edge_type, confidence, discovered_by)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, networkID, srcID, dstID, edgeType, confidence, discoveredBy)
+	if err != nil {
+		s.logger.Error("create edge failed", "src", srcID, "dst", dstID, "error", err)
+		return fmt.Errorf("create edge: %w", err)
+	}
+	return nil
+}
+
+// generateSubnetEdges creates network_adjacency edges for nodes that share a
+// subnet, based on the network's configured CIDR ranges.
+func (s *Server) generateSubnetEdges(ctx context.Context, networkID string) {
+	// 1. Query CIDR ranges for this network
+	var cidrRanges []string
+	err := s.db.QueryRow(ctx,
+		`SELECT cidr_ranges FROM network_maps WHERE id=$1`, networkID,
+	).Scan(&cidrRanges)
+	if err != nil {
+		s.logger.Warn("generateSubnetEdges: could not load CIDR ranges", "network_id", networkID, "error", err)
+		return
+	}
+	if len(cidrRanges) == 0 {
+		return
+	}
+
+	// 2. Load all nodes for this network
+	type nodeInfo struct {
+		ID       string
+		IP       string
+		NodeType string
+	}
+	rows, err := s.db.Query(ctx,
+		`SELECT id, ip_address, node_type FROM network_nodes WHERE network_id=$1`, networkID,
+	)
+	if err != nil {
+		s.logger.Error("generateSubnetEdges: query nodes failed", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	var allNodes []nodeInfo
+	for rows.Next() {
+		var n nodeInfo
+		if err := rows.Scan(&n.ID, &n.IP, &n.NodeType); err != nil {
+			s.logger.Error("generateSubnetEdges: scan node failed", "error", err)
+			continue
+		}
+		allNodes = append(allNodes, n)
+	}
+
+	// 3. For each CIDR range, group nodes whose IP falls within it
+	for _, cidrStr := range cidrRanges {
+		_, subnet, err := net.ParseCIDR(cidrStr)
+		if err != nil {
+			s.logger.Warn("generateSubnetEdges: invalid CIDR", "cidr", cidrStr, "error", err)
+			continue
+		}
+
+		var subnetNodes []nodeInfo
+		for _, n := range allNodes {
+			ip := net.ParseIP(n.IP)
+			if ip != nil && subnet.Contains(ip) {
+				subnetNodes = append(subnetNodes, n)
+			}
+		}
+
+		if len(subnetNodes) < 2 {
+			continue
+		}
+
+		// 4. Find gateway node (router or firewall)
+		var gatewayNode *nodeInfo
+		for i, n := range subnetNodes {
+			if n.NodeType == "router" || n.NodeType == "firewall" {
+				gatewayNode = &subnetNodes[i]
+				break
+			}
+		}
+
+		if gatewayNode != nil {
+			// Create edges from gateway to all other nodes in subnet
+			for _, n := range subnetNodes {
+				if n.ID == gatewayNode.ID {
+					continue
+				}
+				_ = s.createEdgeIfNotExists(ctx, networkID, gatewayNode.ID, n.ID, "network_adjacency", 0.7, "import")
+			}
+		} else if len(subnetNodes) < 6 {
+			// Star topology with first node as center
+			center := subnetNodes[0]
+			for _, n := range subnetNodes[1:] {
+				_ = s.createEdgeIfNotExists(ctx, networkID, center.ID, n.ID, "network_adjacency", 0.7, "import")
+			}
+		}
+		// If no gateway and >= 6 nodes, skip to avoid mesh explosion
+	}
+
+	s.logger.Info("generateSubnetEdges completed", "network_id", networkID)
 }
 
 // ---------------------------------------------------------------------------
