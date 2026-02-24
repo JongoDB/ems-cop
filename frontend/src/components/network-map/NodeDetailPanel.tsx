@@ -13,11 +13,13 @@ import {
   Activity,
   Plus,
   Trash2,
+  Check,
 } from 'lucide-react'
-import type { NetworkNodeRecord, ServiceEntry } from './types'
+import type { NetworkNodeRecord, ServiceEntry, VulnEntry } from './types'
 import { InlineText, InlineSelect } from './InlineEditor'
 import { DEVICE_TYPES } from './DeviceIcons'
 import { apiFetch } from '../../lib/api'
+import VulnDrillDown from './VulnDrillDown'
 
 interface NodeDetailPanelProps {
   node: NetworkNodeRecord
@@ -113,12 +115,24 @@ const deleteButtonStyle: React.CSSProperties = {
   transition: 'color 0.15s ease',
 }
 
+const SEVERITY_COLORS: Record<string, string> = {
+  critical: '#ff4444',
+  high: '#ff8800',
+  medium: '#ffcc00',
+  low: '#4488ff',
+  info: '#888888',
+}
+
 export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDetailPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
+  const [vulnDrillDown, setVulnDrillDown] = useState<VulnEntry | null>(null)
+  const [showVulnForm, setShowVulnForm] = useState(false)
 
   const NodeIcon = getNodeTypeIcon(node.node_type)
   const statusColor = getStatusColor(node.status)
   const services: ServiceEntry[] = Array.isArray(node.services) ? node.services : []
+  const metadata = (node.metadata as Record<string, unknown>) || {}
+  const vulns: VulnEntry[] = Array.isArray(metadata.vulnerabilities) ? (metadata.vulnerabilities as VulnEntry[]) : []
 
   const handleFieldSave = async (field: string, value: string) => {
     const updated = await apiFetch<NetworkNodeRecord>(`/nodes/${node.id}`, {
@@ -150,6 +164,34 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
   const handleDeleteService = (index: number) => {
     const newServices = services.filter((_, i) => i !== index)
     handleServicesUpdate(newServices)
+  }
+
+  const handleVulnsUpdate = async (newVulns: VulnEntry[]) => {
+    const updated = await apiFetch<NetworkNodeRecord>(`/nodes/${node.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ metadata: { ...metadata, vulnerabilities: newVulns } }),
+    })
+    onNodeUpdate(updated)
+  }
+
+  const handleAddVuln = (vuln: VulnEntry) => {
+    handleVulnsUpdate([...vulns, vuln])
+    setShowVulnForm(false)
+  }
+
+  const handleVulnClick = (vuln: VulnEntry) => {
+    setVulnDrillDown(vuln)
+  }
+
+  const handleDeleteVuln = (index: number) => {
+    const newVulns = vulns.filter((_, i) => i !== index)
+    handleVulnsUpdate(newVulns)
+  }
+
+  const handleVulnUpdate = async (updatedVuln: VulnEntry) => {
+    const newVulns = vulns.map((v) => v.cve_id === updatedVuln.cve_id ? updatedVuln : v)
+    await handleVulnsUpdate(newVulns)
+    setVulnDrillDown(updatedVuln)
   }
 
   return (
@@ -206,7 +248,9 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
         {tabs.map((tab) => {
           const isActive = activeTab === tab.id
           const TabIcon = tab.icon
-          const badge = tab.id === 'services' && services.length > 0 ? services.length : null
+          const badge = (tab.id === 'services' && services.length > 0) ? services.length
+            : (tab.id === 'vulns' && vulns.length > 0) ? vulns.length
+            : null
           return (
             <button
               key={tab.id}
@@ -266,7 +310,15 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
       }}>
         {activeTab === 'overview' && renderOverviewTab(node, NodeIcon, statusColor, services, handleFieldSave)}
         {activeTab === 'services' && renderServicesTab(services, handleAddService, handleDeleteService)}
-        {activeTab === 'vulns' && renderPlaceholderTab('NO VULNERABILITIES TRACKED', 'Add Vulnerability')}
+        {activeTab === 'vulns' && !vulnDrillDown && renderVulnsTab(vulns, showVulnForm, setShowVulnForm, handleAddVuln, handleVulnClick, handleDeleteVuln)}
+        {activeTab === 'vulns' && vulnDrillDown && (
+          <VulnDrillDown
+            vuln={vulnDrillDown}
+            node={node}
+            onBack={() => setVulnDrillDown(null)}
+            onSave={handleVulnUpdate}
+          />
+        )}
         {activeTab === 'interfaces' && renderPlaceholderTab('NO INTERFACES CONFIGURED', 'Add Interface')}
         {activeTab === 'notes' && renderPlaceholderTab('NO NOTES', 'Add Note')}
       </div>
@@ -543,6 +595,341 @@ function renderServicesTab(
         <Plus size={12} />
         ADD SERVICE
       </button>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Vulns Tab                                                         */
+/* ------------------------------------------------------------------ */
+
+const SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'info']
+
+const vulnFormInputStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: 11,
+  background: 'var(--color-bg-surface)',
+  color: 'var(--color-text-bright)',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius)',
+  padding: '5px 8px',
+  width: '100%',
+  boxSizing: 'border-box' as const,
+  outline: 'none',
+}
+
+const vulnFormLabelStyle: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)',
+  fontSize: 9,
+  letterSpacing: 1,
+  color: 'var(--color-text-muted)',
+  display: 'block',
+  marginBottom: 3,
+}
+
+function renderVulnsTab(
+  vulns: VulnEntry[],
+  showForm: boolean,
+  setShowForm: (v: boolean) => void,
+  onAdd: (vuln: VulnEntry) => void,
+  onClick: (vuln: VulnEntry) => void,
+  onDelete: (index: number) => void,
+) {
+  if (vulns.length === 0 && !showForm) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: 1,
+        gap: 12,
+      }}>
+        <span style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          letterSpacing: 1,
+          color: 'var(--color-text-muted)',
+        }}>
+          NO VULNERABILITIES TRACKED
+        </span>
+        <button onClick={() => setShowForm(true)} style={addButtonStyle}>
+          <Plus size={12} />
+          ADD VULNERABILITY
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+      {vulns.length > 0 && (
+        <>
+          {/* Column headers */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '90px 62px 42px 28px 70px 24px',
+            gap: 4,
+            padding: '0 10px 6px',
+            borderBottom: '1px solid var(--color-border)',
+          }}>
+            {['CVE', 'SEVERITY', 'CVSS', 'EXP', 'STATUS', ''].map((h, i) => (
+              <span key={i} style={{
+                fontFamily: 'var(--font-mono)',
+                fontSize: 8,
+                letterSpacing: 1,
+                color: 'var(--color-text-muted)',
+              }}>
+                {h}
+              </span>
+            ))}
+          </div>
+
+          {/* Vuln rows */}
+          {[...vulns]
+            .sort((a, b) => SEVERITY_ORDER.indexOf(a.severity) - SEVERITY_ORDER.indexOf(b.severity))
+            .map((vuln) => {
+              const origIndex = vulns.findIndex((v) => v.cve_id === vuln.cve_id)
+              const sevColor = SEVERITY_COLORS[vuln.severity] || '#888'
+              return (
+                <div
+                  key={vuln.cve_id}
+                  style={{
+                    display: 'grid',
+                    gridTemplateColumns: '90px 62px 42px 28px 70px 24px',
+                    gap: 4,
+                    background: 'var(--color-bg-surface)',
+                    border: '1px solid var(--color-border)',
+                    borderRadius: 'var(--radius)',
+                    padding: '8px 10px',
+                    alignItems: 'center',
+                    cursor: 'pointer',
+                    transition: 'border-color 0.15s ease',
+                  }}
+                  onClick={() => onClick(vuln)}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = 'var(--color-accent)'
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = 'var(--color-border)'
+                  }}
+                >
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    fontWeight: 600,
+                    color: 'var(--color-text-bright)',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {vuln.cve_id}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 9,
+                    fontWeight: 600,
+                    letterSpacing: 0.5,
+                    color: sevColor,
+                    background: `${sevColor}1a`,
+                    border: `1px solid ${sevColor}40`,
+                    borderRadius: 'var(--radius)',
+                    padding: '1px 5px',
+                    textTransform: 'uppercase',
+                    textAlign: 'center',
+                  }}>
+                    {vuln.severity}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 10,
+                    color: 'var(--color-text-muted)',
+                  }}>
+                    {vuln.cvss.toFixed(1)}
+                  </span>
+                  <span style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    color: vuln.exploit_available ? '#ff4444' : 'var(--color-text-muted)',
+                  }}>
+                    {vuln.exploit_available ? <Check size={12} /> : <X size={12} />}
+                  </span>
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 9,
+                    color: 'var(--color-text-muted)',
+                    textTransform: 'uppercase',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}>
+                    {vuln.status.replace(/_/g, ' ')}
+                  </span>
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      onDelete(origIndex)
+                    }}
+                    style={deleteButtonStyle}
+                    onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--color-danger)' }}
+                    onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--color-text-muted)' }}
+                    title="Remove vulnerability"
+                  >
+                    <Trash2 size={12} />
+                  </button>
+                </div>
+              )
+            })}
+        </>
+      )}
+
+      {/* Add form or button */}
+      {showForm ? (
+        <VulnAddForm onAdd={onAdd} onCancel={() => setShowForm(false)} />
+      ) : (
+        <button
+          onClick={() => setShowForm(true)}
+          style={{ ...addButtonStyle, marginTop: 8, alignSelf: 'flex-start' }}
+        >
+          <Plus size={12} />
+          ADD VULNERABILITY
+        </button>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Vuln Add Form (inline)                                            */
+/* ------------------------------------------------------------------ */
+
+function VulnAddForm({
+  onAdd,
+  onCancel,
+}: {
+  onAdd: (vuln: VulnEntry) => void
+  onCancel: () => void
+}) {
+  const [cveId, setCveId] = useState('')
+  const [title, setTitle] = useState('')
+  const [severity, setSeverity] = useState<VulnEntry['severity']>('medium')
+  const [cvss, setCvss] = useState('5.0')
+  const [exploitAvailable, setExploitAvailable] = useState(false)
+
+  const canSubmit = cveId.trim() && title.trim()
+
+  const handleSubmit = () => {
+    if (!canSubmit) return
+    onAdd({
+      cve_id: cveId.trim(),
+      title: title.trim(),
+      severity,
+      cvss: parseFloat(cvss) || 0,
+      exploit_available: exploitAvailable,
+      status: 'unverified',
+    })
+  }
+
+  return (
+    <div style={{
+      display: 'flex',
+      flexDirection: 'column',
+      gap: 8,
+      background: 'var(--color-bg-surface)',
+      border: '1px solid var(--color-border)',
+      borderRadius: 'var(--radius)',
+      padding: 10,
+      marginTop: 8,
+    }}>
+      <div>
+        <span style={vulnFormLabelStyle}>CVE ID</span>
+        <input
+          value={cveId}
+          onChange={(e) => setCveId(e.target.value)}
+          placeholder="CVE-2024-XXXXX"
+          style={vulnFormInputStyle}
+        />
+      </div>
+      <div>
+        <span style={vulnFormLabelStyle}>TITLE</span>
+        <input
+          value={title}
+          onChange={(e) => setTitle(e.target.value)}
+          placeholder="Vulnerability title"
+          style={vulnFormInputStyle}
+        />
+      </div>
+      <div style={{ display: 'flex', gap: 6 }}>
+        <div style={{ flex: 1 }}>
+          <span style={vulnFormLabelStyle}>SEVERITY</span>
+          <select
+            value={severity}
+            onChange={(e) => setSeverity(e.target.value as VulnEntry['severity'])}
+            style={{ ...vulnFormInputStyle, appearance: 'auto' as const }}
+          >
+            {['critical', 'high', 'medium', 'low', 'info'].map((s) => (
+              <option key={s} value={s}>{s.toUpperCase()}</option>
+            ))}
+          </select>
+        </div>
+        <div style={{ flex: 1 }}>
+          <span style={vulnFormLabelStyle}>CVSS</span>
+          <input
+            type="number"
+            min="0"
+            max="10"
+            step="0.1"
+            value={cvss}
+            onChange={(e) => setCvss(e.target.value)}
+            style={vulnFormInputStyle}
+          />
+        </div>
+      </div>
+      <label style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 6,
+        fontFamily: 'var(--font-mono)',
+        fontSize: 10,
+        color: 'var(--color-text-muted)',
+        cursor: 'pointer',
+      }}>
+        <input
+          type="checkbox"
+          checked={exploitAvailable}
+          onChange={(e) => setExploitAvailable(e.target.checked)}
+          style={{ margin: 0 }}
+        />
+        EXPLOIT AVAILABLE
+      </label>
+      <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+        <button
+          onClick={onCancel}
+          style={{
+            ...addButtonStyle,
+            fontSize: 9,
+            padding: '4px 10px',
+          }}
+        >
+          CANCEL
+        </button>
+        <button
+          onClick={handleSubmit}
+          disabled={!canSubmit}
+          style={{
+            ...addButtonStyle,
+            fontSize: 9,
+            padding: '4px 10px',
+            color: canSubmit ? 'var(--color-accent)' : 'var(--color-text-muted)',
+            borderColor: canSubmit ? 'var(--color-accent)' : 'var(--color-border)',
+            opacity: canSubmit ? 1 : 0.5,
+          }}
+        >
+          <Plus size={10} />
+          ADD
+        </button>
+      </div>
     </div>
   )
 }

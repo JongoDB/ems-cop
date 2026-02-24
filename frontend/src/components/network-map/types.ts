@@ -24,3 +24,31 @@ export interface ServiceEntry {
   product: string
   version: string
 }
+
+export interface VulnEntry {
+  cve_id: string
+  title: string
+  description?: string
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  cvss: number
+  exploit_available: boolean
+  status: 'unverified' | 'confirmed' | 'exploited' | 'mitigated' | 'accepted_risk'
+  detected_by?: string
+  exploits?: ExploitEntry[]
+  attack_notes?: string
+  timeline?: TimelineEntry[]
+}
+
+export interface ExploitEntry {
+  type: 'metasploit' | 'exploitdb' | 'poc_url' | 'custom'
+  reference: string
+  url?: string
+  verified: boolean
+  notes?: string
+}
+
+export interface TimelineEntry {
+  action: string
+  timestamp: string
+  actor?: string
+}
