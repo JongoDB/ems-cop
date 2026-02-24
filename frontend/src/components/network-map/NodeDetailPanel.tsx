@@ -82,12 +82,6 @@ const detailLabelStyle: React.CSSProperties = {
   marginBottom: 4,
 }
 
-const detailValueStyle: React.CSSProperties = {
-  fontFamily: 'var(--font-mono)',
-  fontSize: 12,
-  color: 'var(--color-text)',
-  display: 'block',
-}
 
 const addButtonStyle: React.CSSProperties = {
   display: 'flex',

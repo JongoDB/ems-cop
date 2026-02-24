@@ -69,8 +69,8 @@ export default function DisplaySchemaEditor() {
 
   async function fetchSchemas() {
     try {
-      const res = await apiFetch<{ data: DisplaySchema[] }>('/display-schemas')
-      const list = res.data ?? []
+      const res = await apiFetch<DisplaySchema[] | { data: DisplaySchema[] }>('/display-schemas')
+      const list = Array.isArray(res) ? res : (res.data ?? [])
       setSchemas(list)
       if (list.length > 0 && !selectedId) {
         selectSchema(list[0])

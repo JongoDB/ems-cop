@@ -48,8 +48,8 @@ export default function ParserWorkbench() {
 
   async function fetchParsers() {
     try {
-      const res = await apiFetch<{ data: ImportParser[] }>('/import-parsers')
-      const list = res.data ?? []
+      const res = await apiFetch<ImportParser[] | { data: ImportParser[] }>('/import-parsers')
+      const list = Array.isArray(res) ? res : (res.data ?? [])
       setParsers(list)
       if (list.length > 0 && !selectedParserId) {
         selectParser(list[0])
