@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useRef, useCallback } from 'react'
 import {
   X,
   Info,
@@ -14,8 +14,10 @@ import {
   Plus,
   Trash2,
   Check,
+  Eye,
+  Pencil,
 } from 'lucide-react'
-import type { NetworkNodeRecord, ServiceEntry, VulnEntry } from './types'
+import type { NetworkNodeRecord, ServiceEntry, VulnEntry, InterfaceEntry } from './types'
 import { InlineText, InlineSelect } from './InlineEditor'
 import { DEVICE_TYPES } from './DeviceIcons'
 import { apiFetch } from '../../lib/api'
@@ -127,12 +129,17 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
   const [activeTab, setActiveTab] = useState<TabId>('overview')
   const [vulnDrillDown, setVulnDrillDown] = useState<VulnEntry | null>(null)
   const [showVulnForm, setShowVulnForm] = useState(false)
+  const [notesMode, setNotesMode] = useState<'edit' | 'preview'>('edit')
+  const [notesValue, setNotesValue] = useState<string | null>(null)
+  const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const NodeIcon = getNodeTypeIcon(node.node_type)
   const statusColor = getStatusColor(node.status)
   const services: ServiceEntry[] = Array.isArray(node.services) ? node.services : []
   const metadata = (node.metadata as Record<string, unknown>) || {}
   const vulns: VulnEntry[] = Array.isArray(metadata.vulnerabilities) ? (metadata.vulnerabilities as VulnEntry[]) : []
+  const interfaces: InterfaceEntry[] = Array.isArray(metadata.interfaces) ? (metadata.interfaces as InterfaceEntry[]) : []
+  const notes: string = typeof metadata.notes === 'string' ? (metadata.notes as string) : ''
 
   const handleFieldSave = async (field: string, value: string) => {
     const updated = await apiFetch<NetworkNodeRecord>(`/nodes/${node.id}`, {
@@ -194,6 +201,55 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
     setVulnDrillDown(updatedVuln)
   }
 
+  const handleInterfacesUpdate = async (newInterfaces: InterfaceEntry[]) => {
+    const updated = await apiFetch<NetworkNodeRecord>(`/nodes/${node.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ metadata: { ...metadata, interfaces: newInterfaces } }),
+    })
+    onNodeUpdate(updated)
+  }
+
+  const handleAddInterface = () => {
+    const newIface: InterfaceEntry = {
+      name: '',
+      mac: '',
+      ips: [],
+      state: 'up',
+    }
+    handleInterfacesUpdate([...interfaces, newIface])
+  }
+
+  const handleDeleteInterface = (index: number) => {
+    handleInterfacesUpdate(interfaces.filter((_, i) => i !== index))
+  }
+
+  const handleNotesUpdate = useCallback(async (newNotes: string) => {
+    const updated = await apiFetch<NetworkNodeRecord>(`/nodes/${node.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ metadata: { ...metadata, notes: newNotes } }),
+    })
+    onNodeUpdate(updated)
+  }, [node.id, metadata, onNodeUpdate])
+
+  const handleNotesChange = useCallback((value: string) => {
+    setNotesValue(value)
+    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current)
+    notesSaveTimer.current = setTimeout(() => {
+      handleNotesUpdate(value)
+    }, 1000)
+  }, [handleNotesUpdate])
+
+  const handleNotesBlur = useCallback(() => {
+    if (notesSaveTimer.current) {
+      clearTimeout(notesSaveTimer.current)
+      notesSaveTimer.current = null
+    }
+    const current = notesValue !== null ? notesValue : notes
+    if (current !== notes) {
+      handleNotesUpdate(current)
+    }
+  }, [notesValue, notes, handleNotesUpdate])
+
   return (
     <div style={{
       width: 380,
@@ -250,7 +306,9 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
           const TabIcon = tab.icon
           const badge = (tab.id === 'services' && services.length > 0) ? services.length
             : (tab.id === 'vulns' && vulns.length > 0) ? vulns.length
+            : (tab.id === 'interfaces' && interfaces.length > 0) ? interfaces.length
             : null
+          const hasDot = tab.id === 'notes' && notes.length > 0
           return (
             <button
               key={tab.id}
@@ -295,6 +353,15 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
                   {badge}
                 </span>
               )}
+              {hasDot && (
+                <span style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  background: 'var(--color-accent)',
+                  flexShrink: 0,
+                }} />
+              )}
             </button>
           )
         })}
@@ -319,8 +386,14 @@ export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDet
             onSave={handleVulnUpdate}
           />
         )}
-        {activeTab === 'interfaces' && renderPlaceholderTab('NO INTERFACES CONFIGURED', 'Add Interface')}
-        {activeTab === 'notes' && renderPlaceholderTab('NO NOTES', 'Add Note')}
+        {activeTab === 'interfaces' && renderInterfacesTab(interfaces, handleAddInterface, handleDeleteInterface)}
+        {activeTab === 'notes' && renderNotesTab(
+          notesValue !== null ? notesValue : notes,
+          notesMode,
+          setNotesMode,
+          handleNotesChange,
+          handleNotesBlur,
+        )}
       </div>
     </div>
   )
@@ -935,31 +1008,284 @@ function VulnAddForm({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Placeholder Tabs                                                  */
+/*  Interfaces Tab                                                    */
 /* ------------------------------------------------------------------ */
 
-function renderPlaceholderTab(message: string, addLabel: string) {
-  return (
-    <div style={{
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      flex: 1,
-      gap: 12,
-    }}>
-      <span style={{
-        fontFamily: 'var(--font-mono)',
-        fontSize: 11,
-        letterSpacing: 1,
-        color: 'var(--color-text-muted)',
+const STATE_COLORS: Record<string, string> = {
+  up: 'var(--color-success)',
+  down: 'var(--color-danger)',
+  unknown: 'var(--color-text-muted)',
+}
+
+function renderInterfacesTab(
+  interfaces: InterfaceEntry[],
+  onAdd: () => void,
+  onDelete: (index: number) => void,
+) {
+  if (interfaces.length === 0) {
+    return (
+      <div style={{
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flex: 1,
+        gap: 12,
       }}>
-        {message}
-      </span>
-      <button style={addButtonStyle}>
+        <span style={{
+          fontFamily: 'var(--font-mono)',
+          fontSize: 11,
+          letterSpacing: 1,
+          color: 'var(--color-text-muted)',
+        }}>
+          NO INTERFACES CONFIGURED
+        </span>
+        <button onClick={onAdd} style={addButtonStyle}>
+          <Plus size={12} />
+          ADD INTERFACE
+        </button>
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 6, flex: 1 }}>
+      {/* Column headers */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: '52px 1fr 1fr 42px 36px 24px',
+        gap: 4,
+        padding: '0 10px 6px',
+        borderBottom: '1px solid var(--color-border)',
+      }}>
+        {['NAME', 'MAC', 'IPS', 'VLAN', 'STATE', ''].map((h, i) => (
+          <span key={i} style={{
+            fontFamily: 'var(--font-mono)',
+            fontSize: 8,
+            letterSpacing: 1,
+            color: 'var(--color-text-muted)',
+          }}>
+            {h}
+          </span>
+        ))}
+      </div>
+
+      {/* Interface rows */}
+      {interfaces.map((iface, i) => {
+        const stateColor = STATE_COLORS[iface.state] || 'var(--color-text-muted)'
+        return (
+          <div
+            key={i}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: '52px 1fr 1fr 42px 36px 24px',
+              gap: 4,
+              background: 'var(--color-bg-surface)',
+              border: '1px solid var(--color-border)',
+              borderRadius: 'var(--radius)',
+              padding: '8px 10px',
+              alignItems: 'center',
+            }}
+          >
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              fontWeight: 600,
+              color: 'var(--color-accent)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {iface.name || '-'}
+            </span>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              color: 'var(--color-text-muted)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {iface.mac || '-'}
+            </span>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              color: 'var(--color-text)',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+            }}>
+              {iface.ips.length > 0 ? iface.ips.join(', ') : '-'}
+            </span>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 10,
+              color: 'var(--color-text-muted)',
+              textAlign: 'center',
+            }}>
+              {iface.vlan != null ? iface.vlan : '-'}
+            </span>
+            <span style={{
+              fontFamily: 'var(--font-mono)',
+              fontSize: 9,
+              fontWeight: 600,
+              color: stateColor,
+              textTransform: 'uppercase',
+            }}>
+              {iface.state}
+            </span>
+            <button
+              onClick={() => onDelete(i)}
+              style={deleteButtonStyle}
+              onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--color-danger)' }}
+              onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--color-text-muted)' }}
+              title="Remove interface"
+            >
+              <Trash2 size={12} />
+            </button>
+          </div>
+        )
+      })}
+
+      {/* Add button */}
+      <button onClick={onAdd} style={{ ...addButtonStyle, marginTop: 8, alignSelf: 'flex-start' }}>
         <Plus size={12} />
-        {addLabel.toUpperCase()}
+        ADD INTERFACE
       </button>
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------ */
+/*  Notes Tab                                                         */
+/* ------------------------------------------------------------------ */
+
+function renderMarkdown(source: string): string {
+  let html = source
+    // Escape HTML entities first to prevent injection
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+
+  // Code blocks (``` ... ```)
+  html = html.replace(/```([\s\S]*?)```/g, (_m, code: string) =>
+    `<pre style="background:var(--color-bg-surface);border:1px solid var(--color-border);border-radius:var(--radius);padding:8px;overflow-x:auto;font-family:var(--font-mono);font-size:11px;color:var(--color-text-bright);margin:4px 0">${code.trim()}</pre>`,
+  )
+
+  // Inline code
+  html = html.replace(/`([^`]+)`/g, '<code style="background:var(--color-bg-surface);padding:1px 4px;border-radius:2px;font-family:var(--font-mono);font-size:11px;color:var(--color-accent)">$1</code>')
+
+  // Headers
+  html = html.replace(/^## (.+)$/gm, '<h4 style="font-family:var(--font-mono);font-size:12px;color:var(--color-text-bright);margin:8px 0 4px;letter-spacing:0.5px">$1</h4>')
+  html = html.replace(/^# (.+)$/gm, '<h3 style="font-family:var(--font-mono);font-size:13px;color:var(--color-text-bright);margin:8px 0 4px;letter-spacing:0.5px">$1</h3>')
+
+  // Bold
+  html = html.replace(/\*\*(.+?)\*\*/g, '<strong style="color:var(--color-text-bright)">$1</strong>')
+
+  // Italic
+  html = html.replace(/\*(.+?)\*/g, '<em>$1</em>')
+
+  // Bullet lists — group consecutive lines starting with -
+  html = html.replace(/(^- .+$(\n- .+$)*)/gm, (block) => {
+    const items = block.split('\n').map((line) =>
+      `<li style="margin:2px 0">${line.replace(/^- /, '')}</li>`,
+    ).join('')
+    return `<ul style="margin:4px 0;padding-left:16px;list-style:disc">${items}</ul>`
+  })
+
+  // Line breaks
+  html = html.replace(/\n/g, '<br/>')
+
+  return html
+}
+
+function renderNotesTab(
+  notes: string,
+  mode: 'edit' | 'preview',
+  setMode: (m: 'edit' | 'preview') => void,
+  onChange: (value: string) => void,
+  onBlur: () => void,
+) {
+  const toggleBtnStyle = (active: boolean): React.CSSProperties => ({
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    background: active ? 'var(--color-bg-surface)' : 'transparent',
+    border: active ? '1px solid var(--color-accent)' : '1px solid var(--color-border)',
+    borderRadius: 'var(--radius)',
+    padding: '4px 10px',
+    cursor: 'pointer',
+    fontFamily: 'var(--font-mono)',
+    fontSize: 9,
+    letterSpacing: 0.5,
+    color: active ? 'var(--color-accent)' : 'var(--color-text-muted)',
+    transition: 'all 0.15s ease',
+  })
+
+  // Content is sanitized: renderMarkdown escapes all HTML entities before processing
+  const renderedHtml = notes
+    ? renderMarkdown(notes)
+    : '<span style="color:var(--color-text-muted);font-style:italic">No notes yet</span>'
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', flex: 1, gap: 8 }}>
+      {/* Mode toggle */}
+      <div style={{ display: 'flex', gap: 4 }}>
+        <button onClick={() => setMode('edit')} style={toggleBtnStyle(mode === 'edit')}>
+          <Pencil size={10} />
+          EDIT
+        </button>
+        <button onClick={() => setMode('preview')} style={toggleBtnStyle(mode === 'preview')}>
+          <Eye size={10} />
+          PREVIEW
+        </button>
+      </div>
+
+      {/* Content area */}
+      {mode === 'edit' ? (
+        <textarea
+          value={notes}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={onBlur}
+          placeholder="Operator notes... (supports markdown)"
+          style={{
+            flex: 1,
+            width: '100%',
+            minHeight: 200,
+            background: 'var(--color-bg-surface)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius)',
+            color: 'var(--color-text-bright)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            lineHeight: '1.5',
+            padding: 10,
+            resize: 'none',
+            outline: 'none',
+            boxSizing: 'border-box' as const,
+          }}
+        />
+      ) : (
+        <div
+          style={{
+            flex: 1,
+            width: '100%',
+            minHeight: 200,
+            background: 'var(--color-bg-surface)',
+            border: '1px solid var(--color-border)',
+            borderRadius: 'var(--radius)',
+            color: 'var(--color-text)',
+            fontFamily: 'var(--font-mono)',
+            fontSize: 11,
+            lineHeight: '1.5',
+            padding: 10,
+            overflowY: 'auto',
+            boxSizing: 'border-box' as const,
+          }}
+          dangerouslySetInnerHTML={{ __html: renderedHtml }}
+        />
+      )}
     </div>
   )
 }

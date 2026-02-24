@@ -52,3 +52,11 @@ export interface TimelineEntry {
   timestamp: string
   actor?: string
 }
+
+export interface InterfaceEntry {
+  name: string
+  mac: string
+  ips: string[]
+  vlan?: number
+  state: string
+}
