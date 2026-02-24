@@ -3,6 +3,8 @@ import { useOutletContext } from 'react-router-dom'
 import cytoscape from 'cytoscape'
 import { apiFetch, getAccessToken } from '../../lib/api'
 import { Network, Plus, Upload, Server, Shield, X, ChevronLeft, Wifi, Monitor, Activity } from 'lucide-react'
+import { getDeviceSvgDataUri } from '../../components/network-map/DeviceIcons'
+import { getOsLogoDataUri, detectOs } from '../../components/network-map/OsLogos'
 
 interface NetworkRecord {
   id: string
@@ -79,25 +81,24 @@ const cyStyle: cytoscape.StylesheetJsonBlock[] = [
   {
     selector: 'node',
     style: {
-      'background-color': '#161d28',
+      'shape': 'roundrectangle',
+      'background-color': '#0d1117',
       'border-width': 2,
-      'border-color': '#5c6b7f',
+      'border-color': '#3a4a5c',
       'label': 'data(label)',
       'font-size': '10px',
       'font-family': 'JetBrains Mono, monospace',
       'color': '#c5cdd8',
       'text-valign': 'bottom',
       'text-margin-y': 6,
-      'width': 40,
-      'height': 40,
+      'width': 54,
+      'height': 54,
       'text-outline-width': 2,
       'text-outline-color': '#0a0e14',
-    }
+      'background-fit': 'contain',
+      'background-clip': 'none',
+    } as any
   },
-  { selector: 'node[nodeType="server"]', style: { shape: 'rectangle' } },
-  { selector: 'node[nodeType="router"]', style: { shape: 'diamond' } },
-  { selector: 'node[nodeType="firewall"]', style: { shape: 'hexagon' } },
-  { selector: 'node[nodeType="workstation"]', style: { shape: 'ellipse' } },
   { selector: 'node[status="alive"]', style: { 'border-color': '#40c057' } },
   { selector: 'node[status="compromised"]', style: { 'border-color': '#ff6b6b', 'border-width': 3 } },
   { selector: 'node[status="offline"]', style: { 'border-color': '#1e2a3a', opacity: 0.5 } },
@@ -125,6 +126,13 @@ function getNodeTypeIcon(nodeType: string) {
     case 'router': return Wifi
     case 'firewall': return Shield
     case 'workstation': return Monitor
+    case 'switch': return Network
+    case 'access_point': return Wifi
+    case 'vpn': return Shield
+    case 'printer': return Server
+    case 'iot': return Activity
+    case 'host': return Monitor
+    case 'unknown': return Network
     default: return Network
   }
 }
@@ -224,17 +232,38 @@ export default function NetworksTab() {
     if (nodes.length === 0) return
 
     const elements: cytoscape.ElementDefinition[] = [
-      ...nodes.map((n) => ({
-        data: {
-          id: n.id,
-          label: n.hostname || n.ip_address,
-          nodeType: n.node_type,
-          status: n.status,
-        },
-        position: n.position_x != null && n.position_y != null
-          ? { x: n.position_x, y: n.position_y }
-          : undefined,
-      })),
+      ...nodes.map((n) => {
+        const statusColor = n.status === 'compromised' ? '#ff6b6b'
+                          : n.status === 'offline' ? '#3a4a5c'
+                          : '#40c057'
+        const deviceIcon = getDeviceSvgDataUri(n.node_type, statusColor)
+        const osLogo = getOsLogoDataUri(detectOs(n.os || '', n.os_version || undefined))
+
+        const bgImages = osLogo ? [deviceIcon, osLogo] : [deviceIcon]
+        const bgPositionX = osLogo ? ['50%', '82%'] : ['50%']
+        const bgPositionY = osLogo ? ['42%', '82%'] : ['42%']
+        const bgWidth = osLogo ? ['55%', '24%'] : ['55%']
+        const bgHeight = osLogo ? ['55%', '24%'] : ['55%']
+
+        return {
+          data: {
+            id: n.id,
+            label: n.hostname || n.ip_address,
+            nodeType: n.node_type,
+            status: n.status,
+          },
+          style: {
+            'background-image': bgImages,
+            'background-position-x': bgPositionX,
+            'background-position-y': bgPositionY,
+            'background-width': bgWidth,
+            'background-height': bgHeight,
+          } as any,
+          position: n.position_x != null && n.position_y != null
+            ? { x: n.position_x, y: n.position_y }
+            : undefined,
+        }
+      }),
       ...edges.map((e) => ({
         data: {
           id: e.id,
