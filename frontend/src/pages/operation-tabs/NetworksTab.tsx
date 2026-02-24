@@ -2,9 +2,11 @@ import { useState, useCallback, useEffect, useRef } from 'react'
 import { useOutletContext } from 'react-router-dom'
 import cytoscape from 'cytoscape'
 import { apiFetch, getAccessToken } from '../../lib/api'
-import { Network, Plus, Upload, Server, Shield, X, ChevronLeft, Wifi, Monitor, Activity } from 'lucide-react'
+import { Network, Plus, Upload, Server, Shield, X, ChevronLeft, Activity } from 'lucide-react'
 import { getDeviceSvgDataUri } from '../../components/network-map/DeviceIcons'
 import { getOsLogoDataUri, detectOs } from '../../components/network-map/OsLogos'
+import NodeDetailPanel from '../../components/network-map/NodeDetailPanel'
+import type { NetworkNodeRecord } from '../../components/network-map/types'
 
 interface NetworkRecord {
   id: string
@@ -27,33 +29,6 @@ interface ImportResult {
   nodes_updated: number
   total_hosts: number
   hosts_skipped: number
-}
-
-interface NetworkNodeRecord {
-  id: string
-  network_id: string
-  endpoint_id: string | null
-  ip_address: string
-  hostname: string
-  mac_address: string | null
-  os: string
-  os_version: string
-  status: string
-  node_type: string
-  position_x: number | null
-  position_y: number | null
-  services: ServiceEntry[] | null
-  metadata: unknown
-  created_at: string
-  updated_at: string
-}
-
-interface ServiceEntry {
-  port: number
-  protocol: string
-  service: string
-  product: string
-  version: string
 }
 
 interface NetworkEdgeRecord {
@@ -119,32 +94,6 @@ const cyStyle: cytoscape.StylesheetJsonBlock[] = [
   { selector: 'edge[edgeType="lateral_movement"]', style: { 'line-color': '#f59e0b', 'target-arrow-color': '#f59e0b' } },
   { selector: 'edge[edgeType="tunnel"]', style: { 'line-color': '#4dabf7', 'target-arrow-color': '#4dabf7', 'line-style': 'dashed' } },
 ]
-
-function getNodeTypeIcon(nodeType: string) {
-  switch (nodeType) {
-    case 'server': return Server
-    case 'router': return Wifi
-    case 'firewall': return Shield
-    case 'workstation': return Monitor
-    case 'switch': return Network
-    case 'access_point': return Wifi
-    case 'vpn': return Shield
-    case 'printer': return Server
-    case 'iot': return Activity
-    case 'host': return Monitor
-    case 'unknown': return Network
-    default: return Network
-  }
-}
-
-function getStatusColor(status: string) {
-  switch (status) {
-    case 'alive': return 'var(--color-success)'
-    case 'compromised': return 'var(--color-danger)'
-    case 'offline': return 'var(--color-border)'
-    default: return 'var(--color-text-muted)'
-  }
-}
 
 export default function NetworksTab() {
   const { operation, refresh } = useOutletContext<{
@@ -399,6 +348,16 @@ export default function NetworksTab() {
     }
   }
 
+  const handleNodeUpdate = useCallback((updated: NetworkNodeRecord) => {
+    setSelectedNode(updated)
+    // Refresh topology to update map visuals
+    if (selectedNetworkId) {
+      apiFetch<TopologyResponse>(`/networks/${selectedNetworkId}/topology`)
+        .then(setTopology)
+        .catch(() => {})
+    }
+  }, [selectedNetworkId])
+
   // Loading state
   if (loading) {
     return (
@@ -573,226 +532,6 @@ export default function NetworksTab() {
     )
   }
 
-  function renderNodeDetailPanel() {
-    if (!selectedNode) return null
-    const NodeIcon = getNodeTypeIcon(selectedNode.node_type)
-    const statusColor = getStatusColor(selectedNode.status)
-    const services: ServiceEntry[] = Array.isArray(selectedNode.services)
-      ? selectedNode.services
-      : []
-
-    return (
-      <div style={{
-        width: 320,
-        flexShrink: 0,
-        background: 'var(--color-bg-elevated)',
-        borderLeft: '1px solid var(--color-border)',
-        display: 'flex',
-        flexDirection: 'column',
-        overflow: 'hidden',
-      }}>
-        {/* Panel header */}
-        <div style={{
-          padding: '14px 16px',
-          borderBottom: '1px solid var(--color-border)',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}>
-          <span style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11,
-            letterSpacing: 1,
-            color: 'var(--color-text-muted)',
-          }}>
-            NODE DETAILS
-          </span>
-          <button
-            onClick={() => setSelectedNode(null)}
-            style={{
-              background: 'transparent',
-              border: 'none',
-              cursor: 'pointer',
-              color: 'var(--color-text-muted)',
-              padding: 2,
-              display: 'flex',
-              alignItems: 'center',
-            }}
-          >
-            <X size={14} />
-          </button>
-        </div>
-
-        {/* Panel body */}
-        <div style={{
-          flex: 1,
-          overflowY: 'auto',
-          padding: 16,
-          display: 'flex',
-          flexDirection: 'column',
-          gap: 16,
-        }}>
-          {/* Hostname + IP */}
-          <div>
-            <div style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              marginBottom: 6,
-            }}>
-              <NodeIcon size={16} style={{ color: 'var(--color-accent)', flexShrink: 0 }} />
-              <span style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 14,
-                fontWeight: 600,
-                color: 'var(--color-text-bright)',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-              }}>
-                {selectedNode.hostname || selectedNode.ip_address}
-              </span>
-            </div>
-            {selectedNode.hostname && (
-              <span style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 12,
-                color: 'var(--color-text)',
-                display: 'block',
-                marginLeft: 24,
-              }}>
-                {selectedNode.ip_address}
-              </span>
-            )}
-          </div>
-
-          {/* Status + Type badges */}
-          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-            <span style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 10,
-              letterSpacing: 0.5,
-              color: statusColor,
-              background: 'var(--color-bg-surface)',
-              border: `1px solid ${statusColor}`,
-              borderRadius: 'var(--radius)',
-              padding: '3px 8px',
-              textTransform: 'uppercase',
-            }}>
-              {selectedNode.status}
-            </span>
-            <span style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 10,
-              letterSpacing: 0.5,
-              color: 'var(--color-accent)',
-              background: 'rgba(77, 171, 247, 0.08)',
-              border: '1px solid rgba(77, 171, 247, 0.2)',
-              borderRadius: 'var(--radius)',
-              padding: '3px 8px',
-              textTransform: 'uppercase',
-            }}>
-              {selectedNode.node_type}
-            </span>
-          </div>
-
-          {/* OS info */}
-          {(selectedNode.os || selectedNode.os_version) && (
-            <div>
-              <span style={detailLabelStyle}>OS</span>
-              <span style={detailValueStyle}>
-                {[selectedNode.os, selectedNode.os_version].filter(Boolean).join(' ')}
-              </span>
-            </div>
-          )}
-
-          {/* MAC Address */}
-          {selectedNode.mac_address && (
-            <div>
-              <span style={detailLabelStyle}>MAC ADDRESS</span>
-              <span style={detailValueStyle}>{selectedNode.mac_address}</span>
-            </div>
-          )}
-
-          {/* Services */}
-          {services.length > 0 && (
-            <div>
-              <span style={detailLabelStyle}>
-                SERVICES ({services.length})
-              </span>
-              <div style={{
-                display: 'flex',
-                flexDirection: 'column',
-                gap: 6,
-                marginTop: 6,
-              }}>
-                {services.map((svc, i) => (
-                  <div
-                    key={i}
-                    style={{
-                      background: 'var(--color-bg-surface)',
-                      border: '1px solid var(--color-border)',
-                      borderRadius: 'var(--radius)',
-                      padding: '8px 10px',
-                    }}
-                  >
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'space-between',
-                      marginBottom: 2,
-                    }}>
-                      <span style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 11,
-                        fontWeight: 600,
-                        color: 'var(--color-text-bright)',
-                      }}>
-                        {svc.service || 'unknown'}
-                      </span>
-                      <span style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        color: 'var(--color-accent)',
-                      }}>
-                        {svc.port}/{svc.protocol}
-                      </span>
-                    </div>
-                    {(svc.product || svc.version) && (
-                      <span style={{
-                        fontFamily: 'var(--font-mono)',
-                        fontSize: 10,
-                        color: 'var(--color-text-muted)',
-                      }}>
-                        {[svc.product, svc.version].filter(Boolean).join(' ')}
-                      </span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* Timestamps */}
-          <div style={{ marginTop: 'auto', paddingTop: 12, borderTop: '1px solid var(--color-border)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
-              <span style={detailLabelStyle}>DISCOVERED</span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>
-                {new Date(selectedNode.created_at).toLocaleString()}
-              </span>
-            </div>
-            <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-              <span style={detailLabelStyle}>UPDATED</span>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--color-text-muted)' }}>
-                {new Date(selectedNode.updated_at).toLocaleString()}
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
   function renderMapView() {
     const networkName = networks.find((n) => n.id === selectedNetworkId)?.name || 'Network'
     const hasNodes = topology && topology.nodes && topology.nodes.length > 0
@@ -936,7 +675,13 @@ export default function NetworksTab() {
               }}
             />
             {/* Node detail panel */}
-            {renderNodeDetailPanel()}
+            {selectedNode && (
+              <NodeDetailPanel
+                node={selectedNode}
+                onClose={() => setSelectedNode(null)}
+                onNodeUpdate={handleNodeUpdate}
+              />
+            )}
           </div>
         )}
       </div>
@@ -1250,19 +995,3 @@ const statValueStyle: React.CSSProperties = {
   color: 'var(--color-text-bright)',
 }
 
-// Style constants for node detail panel
-const detailLabelStyle: React.CSSProperties = {
-  fontFamily: 'var(--font-mono)',
-  fontSize: 9,
-  letterSpacing: 1,
-  color: 'var(--color-text-muted)',
-  display: 'block',
-  marginBottom: 4,
-}
-
-const detailValueStyle: React.CSSProperties = {
-  fontFamily: 'var(--font-mono)',
-  fontSize: 12,
-  color: 'var(--color-text)',
-  display: 'block',
-}
