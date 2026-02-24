@@ -1,12 +1,13 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings } from 'lucide-react'
+import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal } from 'lucide-react'
 import { APP_VERSION } from '../version'
 
 const NAV_ITEMS = [
   { path: '/operations', label: 'OPERATIONS', icon: Crosshair },
   { path: '/tickets', label: 'TICKETS', icon: Ticket },
   { path: '/dashboards', label: 'DASHBOARDS', icon: LayoutDashboard },
+  { path: '/c2', label: 'C2', icon: Terminal },
 ]
 
 export default function AppLayout() {
