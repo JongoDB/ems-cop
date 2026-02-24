@@ -11,10 +11,13 @@ import {
   Shield,
   Monitor,
   Activity,
-  Pencil,
   Plus,
+  Trash2,
 } from 'lucide-react'
 import type { NetworkNodeRecord, ServiceEntry } from './types'
+import { InlineText, InlineSelect } from './InlineEditor'
+import { DEVICE_TYPES } from './DeviceIcons'
+import { apiFetch } from '../../lib/api'
 
 interface NodeDetailPanelProps {
   node: NetworkNodeRecord
@@ -37,6 +40,8 @@ const tabs: TabDef[] = [
   { id: 'interfaces', label: 'INTERFACES', icon: Cable },
   { id: 'notes', label: 'NOTES', icon: StickyNote },
 ]
+
+const STATUS_OPTIONS = ['discovered', 'alive', 'compromised', 'offline']
 
 function getNodeTypeIcon(nodeType: string) {
   switch (nodeType) {
@@ -80,26 +85,72 @@ const detailValueStyle: React.CSSProperties = {
   display: 'block',
 }
 
-const fieldRowStyle: React.CSSProperties = {
-  position: 'relative',
-}
-
-const editIconStyle: React.CSSProperties = {
-  position: 'absolute',
-  top: 0,
-  right: 0,
-  color: 'var(--color-text-muted)',
-  opacity: 0,
+const addButtonStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 5,
+  background: 'transparent',
+  border: '1px solid var(--color-border)',
+  borderRadius: 'var(--radius)',
+  padding: '6px 12px',
   cursor: 'pointer',
-  transition: 'opacity 0.15s ease',
+  fontFamily: 'var(--font-mono)',
+  fontSize: 10,
+  letterSpacing: 0.5,
+  color: 'var(--color-text-muted)',
 }
 
-export default function NodeDetailPanel({ node, onClose }: NodeDetailPanelProps) {
+const deleteButtonStyle: React.CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  background: 'transparent',
+  border: 'none',
+  cursor: 'pointer',
+  color: 'var(--color-text-muted)',
+  padding: 2,
+  borderRadius: 'var(--radius)',
+  transition: 'color 0.15s ease',
+}
+
+export default function NodeDetailPanel({ node, onClose, onNodeUpdate }: NodeDetailPanelProps) {
   const [activeTab, setActiveTab] = useState<TabId>('overview')
 
   const NodeIcon = getNodeTypeIcon(node.node_type)
   const statusColor = getStatusColor(node.status)
   const services: ServiceEntry[] = Array.isArray(node.services) ? node.services : []
+
+  const handleFieldSave = async (field: string, value: string) => {
+    const updated = await apiFetch<NetworkNodeRecord>(`/nodes/${node.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ [field]: value }),
+    })
+    onNodeUpdate(updated)
+  }
+
+  const handleServicesUpdate = async (newServices: ServiceEntry[]) => {
+    const updated = await apiFetch<NetworkNodeRecord>(`/nodes/${node.id}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ services: newServices }),
+    })
+    onNodeUpdate(updated)
+  }
+
+  const handleAddService = () => {
+    const newService: ServiceEntry = {
+      port: 0,
+      protocol: 'tcp',
+      service: '',
+      product: '',
+      version: '',
+    }
+    handleServicesUpdate([...services, newService])
+  }
+
+  const handleDeleteService = (index: number) => {
+    const newServices = services.filter((_, i) => i !== index)
+    handleServicesUpdate(newServices)
+  }
 
   return (
     <div style={{
@@ -213,8 +264,8 @@ export default function NodeDetailPanel({ node, onClose }: NodeDetailPanelProps)
         display: 'flex',
         flexDirection: 'column',
       }}>
-        {activeTab === 'overview' && renderOverviewTab(node, NodeIcon, statusColor, services)}
-        {activeTab === 'services' && renderServicesTab(services)}
+        {activeTab === 'overview' && renderOverviewTab(node, NodeIcon, statusColor, services, handleFieldSave)}
+        {activeTab === 'services' && renderServicesTab(services, handleAddService, handleDeleteService)}
         {activeTab === 'vulns' && renderPlaceholderTab('NO VULNERABILITIES TRACKED', 'Add Vulnerability')}
         {activeTab === 'interfaces' && renderPlaceholderTab('NO INTERFACES CONFIGURED', 'Add Interface')}
         {activeTab === 'notes' && renderPlaceholderTab('NO NOTES', 'Add Note')}
@@ -223,48 +274,21 @@ export default function NodeDetailPanel({ node, onClose }: NodeDetailPanelProps)
   )
 }
 
-function FieldRow({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div
-      style={fieldRowStyle}
-      onMouseEnter={(e) => {
-        const icon = e.currentTarget.querySelector('.edit-icon') as HTMLElement | null
-        if (icon) icon.style.opacity = '0.6'
-      }}
-      onMouseLeave={(e) => {
-        const icon = e.currentTarget.querySelector('.edit-icon') as HTMLElement | null
-        if (icon) icon.style.opacity = '0'
-      }}
-    >
-      <span style={detailLabelStyle}>{label}</span>
-      <span style={detailValueStyle}>{value}</span>
-      <span className="edit-icon" style={editIconStyle}>
-        <Pencil size={10} />
-      </span>
-    </div>
-  )
-}
+/* ------------------------------------------------------------------ */
+/*  Overview Tab                                                      */
+/* ------------------------------------------------------------------ */
 
 function renderOverviewTab(
   node: NetworkNodeRecord,
   NodeIcon: typeof Server,
   statusColor: string,
   services: ServiceEntry[],
+  onFieldSave: (field: string, value: string) => Promise<void>,
 ) {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16, flex: 1 }}>
       {/* Hostname + IP */}
-      <div
-        style={fieldRowStyle}
-        onMouseEnter={(e) => {
-          const icon = e.currentTarget.querySelector('.edit-icon') as HTMLElement | null
-          if (icon) icon.style.opacity = '0.6'
-        }}
-        onMouseLeave={(e) => {
-          const icon = e.currentTarget.querySelector('.edit-icon') as HTMLElement | null
-          if (icon) icon.style.opacity = '0'
-        }}
-      >
+      <div>
         <div style={{
           display: 'flex',
           alignItems: 'center',
@@ -272,17 +296,10 @@ function renderOverviewTab(
           marginBottom: 6,
         }}>
           <NodeIcon size={16} style={{ color: 'var(--color-accent)', flexShrink: 0 }} />
-          <span style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 14,
-            fontWeight: 600,
-            color: 'var(--color-text-bright)',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            whiteSpace: 'nowrap',
-          }}>
-            {node.hostname || node.ip_address}
-          </span>
+          <InlineText
+            value={node.hostname || node.ip_address}
+            onSave={(v) => onFieldSave('hostname', v)}
+          />
         </div>
         {node.hostname && (
           <span style={{
@@ -295,53 +312,65 @@ function renderOverviewTab(
             {node.ip_address}
           </span>
         )}
-        <span className="edit-icon" style={editIconStyle}>
-          <Pencil size={10} />
-        </span>
       </div>
 
-      {/* Status + Type badges */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 10,
-          letterSpacing: 0.5,
-          color: statusColor,
-          background: 'var(--color-bg-surface)',
-          border: `1px solid ${statusColor}`,
-          borderRadius: 'var(--radius)',
-          padding: '3px 8px',
-          textTransform: 'uppercase',
-        }}>
-          {node.status}
-        </span>
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 10,
-          letterSpacing: 0.5,
-          color: 'var(--color-accent)',
-          background: 'rgba(77, 171, 247, 0.08)',
-          border: '1px solid rgba(77, 171, 247, 0.2)',
-          borderRadius: 'var(--radius)',
-          padding: '3px 8px',
-          textTransform: 'uppercase',
-        }}>
-          {node.node_type}
-        </span>
+      {/* Status + Type badges (editable via InlineSelect) */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+        <div>
+          <span style={detailLabelStyle}>STATUS</span>
+          <span style={{
+            display: 'inline-block',
+            color: statusColor,
+            background: 'var(--color-bg-surface)',
+            border: `1px solid ${statusColor}`,
+            borderRadius: 'var(--radius)',
+            padding: '3px 8px',
+          }}>
+            <InlineSelect
+              value={node.status}
+              options={STATUS_OPTIONS}
+              onSave={(v) => onFieldSave('status', v)}
+            />
+          </span>
+        </div>
+        <div>
+          <span style={detailLabelStyle}>NODE TYPE</span>
+          <span style={{
+            display: 'inline-block',
+            color: 'var(--color-accent)',
+            background: 'rgba(77, 171, 247, 0.08)',
+            border: '1px solid rgba(77, 171, 247, 0.2)',
+            borderRadius: 'var(--radius)',
+            padding: '3px 8px',
+          }}>
+            <InlineSelect
+              value={node.node_type}
+              options={DEVICE_TYPES}
+              onSave={(v) => onFieldSave('node_type', v)}
+            />
+          </span>
+        </div>
       </div>
 
       {/* OS info */}
-      {(node.os || node.os_version) && (
-        <FieldRow
-          label="OS"
+      <div>
+        <span style={detailLabelStyle}>OS</span>
+        <InlineText
           value={[node.os, node.os_version].filter(Boolean).join(' ')}
+          onSave={(v) => onFieldSave('os', v)}
+          placeholder="unknown"
         />
-      )}
+      </div>
 
       {/* MAC Address */}
-      {node.mac_address && (
-        <FieldRow label="MAC ADDRESS" value={node.mac_address} />
-      )}
+      <div>
+        <span style={detailLabelStyle}>MAC ADDRESS</span>
+        <InlineText
+          value={node.mac_address || ''}
+          onSave={(v) => onFieldSave('mac_address', v)}
+          placeholder="none"
+        />
+      </div>
 
       {/* Service summary */}
       {services.length > 0 && (
@@ -378,7 +407,15 @@ function renderOverviewTab(
   )
 }
 
-function renderServicesTab(services: ServiceEntry[]) {
+/* ------------------------------------------------------------------ */
+/*  Services Tab                                                      */
+/* ------------------------------------------------------------------ */
+
+function renderServicesTab(
+  services: ServiceEntry[],
+  onAdd: () => void,
+  onDelete: (index: number) => void,
+) {
   if (services.length === 0) {
     return (
       <div style={{
@@ -397,7 +434,7 @@ function renderServicesTab(services: ServiceEntry[]) {
         }}>
           NO SERVICES DISCOVERED
         </span>
-        <button style={addButtonStyle}>
+        <button onClick={onAdd} style={addButtonStyle}>
           <Plus size={12} />
           ADD SERVICE
         </button>
@@ -410,13 +447,13 @@ function renderServicesTab(services: ServiceEntry[]) {
       {/* Column headers */}
       <div style={{
         display: 'grid',
-        gridTemplateColumns: '56px 44px 1fr 1fr 60px',
+        gridTemplateColumns: '56px 44px 1fr 1fr 60px 24px',
         gap: 6,
         padding: '0 10px 6px',
         borderBottom: '1px solid var(--color-border)',
       }}>
-        {['PORT', 'PROTO', 'SERVICE', 'PRODUCT', 'VERSION'].map((h) => (
-          <span key={h} style={{
+        {['PORT', 'PROTO', 'SERVICE', 'PRODUCT', 'VERSION', ''].map((h, i) => (
+          <span key={i} style={{
             fontFamily: 'var(--font-mono)',
             fontSize: 8,
             letterSpacing: 1,
@@ -433,7 +470,7 @@ function renderServicesTab(services: ServiceEntry[]) {
           key={i}
           style={{
             display: 'grid',
-            gridTemplateColumns: '56px 44px 1fr 1fr 60px',
+            gridTemplateColumns: '56px 44px 1fr 1fr 60px 24px',
             gap: 6,
             background: 'var(--color-bg-surface)',
             border: '1px solid var(--color-border)',
@@ -489,17 +526,30 @@ function renderServicesTab(services: ServiceEntry[]) {
           }}>
             {svc.version || '-'}
           </span>
+          <button
+            onClick={() => onDelete(i)}
+            style={deleteButtonStyle}
+            onMouseEnter={(e) => { e.currentTarget.style.color = 'var(--color-danger)' }}
+            onMouseLeave={(e) => { e.currentTarget.style.color = 'var(--color-text-muted)' }}
+            title="Remove service"
+          >
+            <Trash2 size={12} />
+          </button>
         </div>
       ))}
 
       {/* Add button */}
-      <button style={{ ...addButtonStyle, marginTop: 8, alignSelf: 'flex-start' }}>
+      <button onClick={onAdd} style={{ ...addButtonStyle, marginTop: 8, alignSelf: 'flex-start' }}>
         <Plus size={12} />
         ADD SERVICE
       </button>
     </div>
   )
 }
+
+/* ------------------------------------------------------------------ */
+/*  Placeholder Tabs                                                  */
+/* ------------------------------------------------------------------ */
 
 function renderPlaceholderTab(message: string, addLabel: string) {
   return (
@@ -525,19 +575,4 @@ function renderPlaceholderTab(message: string, addLabel: string) {
       </button>
     </div>
   )
-}
-
-const addButtonStyle: React.CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 5,
-  background: 'transparent',
-  border: '1px solid var(--color-border)',
-  borderRadius: 'var(--radius)',
-  padding: '6px 12px',
-  cursor: 'pointer',
-  fontFamily: 'var(--font-mono)',
-  fontSize: 10,
-  letterSpacing: 0.5,
-  color: 'var(--color-text-muted)',
 }
