@@ -181,91 +181,33 @@ SELECT
     '{
         "version": 1,
         "root_element": "nmaprun",
-        "node_selector": "host",
-        "field_mappings": {
-            "ip_address": {
-                "xpath": "address[@addrtype=''ipv4'']/@addr",
-                "required": true,
-                "type": "string"
-            },
-            "mac_address": {
-                "xpath": "address[@addrtype=''mac'']/@addr",
-                "required": false,
-                "type": "string"
-            },
-            "hostname": {
-                "xpath": "hostnames/hostname[@type=''user'']/@name | hostnames/hostname[@type=''PTR'']/@name",
-                "required": false,
-                "type": "string",
-                "default": ""
-            },
-            "os": {
-                "xpath": "os/osmatch[1]/@name",
-                "required": false,
-                "type": "string",
-                "default": "unknown",
-                "transform": "first_match"
-            },
-            "os_version": {
-                "xpath": "os/osmatch[1]/osclass[1]/@osgen",
-                "required": false,
-                "type": "string",
-                "default": ""
-            },
-            "status": {
-                "xpath": "status/@state",
-                "required": false,
-                "type": "string",
-                "value_map": { "up": "alive", "down": "offline", "unknown": "discovered" },
-                "default": "discovered"
-            },
-            "services": {
-                "xpath": "ports/port",
-                "required": false,
-                "type": "array",
-                "item_mappings": {
-                    "port":     { "xpath": "@portid",             "type": "integer" },
-                    "protocol": { "xpath": "@protocol",           "type": "string"  },
-                    "state":    { "xpath": "state/@state",        "type": "string"  },
-                    "service":  { "xpath": "service/@name",       "type": "string"  },
-                    "version":  { "xpath": "service/@version",    "type": "string"  },
-                    "product":  { "xpath": "service/@product",    "type": "string"  },
-                    "banner":   { "xpath": "script[@id=''banner'']/@output", "type": "string" }
-                }
-            }
-        },
-        "edge_mappings": {
-            "traceroute": {
-                "xpath": "trace/hop",
-                "type": "sequential",
-                "edge_type": "network_adjacency",
-                "discovered_by": "import",
-                "item_mappings": {
-                    "ip_address": { "xpath": "@ipaddr", "type": "string" },
-                    "ttl":        { "xpath": "@ttl",    "type": "integer" },
-                    "rtt":        { "xpath": "@rtt",    "type": "float" },
-                    "hostname":   { "xpath": "@host",   "type": "string" }
-                },
-                "confidence": 0.9,
-                "metadata_fields": ["ttl", "rtt"]
-            }
-        },
-        "node_type_rules": [
-            { "condition": "services.any(s => s.service == ''domain'')",              "node_type": "server"       },
-            { "condition": "services.any(s => s.service == ''http'' || s.service == ''https'')", "node_type": "server" },
-            { "condition": "services.any(s => s.service == ''mysql'' || s.service == ''postgresql'')", "node_type": "server" },
-            { "condition": "services.any(s => s.port == 161)",                        "node_type": "switch"       },
-            { "condition": "services.any(s => s.port == 631)",                        "node_type": "printer"      },
-            { "condition": "os.match(/router|cisco ios|junos/i)",                     "node_type": "router"       },
-            { "condition": "os.match(/firewall|pfsense|fortios|palo alto/i)",         "node_type": "firewall"     },
-            { "condition": "os.match(/windows.*workstation|windows 1[01]/i)",         "node_type": "workstation"  },
-            { "condition": "os.match(/windows.*server/i)",                            "node_type": "server"       },
-            { "condition": "os.match(/linux|ubuntu|debian|centos|rhel/i)",            "node_type": "server"       },
-            { "condition": "os.match(/openwrt|dd-wrt|mikrotik/i)",                    "node_type": "access_point" },
-            { "condition": "true",                                                    "node_type": "unknown"      }
+        "host_element": "host",
+        "field_mappings": [
+            {"source": "address@addr", "target": "ip_address", "filter": {"field": "@addrtype", "operator": "equals", "value": "ipv4"}},
+            {"source": "address@addr", "target": "mac_address", "filter": {"field": "@addrtype", "operator": "equals", "value": "mac"}},
+            {"source": "hostnames.hostname@name", "target": "hostname"},
+            {"source": "os.osmatch@name", "target": "os"},
+            {"source": "ports.port", "target": "services", "sub_mappings": [
+                {"source": "@portid", "target": "port", "transform": "to_integer"},
+                {"source": "@protocol", "target": "protocol"},
+                {"source": "service@name", "target": "service"},
+                {"source": "service@product", "target": "product"},
+                {"source": "service@version", "target": "version"}
+            ]}
         ],
-        "dedup_key": "ip_address",
-        "merge_strategy": "update_if_newer"
+        "edge_mappings": [
+            {"source": "trace.hop", "source_ip": "ipaddr", "target_ip": "ipaddr", "edge_type": "network_adjacency"}
+        ],
+        "node_type_rules": [
+            {"field": "services", "operator": "port_open", "value": "179", "node_type": "router"},
+            {"field": "services", "operator": "port_open", "value": "631", "node_type": "printer"},
+            {"field": "services", "operator": "port_open", "value": "80", "node_type": "server"},
+            {"field": "services", "operator": "port_open", "value": "22", "node_type": "server"},
+            {"field": "os", "operator": "contains", "value": "cisco", "node_type": "router"},
+            {"field": "os", "operator": "contains", "value": "firewall", "node_type": "firewall"}
+        ],
+        "creates_edges": true,
+        "edge_generation": {"strategy": "subnet"}
     }'::jsonb,
     '<nmaprun scanner="nmap" args="nmap -sV -O -oX scan.xml 10.0.0.0/24" start="1709000000">
   <host starttime="1709000001" endtime="1709000010">
@@ -296,68 +238,21 @@ SELECT
     '{
         "version": 1,
         "root_element": "NessusClientData_v2",
-        "node_selector": "Report/ReportHost",
-        "field_mappings": {
-            "ip_address": {
-                "xpath": "HostProperties/tag[@name=''host-ip'']",
-                "required": true,
-                "type": "string"
-            },
-            "mac_address": {
-                "xpath": "HostProperties/tag[@name=''mac-address'']",
-                "required": false,
-                "type": "string"
-            },
-            "hostname": {
-                "xpath": "HostProperties/tag[@name=''host-fqdn''] | HostProperties/tag[@name=''hostname''] | @name",
-                "required": false,
-                "type": "string",
-                "default": ""
-            },
-            "os": {
-                "xpath": "HostProperties/tag[@name=''operating-system'']",
-                "required": false,
-                "type": "string",
-                "default": "unknown"
-            },
-            "status": {
-                "constant": "alive",
-                "type": "string"
-            },
-            "services": {
-                "xpath": "ReportItem[@pluginFamily=''Service detection'']",
-                "required": false,
-                "type": "array",
-                "item_mappings": {
-                    "port":     { "xpath": "@port",     "type": "integer" },
-                    "protocol": { "xpath": "@protocol", "type": "string"  },
-                    "service":  { "xpath": "@svc_name", "type": "string"  },
-                    "banner":   { "xpath": "plugin_output", "type": "string" }
-                }
-            }
-        },
-        "finding_mappings": {
-            "selector": "ReportItem[severity!=''0'']",
-            "fields": {
-                "title":       { "xpath": "@pluginName",      "type": "string" },
-                "severity":    { "xpath": "@severity",         "type": "string", "value_map": { "4": "critical", "3": "high", "2": "medium", "1": "low", "0": "info" } },
-                "cve_id":      { "xpath": "cve",              "type": "string" },
-                "cvss_score":  { "xpath": "cvss3_base_score | cvss_base_score", "type": "float" },
-                "description": { "xpath": "description",      "type": "string" },
-                "solution":    { "xpath": "solution",          "type": "string" },
-                "plugin_id":   { "xpath": "@pluginID",         "type": "string" }
-            }
-        },
-        "node_type_rules": [
-            { "condition": "os.match(/windows.*server/i)",                   "node_type": "server"      },
-            { "condition": "os.match(/windows/i)",                           "node_type": "workstation"  },
-            { "condition": "os.match(/linux|ubuntu|debian|centos|rhel/i)",   "node_type": "server"      },
-            { "condition": "os.match(/cisco|juniper/i)",                     "node_type": "router"      },
-            { "condition": "os.match(/printer|jetdirect/i)",                 "node_type": "printer"     },
-            { "condition": "true",                                           "node_type": "unknown"     }
+        "host_element": "Report.ReportHost",
+        "field_mappings": [
+            {"source": "HostProperties.tag", "target": "ip_address", "filter": {"field": "@name", "operator": "equals", "value": "host-ip"}},
+            {"source": "HostProperties.tag", "target": "mac_address", "filter": {"field": "@name", "operator": "equals", "value": "mac-address"}},
+            {"source": "HostProperties.tag", "target": "hostname", "filter": {"field": "@name", "operator": "equals", "value": "host-fqdn"}},
+            {"source": "HostProperties.tag", "target": "os", "filter": {"field": "@name", "operator": "equals", "value": "operating-system"}}
         ],
-        "dedup_key": "ip_address",
-        "merge_strategy": "update_if_newer"
+        "edge_mappings": [],
+        "node_type_rules": [
+            {"field": "os", "operator": "contains", "value": "windows server", "node_type": "server"},
+            {"field": "os", "operator": "contains", "value": "windows", "node_type": "workstation"},
+            {"field": "os", "operator": "contains", "value": "linux", "node_type": "server"},
+            {"field": "os", "operator": "contains", "value": "cisco", "node_type": "router"},
+            {"field": "os", "operator": "contains", "value": "printer", "node_type": "printer"}
+        ]
     }'::jsonb,
     NULL,
     true,
@@ -375,39 +270,23 @@ SELECT
     1,
     '{
         "version": 1,
-        "root_path": "$[*]",
-        "group_by": "ip",
-        "field_mappings": {
-            "ip_address": {
-                "json_path": "$.ip",
-                "required": true,
-                "type": "string"
-            },
-            "status": {
-                "constant": "alive",
-                "type": "string"
-            },
-            "services": {
-                "json_path": "$.ports[*]",
-                "required": false,
-                "type": "array",
-                "item_mappings": {
-                    "port":     { "json_path": "$.port",     "type": "integer" },
-                    "protocol": { "json_path": "$.proto",    "type": "string"  },
-                    "state":    { "json_path": "$.status",   "type": "string"  },
-                    "service":  { "json_path": "$.service.name",    "type": "string" },
-                    "banner":   { "json_path": "$.service.banner",  "type": "string" }
-                }
-            }
-        },
-        "node_type_rules": [
-            { "condition": "services.any(s => s.port == 80 || s.port == 443)", "node_type": "server"  },
-            { "condition": "services.any(s => s.port == 3389)",                "node_type": "workstation" },
-            { "condition": "services.any(s => s.port == 9100)",                "node_type": "printer" },
-            { "condition": "true",                                             "node_type": "unknown" }
+        "root_path": "",
+        "field_mappings": [
+            {"source": "ip", "target": "ip_address"},
+            {"source": "ports.port", "target": "services", "sub_mappings": [
+                {"source": "port", "target": "port", "transform": "to_integer"},
+                {"source": "proto", "target": "protocol"},
+                {"source": "service.name", "target": "service"},
+                {"source": "service.banner", "target": "product"}
+            ]}
         ],
-        "dedup_key": "ip_address",
-        "merge_strategy": "merge_services"
+        "edge_mappings": [],
+        "node_type_rules": [
+            {"field": "services", "operator": "port_open", "value": "80", "node_type": "server"},
+            {"field": "services", "operator": "port_open", "value": "443", "node_type": "server"},
+            {"field": "services", "operator": "port_open", "value": "3389", "node_type": "workstation"},
+            {"field": "services", "operator": "port_open", "value": "9100", "node_type": "printer"}
+        ]
     }'::jsonb,
     '[
   { "ip": "10.0.0.1", "timestamp": "1709000001", "ports": [{ "port": 80, "proto": "tcp", "status": "open", "service": { "name": "http", "banner": "nginx/1.24" } }] },
@@ -431,50 +310,22 @@ SELECT
         "header_line": "#fields",
         "separator": "\t",
         "comment_prefix": "#",
-        "node_extraction": {
-            "source": {
-                "ip_address": { "column": "id.orig_h", "type": "string" },
-                "status":     { "constant": "alive", "type": "string" }
-            },
-            "destination": {
-                "ip_address": { "column": "id.resp_h", "type": "string" },
-                "status":     { "constant": "alive", "type": "string" },
-                "services":   {
-                    "type": "array",
-                    "item_from_row": {
-                        "port":     { "column": "id.resp_p", "type": "integer" },
-                        "protocol": { "column": "proto",     "type": "string"  },
-                        "service":  { "column": "service",   "type": "string"  }
-                    }
-                }
-            }
-        },
-        "edge_extraction": {
-            "source_ip":      { "column": "id.orig_h", "type": "string" },
-            "destination_ip": { "column": "id.resp_h", "type": "string" },
-            "edge_type": "network_adjacency",
-            "discovered_by": "import",
-            "confidence": 0.7,
-            "metadata_fields": {
-                "protocol":     { "column": "proto",       "type": "string"  },
-                "dest_port":    { "column": "id.resp_p",   "type": "integer" },
-                "service":      { "column": "service",     "type": "string"  },
-                "duration":     { "column": "duration",    "type": "float"   },
-                "orig_bytes":   { "column": "orig_bytes",  "type": "integer" },
-                "resp_bytes":   { "column": "resp_bytes",  "type": "integer" },
-                "conn_state":   { "column": "conn_state",  "type": "string"  }
-            },
-            "aggregate": true,
-            "aggregate_key": ["source_ip", "destination_ip", "dest_port"]
-        },
-        "node_type_rules": [
-            { "condition": "services.any(s => s.service == ''dns'')",   "node_type": "server" },
-            { "condition": "services.any(s => s.service == ''http'')",  "node_type": "server" },
-            { "condition": "services.any(s => s.service == ''ssl'')",   "node_type": "server" },
-            { "condition": "true",                                     "node_type": "unknown" }
+        "field_mappings": [
+            {"source": "id.resp_h", "target": "ip_address"},
+            {"source": "id.resp_p", "target": "services", "sub_mappings": [
+                {"source": "id.resp_p", "target": "port", "transform": "to_integer"},
+                {"source": "proto", "target": "protocol"},
+                {"source": "service", "target": "service"}
+            ]}
         ],
-        "dedup_key": "ip_address",
-        "merge_strategy": "merge_services"
+        "edge_mappings": [],
+        "node_type_rules": [
+            {"field": "services", "operator": "service_running", "value": "dns", "node_type": "server"},
+            {"field": "services", "operator": "service_running", "value": "http", "node_type": "server"},
+            {"field": "services", "operator": "service_running", "value": "ssl", "node_type": "server"}
+        ],
+        "creates_edges": true,
+        "edge_generation": {"strategy": "connection_log", "source_ip": "id.orig_h", "dest_ip": "id.resp_h"}
     }'::jsonb,
     '#separator \x09
 #set_separator	,

@@ -2500,7 +2500,7 @@ func (s *Server) generateSubnetEdges(ctx context.Context, networkID string) {
 	// 1. Query CIDR ranges for this network
 	var cidrRanges []string
 	err := s.db.QueryRow(ctx,
-		`SELECT cidr_ranges FROM network_maps WHERE id=$1`, networkID,
+		`SELECT cidr_ranges FROM networks WHERE id=$1`, networkID,
 	).Scan(&cidrRanges)
 	if err != nil {
 		s.logger.Warn("generateSubnetEdges: could not load CIDR ranges", "network_id", networkID, "error", err)
