@@ -206,7 +206,9 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 
 **M3 — Sliver Connected (Complete):** C2 Gateway connects to Sliver gRPC. List sessions, execute commands via C2 page. Configurable command presets. Commands logged to audit.
 
-**M4 — Operations & Network Maps (In Progress):** Operations-centric navigation, network topology maps (Cytoscape.js), Nmap/Nessus import, findings management, auto-enrichment from C2 activity, dashboards with echelon templates.
+**M4a — Operations & Network Maps (Complete):** Operations-centric navigation with AppLayout, OperationsPage, OperationDetailPage with tabbed sub-views. Network topology maps (Cytoscape.js) with SVG device icons/OS logos, Nmap XML import with auto-node-type classification.
+
+**M4b — Network Map Enhancements (Complete):** Tabbed node detail panel (Overview, Services, Vulns, Interfaces, Notes) with inline editing. Vulnerability drill-down with CVE tracking, exploit mapping, attack notes. Subnet-based auto-edge generation, traceroute-based edge inference, enrichment source tracking. Admin display schema editor, import parser CRUD, generic parser engine (XML/JSON/CSV/TSV), visual parser workbench with source inspector tree, target schema drop targets, and mapping canvas.
 
 **M5 — Workflows:** Linear workflow engine. Task → approval → execute flow. Kickback + conditional branch support. Visual editor.
 
@@ -230,7 +232,15 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - **Audit service:** `services/audit/main.go`
 - **Workflow engine (operations CRUD):** `services/workflow-engine/main.go`
 - **Networks migration:** `infra/db/postgres/migrations/004_networks_and_findings.sql`
+- **Extended node types migration:** `infra/db/postgres/migrations/005_extended_node_types.sql`
+- **Endpoint service (networks, nodes, edges, parser engine):** `services/endpoint/main.go`
+- **Network map components:** `frontend/src/components/network-map/` (NodeDetailPanel, VulnDrillDown, InlineEditor, types)
+- **SVG device icons:** `frontend/src/components/network-map/DeviceIcons.tsx`
+- **OS logos:** `frontend/src/components/network-map/OsLogos.tsx`
+- **Admin display schema editor:** `frontend/src/pages/admin/DisplaySchemaEditor.tsx`
+- **Admin parser workbench:** `frontend/src/pages/admin/ParserWorkbench.tsx` + `ParserWorkbench/` directory
 - **M4 design doc:** `docs/plans/2026-02-23-m4-operations-networks-design.md`
+- **M4b enhancements design:** `docs/plans/2026-02-24-m4b-network-map-enhancements-design.md`
 
 ## Testing
 
@@ -293,4 +303,19 @@ M4a milestone (Operations + Navigation) validated (2026-02-24):
 - Seed data: "Training Exercise" operation with Corp LAN (2 nodes) and DMZ (2 nodes) networks
 - Version bumped to v0.4.0
 
-**Next: M4b — Network Map Core** (Cytoscape.js topology, Nmap XML import, endpoint-service CRUD)
+M4b milestone (Network Map Enhancements) validated (2026-02-24):
+- Migration 005: extended node types (printer, vpn, iot, load_balancer, etc.), display_schemas + import_parsers tables
+- Endpoint service: networks/nodes/edges CRUD, Nmap XML import, topology API, display schema CRUD, import parser CRUD
+- Generic parser engine: data-driven XML/JSON/CSV/TSV parsers with field mappings, transforms, node type rules
+- Subnet-based auto-edge generation + traceroute-based edge inference from Nmap trace data
+- Enrichment source tracking on node metadata
+- SVG device icons (12 types) + OS logos (5 families) as Cytoscape background images
+- Cytoscape stylesheet with SVG icon rendering, status-based border colors, OS logo badges
+- Node detail panel: 5-tab panel (Overview, Services, Vulns, Interfaces, Notes) with inline editing
+- Vulnerability drill-down: CVE table, severity colors, exploit mapping, attack notes, status tracking
+- Admin display schema editor: JSON editor + live preview, CRUD operations
+- Admin parser workbench: 3-panel layout (source inspector tree, mapping canvas, target schema drop targets)
+- Node type heuristics: port/vendor/OS-based classification (router, firewall, printer, VPN, IoT, server, workstation)
+- Version bumped to v0.6.0
+
+**Next: M4c — Dashboards** (drag/drop dashboard with tabs, core widgets, echelon templates)
