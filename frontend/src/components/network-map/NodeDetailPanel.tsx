@@ -497,6 +497,61 @@ function renderOverviewTab(
         />
       </div>
 
+      {/* Enrichment Sources */}
+      {(() => {
+        const meta = (node.metadata as Record<string, any>) || {}
+        const enrichmentSources: Array<{source: string; imported_at: string; fields_updated: string[]}> =
+          Array.isArray(meta.enrichment_sources) ? meta.enrichment_sources : []
+        if (enrichmentSources.length === 0) return null
+
+        const sourceColors: Record<string, string> = {
+          nmap: '#22c55e',
+          nessus: '#f97316',
+          masscan: '#3b82f6',
+          manual: '#6b7280',
+        }
+
+        return (
+          <div>
+            <span style={detailLabelStyle}>ENRICHMENT SOURCES</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+              {enrichmentSources.map((es, i) => {
+                const color = sourceColors[es.source.toLowerCase()] || '#6b7280'
+                return (
+                  <div
+                    key={i}
+                    style={{ display: 'flex', alignItems: 'center', gap: 8 }}
+                    title={`Fields updated: ${(es.fields_updated || []).join(', ')}`}
+                  >
+                    <span style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 9,
+                      fontWeight: 700,
+                      letterSpacing: 0.5,
+                      color: color,
+                      background: `${color}1a`,
+                      border: `1px solid ${color}40`,
+                      borderRadius: 'var(--radius)',
+                      padding: '1px 6px',
+                      textTransform: 'uppercase',
+                    }}>
+                      {es.source}
+                    </span>
+                    <span style={{
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 10,
+                      color: 'var(--color-text-muted)',
+                    }}>
+                      {new Date(es.imported_at).toLocaleString()}
+                    </span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
+
       {/* Service summary */}
       {services.length > 0 && (
         <div>

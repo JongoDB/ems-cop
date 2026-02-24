@@ -1440,6 +1440,24 @@ func (s *Server) importNmapXML(ctx context.Context, networkID string, data []byt
 			s.logger.Error("upsert node failed", "ip", ipAddr, "error", err)
 			continue
 		}
+
+		// Track enrichment source
+		enrichment := map[string]any{
+			"source":         "nmap",
+			"imported_at":    time.Now().UTC().Format(time.RFC3339),
+			"fields_updated": []string{"ip_address", "hostname", "os", "services"},
+		}
+		enrichmentJSON, _ := json.Marshal(enrichment)
+		_, _ = s.db.Exec(ctx, `
+			UPDATE network_nodes SET
+				metadata = jsonb_set(
+					COALESCE(metadata, '{}'),
+					'{enrichment_sources}',
+					COALESCE(metadata->'enrichment_sources', '[]'::jsonb) || $1::jsonb
+				)
+			WHERE id = $2
+		`, string(enrichmentJSON), nodeID)
+
 		result.NodesCreated++
 	}
 
