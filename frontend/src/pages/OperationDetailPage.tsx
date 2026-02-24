@@ -44,8 +44,8 @@ export default function OperationDetailPage() {
   const fetchOperation = useCallback(async () => {
     if (!id) return
     try {
-      const data = await apiFetch<{ data: Operation }>(`/operations/${id}`)
-      setOperation(data.data)
+      const data = await apiFetch<Operation>(`/operations/${id}`)
+      setOperation(data)
     } catch {
       setOperation(null)
     } finally {
