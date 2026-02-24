@@ -2,6 +2,8 @@ import { useState, useEffect, useCallback } from 'react'
 import { Plus, Save, Copy } from 'lucide-react'
 import { apiFetch } from '../../lib/api'
 import SourceInspector from './ParserWorkbench/SourceInspector'
+import TargetSchema from './ParserWorkbench/TargetSchema'
+import MappingCanvas from './ParserWorkbench/MappingCanvas'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -31,6 +33,8 @@ export default function ParserWorkbench() {
   const [sampleData, setSampleData] = useState<any>(null)
   const [saving, setSaving] = useState(false)
   const [saveMessage, setSaveMessage] = useState<string | null>(null)
+  const [selectedMapping, setSelectedMapping] = useState<string | null>(null)
+  const [nodeTypeRules, setNodeTypeRules] = useState<any[]>([])
 
   // Derived mapped fields for the source inspector
   const mappedFields = new Map<string, string>(
@@ -59,6 +63,7 @@ export default function ParserWorkbench() {
     setSelectedParserId(parser.id)
     setDefinition(parser.definition)
     setMappings(parser.definition?.mappings ?? [])
+    setNodeTypeRules(parser.definition?.node_type_rules ?? [])
     setSaveMessage(null)
   }
 
@@ -76,7 +81,7 @@ export default function ParserWorkbench() {
     setSaving(true)
     setSaveMessage(null)
     try {
-      const updatedDef = { ...definition, mappings }
+      const updatedDef = { ...definition, mappings, node_type_rules: nodeTypeRules }
       await apiFetch(`/import-parsers/${selectedParserId}`, {
         method: 'PATCH',
         body: JSON.stringify({ definition: updatedDef }),
@@ -133,6 +138,27 @@ export default function ParserWorkbench() {
       setSaveMessage(`Create failed: ${(err as Error).message}`)
     }
   }
+
+  const handleAddMapping = useCallback((source: string, target: string) => {
+    setMappings(prev => {
+      const existing = prev.findIndex(m => m.target === target)
+      if (existing >= 0) {
+        const updated = [...prev]
+        updated[existing] = { ...updated[existing], source }
+        return updated
+      }
+      return [...prev, { source, target }]
+    })
+  }, [])
+
+  const handleRemoveMapping = useCallback((target: string) => {
+    setMappings(prev => prev.filter(m => m.target !== target))
+    if (selectedMapping === target) setSelectedMapping(null)
+  }, [selectedMapping])
+
+  const handleUpdateMapping = useCallback((target: string, updates: Partial<{ source: string; transform: string }>) => {
+    setMappings(prev => prev.map(m => m.target === target ? { ...m, ...updates } : m))
+  }, [])
 
   const selectedParser = parsers.find(p => p.id === selectedParserId)
 
@@ -210,24 +236,25 @@ export default function ParserWorkbench() {
 
         {/* Center: Mapping Canvas — 15% */}
         <div style={styles.centerPanel}>
-          <div style={styles.placeholderHeader}>
-            <span style={styles.placeholderLabel}>MAPPING CANVAS</span>
-          </div>
-          <div style={styles.placeholderContent}>
-            <span style={styles.placeholderText}>Mapping Canvas</span>
-            <span style={styles.placeholderHint}>Task 17 — drag source fields to target schema fields</span>
-          </div>
+          <MappingCanvas
+            mappings={mappings}
+            selectedMapping={selectedMapping}
+            onSelectMapping={setSelectedMapping}
+            onUpdateMapping={handleUpdateMapping}
+          />
         </div>
 
         {/* Right: Target Schema — 55% */}
         <div style={styles.rightPanel}>
-          <div style={styles.placeholderHeader}>
-            <span style={styles.placeholderLabel}>TARGET SCHEMA</span>
-          </div>
-          <div style={styles.placeholderContent}>
-            <span style={styles.placeholderText}>Target Schema</span>
-            <span style={styles.placeholderHint}>Task 17 — display schema fields as drop targets</span>
-          </div>
+          <TargetSchema
+            mappings={mappings}
+            onAddMapping={handleAddMapping}
+            onRemoveMapping={handleRemoveMapping}
+            onUpdateMapping={handleUpdateMapping}
+            sampleData={sampleData}
+            nodeTypeRules={nodeTypeRules}
+            onNodeTypeRulesChange={setNodeTypeRules}
+          />
         </div>
       </div>
     </div>
@@ -341,41 +368,5 @@ const styles: Record<string, React.CSSProperties> = {
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
-  },
-  placeholderHeader: {
-    display: 'flex',
-    alignItems: 'center',
-    padding: '8px 12px',
-    borderBottom: '1px solid var(--color-border)',
-    background: 'var(--color-bg-elevated)',
-    flexShrink: 0,
-  },
-  placeholderLabel: {
-    fontSize: 11,
-    letterSpacing: 1,
-    color: 'var(--color-text-muted)',
-    fontFamily: 'var(--font-sans)',
-    fontWeight: 600,
-  },
-  placeholderContent: {
-    flex: 1,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
-    background: 'var(--color-bg-primary)',
-  },
-  placeholderText: {
-    fontSize: 13,
-    fontFamily: 'var(--font-sans)',
-    color: 'var(--color-text-muted)',
-    fontWeight: 500,
-  },
-  placeholderHint: {
-    fontSize: 10,
-    fontFamily: 'var(--font-mono)',
-    color: 'var(--color-text-muted)',
-    opacity: 0.6,
   },
 }
