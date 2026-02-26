@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Link, Outlet, useParams, useLocation, useNavigate } from 'react-router-dom'
 import { apiFetch } from '../lib/api'
-import { ChevronLeft, Eye, Network, Terminal, FileSearch, ScrollText } from 'lucide-react'
+import { ChevronLeft, Eye, Network, Terminal, FileSearch, ScrollText, GitBranch } from 'lucide-react'
 
 interface Operation {
   id: string
@@ -31,6 +31,7 @@ const TABS = [
   { key: 'networks', label: 'NETWORKS', icon: Network },
   { key: 'c2', label: 'C2', icon: Terminal },
   { key: 'findings', label: 'FINDINGS', icon: FileSearch },
+  { key: 'workflow', label: 'WORKFLOW', icon: GitBranch },
   { key: 'audit', label: 'AUDIT', icon: ScrollText },
 ]
 

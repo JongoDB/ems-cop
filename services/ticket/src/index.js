@@ -245,12 +245,26 @@ app.post('/api/v1/tickets/:id/transition', async (req, res) => {
   if (!action) return sendError(res, 400, 'VALIDATION_ERROR', 'Action is required');
 
   try {
-    const ticket = await pool.query('SELECT id, status FROM tickets WHERE id = $1', [req.params.id]);
+    const ticket = await pool.query('SELECT id, status, workflow_run_id, operation_id FROM tickets WHERE id = $1', [req.params.id]);
     if (ticket.rows.length === 0) {
       return sendError(res, 404, 'NOT_FOUND', 'Ticket not found');
     }
 
     const currentStatus = ticket.rows[0].status;
+    const workflowRunId = ticket.rows[0].workflow_run_id;
+
+    // Guard workflow-managed tickets from manual approval/rejection
+    if (workflowRunId && (action === 'approve' || action === 'reject')) {
+      // Check if the run is active
+      const runResult = await pool.query(
+        'SELECT status FROM workflow_runs WHERE id = $1', [workflowRunId]
+      );
+      if (runResult.rows.length > 0 && runResult.rows[0].status === 'active') {
+        return sendError(res, 422, 'WORKFLOW_MANAGED',
+          'This ticket is managed by a workflow. Use the workflow-runs API to approve/reject.');
+      }
+    }
+
     const validActions = TRANSITIONS[currentStatus];
     if (!validActions || !validActions[action]) {
       return sendError(res, 422, 'INVALID_TRANSITION',
@@ -273,6 +287,8 @@ app.post('/api/v1/tickets/:id/transition', async (req, res) => {
       from: currentStatus,
       to: newStatus,
       action,
+      ticket_id: req.params.id,
+      operation_id: ticket.rows[0].operation_id || '',
     });
 
     res.json({ data: result.rows[0] });

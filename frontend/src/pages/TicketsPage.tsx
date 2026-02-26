@@ -1,6 +1,11 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { apiFetch } from '../lib/api'
+import { useWorkflowStore } from '../stores/workflowStore'
+import WorkflowProgressBar from '../components/workflow/WorkflowProgressBar'
+import ApprovalActions from '../components/workflow/ApprovalActions'
+import WorkflowRunViewer from '../components/workflow/WorkflowRunViewer'
+import type { WorkflowRun, Workflow } from '../types/workflow'
 import {
   Plus, Search, ChevronLeft, ChevronRight,
   X, MessageSquare, ArrowRight,
@@ -19,6 +24,8 @@ interface TicketRecord {
   created_by: string
   assigned_to: string | null
   tags: string[]
+  workflow_run_id: string | null
+  current_stage_id: string | null
   created_at: string
   updated_at: string
 }
@@ -88,6 +95,11 @@ export default function TicketsPage() {
   const [showCreate, setShowCreate] = useState(false)
   const [newComment, setNewComment] = useState('')
 
+  // Workflow state for selected ticket
+  const [workflowRun, setWorkflowRun] = useState<WorkflowRun | null>(null)
+  const [workflow, setWorkflow] = useState<Workflow | null>(null)
+  const { fetchWorkflowRun } = useWorkflowStore()
+
   // Create form
   const [createTitle, setCreateTitle] = useState('')
   const [createDesc, setCreateDesc] = useState('')
@@ -133,10 +145,47 @@ export default function TicketsPage() {
     }
   }
 
+  const fetchTicketWorkflow = async (ticket: TicketRecord) => {
+    if (ticket.workflow_run_id) {
+      try {
+        const run = await fetchWorkflowRun(ticket.workflow_run_id)
+        setWorkflowRun(run)
+        if (run) {
+          const wf = await apiFetch<Workflow>(`/workflows/${run.workflow_id}`)
+          setWorkflow(wf)
+        }
+      } catch {
+        setWorkflowRun(null)
+        setWorkflow(null)
+      }
+    } else {
+      setWorkflowRun(null)
+      setWorkflow(null)
+    }
+  }
+
   const openDetail = async (ticket: TicketRecord) => {
     setSelectedTicket(ticket)
     setShowCreate(false)
-    await fetchComments(ticket.id)
+    await Promise.all([
+      fetchComments(ticket.id),
+      fetchTicketWorkflow(ticket),
+    ])
+  }
+
+  const refreshTicketWorkflow = async () => {
+    if (selectedTicket?.workflow_run_id) {
+      const run = await fetchWorkflowRun(selectedTicket.workflow_run_id)
+      setWorkflowRun(run)
+    }
+    // Also refresh the ticket itself
+    if (selectedTicket) {
+      try {
+        const data = await apiFetch<{ data: TicketRecord }>(`/tickets/${selectedTicket.id}`)
+        setSelectedTicket(data.data)
+      } catch { /* ignore */ }
+    }
+    fetchTickets()
   }
 
   const handleTransition = async (ticketId: string, action: string) => {
@@ -144,9 +193,10 @@ export default function TicketsPage() {
       method: 'POST',
       body: JSON.stringify({ action }),
     })
-    // Refresh the ticket
     const data = await apiFetch<{ data: TicketRecord }>(`/tickets/${ticketId}`)
     setSelectedTicket(data.data)
+    // Refetch workflow if ticket was submitted (workflow may have been auto-created)
+    await fetchTicketWorkflow(data.data)
     fetchTickets()
   }
 
@@ -178,6 +228,7 @@ export default function TicketsPage() {
     fetchTickets()
   }
 
+  const isWorkflowManaged = !!(workflowRun && workflowRun.status === 'active')
   const totalPages = Math.max(1, Math.ceil(total / limit))
 
   return (
@@ -289,7 +340,7 @@ export default function TicketsPage() {
         {/* Side Panel: Detail or Create */}
         {(selectedTicket || showCreate) && (
           <div className="side-panel">
-            <button className="panel-close" onClick={() => { setSelectedTicket(null); setShowCreate(false); }}>
+            <button className="panel-close" onClick={() => { setSelectedTicket(null); setShowCreate(false); setWorkflowRun(null); setWorkflow(null); }}>
               <X size={16} />
             </button>
 
@@ -335,6 +386,28 @@ export default function TicketsPage() {
                 <span className="mono-cell panel-ticket-number">{selectedTicket.ticket_number}</span>
                 <h2 className="panel-title">{selectedTicket.title}</h2>
 
+                {/* Workflow Progress Bar */}
+                {workflow && workflowRun && (
+                  <div style={{ marginBottom: 16, paddingBottom: 16, borderBottom: '1px solid var(--color-border)' }}>
+                    <WorkflowProgressBar
+                      stages={workflow.stages}
+                      currentStageId={workflowRun.current_stage_id}
+                      status={workflowRun.status}
+                    />
+                  </div>
+                )}
+
+                {/* Workflow Approval Actions (replaces manual transitions when active) */}
+                {isWorkflowManaged && workflowRun && (
+                  <div style={{ marginBottom: 16, paddingBottom: 16, borderBottom: '1px solid var(--color-border)' }}>
+                    <ApprovalActions
+                      run={workflowRun}
+                      transitions={workflow?.transitions ?? []}
+                      onAction={refreshTicketWorkflow}
+                    />
+                  </div>
+                )}
+
                 <div className="detail-meta">
                   <div className="meta-row">
                     <span className="meta-label">STATUS</span>
@@ -366,8 +439,8 @@ export default function TicketsPage() {
                   </div>
                 )}
 
-                {/* Transition Buttons */}
-                {TRANSITIONS[selectedTicket.status] && (
+                {/* Transition Buttons (hidden when workflow is managing approvals) */}
+                {!isWorkflowManaged && TRANSITIONS[selectedTicket.status] && (
                   <div className="transition-actions">
                     {TRANSITIONS[selectedTicket.status].map((t) => (
                       <button
@@ -388,6 +461,13 @@ export default function TicketsPage() {
                         CANCEL
                       </button>
                     )}
+                  </div>
+                )}
+
+                {/* Workflow Run History */}
+                {workflowRun && (
+                  <div style={{ marginBottom: 16 }}>
+                    <WorkflowRunViewer runId={workflowRun.id} history={workflowRun.history} />
                   </div>
                 )}
 

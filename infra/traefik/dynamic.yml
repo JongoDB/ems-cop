@@ -117,6 +117,13 @@ http:
       middlewares: [auth-verify, cors-headers]
       priority: 50
 
+    workflow-runs:
+      rule: "PathPrefix(`/api/v1/workflow-runs`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify, cors-headers]
+      priority: 50
+
     operations:
       rule: "PathPrefix(`/api/v1/operations`)"
       entryPoints: [web]

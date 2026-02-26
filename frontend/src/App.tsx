@@ -11,8 +11,11 @@ import NetworksTab from './pages/operation-tabs/NetworksTab'
 import C2Tab from './pages/operation-tabs/C2Tab'
 import FindingsTab from './pages/operation-tabs/FindingsTab'
 import AuditTab from './pages/operation-tabs/AuditTab'
+import WorkflowTab from './pages/operation-tabs/WorkflowTab'
 import DisplaySchemaEditor from './pages/admin/DisplaySchemaEditor'
 import ParserWorkbench from './pages/admin/ParserWorkbench'
+import WorkflowListPage from './pages/admin/WorkflowListPage'
+import WorkflowEditorPage from './pages/admin/WorkflowEditorPage'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppLayout from './components/AppLayout'
 import AdminLayout from './components/AdminLayout'
@@ -33,6 +36,7 @@ function App() {
               <Route path="c2" element={<C2Tab />} />
               <Route path="findings" element={<FindingsTab />} />
               <Route path="audit" element={<AuditTab />} />
+              <Route path="workflow" element={<WorkflowTab />} />
             </Route>
             <Route path="/tickets" element={<TicketsPage />} />
             <Route path="/c2" element={<C2Page />} />
@@ -42,6 +46,8 @@ function App() {
               <Route index element={<Navigate to="display-schemas" replace />} />
               <Route path="display-schemas" element={<DisplaySchemaEditor />} />
               <Route path="import-parsers" element={<ParserWorkbench />} />
+              <Route path="workflows" element={<WorkflowListPage />} />
+              <Route path="workflows/:id" element={<WorkflowEditorPage />} />
             </Route>
             <Route path="/" element={<Navigate to="/operations" replace />} />
           </Route>

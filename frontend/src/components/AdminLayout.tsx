@@ -1,9 +1,10 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
-import { Database, FileCode } from 'lucide-react'
+import { Database, FileCode, GitBranch } from 'lucide-react'
 
 const ADMIN_TABS = [
   { path: '/admin/display-schemas', label: 'Display Schemas', icon: Database },
   { path: '/admin/import-parsers', label: 'Import Parsers', icon: FileCode },
+  { path: '/admin/workflows', label: 'Workflows', icon: GitBranch },
 ]
 
 export default function AdminLayout() {
@@ -13,7 +14,7 @@ export default function AdminLayout() {
     <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', padding: '0 16px' }}>
       <div style={styles.tabBar}>
         {ADMIN_TABS.map(({ path, label, icon: Icon }) => {
-          const active = location.pathname === path
+          const active = location.pathname === path || location.pathname.startsWith(path + '/')
           return (
             <Link key={path} to={path} style={{ ...styles.tab, ...(active ? styles.tabActive : {}) }}>
               <Icon size={13} />

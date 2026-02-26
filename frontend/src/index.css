@@ -1548,3 +1548,609 @@ select.filter-select {
 .modal-footer {
   padding: 12px 20px 20px;
 }
+
+/* ═══════════════════════════════════════════
+   WORKFLOW — Progress Bar
+   ═══════════════════════════════════════════ */
+.wf-progress-bar {
+  display: flex;
+  align-items: flex-start;
+  gap: 0;
+  padding: 8px 0;
+  overflow-x: auto;
+}
+
+.wf-progress-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  flex: 1;
+  min-width: 80px;
+}
+
+.wf-progress-connector {
+  position: absolute;
+  top: 12px;
+  right: 50%;
+  width: 100%;
+  height: 2px;
+  background: var(--color-border-strong);
+  z-index: 0;
+}
+
+.wf-progress-connector.filled {
+  background: var(--color-accent);
+}
+
+.wf-progress-node {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--color-border-strong);
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+  position: relative;
+  z-index: 1;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+}
+
+.wf-progress-node.completed {
+  border-color: var(--color-success);
+  background: var(--color-success);
+  color: #0a0e14;
+}
+
+.wf-progress-node.current {
+  border-color: var(--color-accent);
+  background: rgba(77, 171, 247, 0.15);
+  color: var(--color-accent);
+  animation: wfPulse 2s ease-in-out infinite;
+}
+
+@keyframes wfPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(77, 171, 247, 0.3); }
+  50% { box-shadow: 0 0 0 6px rgba(77, 171, 247, 0); }
+}
+
+.wf-progress-node.upcoming {
+  border-color: var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text-muted);
+}
+
+.wf-progress-number {
+  font-size: 9px;
+}
+
+.wf-progress-label {
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  color: var(--color-text-muted);
+  text-align: center;
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wf-progress-label.current {
+  color: var(--color-accent);
+  font-weight: 600;
+}
+
+.wf-progress-label.completed {
+  color: var(--color-success);
+}
+
+/* ═══════════════════════════════════════════
+   WORKFLOW — Approval Actions
+   ═══════════════════════════════════════════ */
+.wf-approval-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.wf-approval-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--color-bg-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.wf-approval-stage-type {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border: 1px solid var(--color-warning);
+  border-radius: 2px;
+  color: var(--color-warning);
+}
+
+.wf-approval-stage-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-bright);
+  flex: 1;
+}
+
+.wf-approval-role {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.5px;
+  padding: 2px 6px;
+  border-radius: 2px;
+}
+
+.wf-approval-role.has-role {
+  border: 1px solid var(--color-success);
+  color: var(--color-success);
+}
+
+.wf-approval-role.no-role {
+  border: 1px solid var(--color-text-muted);
+  color: var(--color-text-muted);
+}
+
+.wf-approval-comment {
+  font-size: 12px;
+}
+
+.wf-kickback-select {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.wf-approval-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.wf-btn-approve {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: rgba(64, 192, 87, 0.12);
+  border: 1px solid rgba(64, 192, 87, 0.3);
+  border-radius: var(--radius);
+  color: var(--color-success);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.wf-btn-approve:hover:not(:disabled) {
+  background: rgba(64, 192, 87, 0.2);
+}
+
+.wf-btn-approve:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.wf-btn-reject {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 16px;
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid rgba(255, 107, 107, 0.2);
+  border-radius: var(--radius);
+  color: var(--color-danger);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.wf-btn-reject:hover:not(:disabled) {
+  background: rgba(255, 107, 107, 0.15);
+}
+
+.wf-btn-reject:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.wf-approval-waiting {
+  padding: 10px 12px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+/* ═══════════════════════════════════════════
+   WORKFLOW — Run Viewer / Timeline
+   ═══════════════════════════════════════════ */
+.wf-run-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wf-run-empty {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--color-text-muted);
+  text-align: center;
+  padding: 16px;
+}
+
+.wf-timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.wf-timeline-entry {
+  display: flex;
+  gap: 10px;
+  padding: 8px 0;
+  border-left: 2px solid var(--color-border);
+  margin-left: 10px;
+  padding-left: 14px;
+  position: relative;
+}
+
+.wf-timeline-dot {
+  position: absolute;
+  left: -7px;
+  top: 10px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--color-bg);
+  border: 2px solid;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.wf-timeline-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.wf-timeline-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.wf-timeline-action {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 1px;
+}
+
+.wf-timeline-stage {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-muted);
+}
+
+.wf-timeline-time {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--color-text-muted);
+  margin-left: auto;
+}
+
+.wf-timeline-comment {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-text);
+  line-height: 1.4;
+}
+
+/* ═══════════════════════════════════════════
+   WORKFLOW — Stage List (Editor)
+   ═══════════════════════════════════════════ */
+.wf-stage-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.wf-stage-item-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.wf-stage-connector {
+  width: 2px;
+  height: 12px;
+  background: var(--color-border-strong);
+  margin: 0 auto;
+}
+
+.wf-stage-card {
+  padding: 10px 12px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.wf-stage-card:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-bg-hover);
+}
+
+.wf-stage-card.selected {
+  border-color: var(--color-accent);
+  background: rgba(77, 171, 247, 0.06);
+  border-left: 3px solid var(--color-accent);
+}
+
+.wf-stage-card.dragging {
+  opacity: 0.4;
+}
+
+.wf-stage-card.drop-target {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 1px var(--color-accent);
+}
+
+.wf-stage-connector.drag-over {
+  background: var(--color-accent);
+}
+
+.wf-stage-drag-handle {
+  display: flex;
+  align-items: center;
+  color: var(--color-text-muted);
+  cursor: grab;
+  padding: 2px;
+  margin-right: 4px;
+  opacity: 0.5;
+  transition: opacity var(--transition);
+}
+
+.wf-stage-card:hover .wf-stage-drag-handle {
+  opacity: 1;
+}
+
+.wf-stage-drag-handle:active {
+  cursor: grabbing;
+}
+
+.wf-stage-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 4px;
+}
+
+.wf-stage-type-badge {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 1px;
+  padding: 2px 6px;
+  border: 1px solid;
+  border-radius: 2px;
+}
+
+.wf-stage-order {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-muted);
+}
+
+.wf-stage-card-name {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-bright);
+  margin-bottom: 6px;
+}
+
+.wf-stage-card-actions {
+  display: flex;
+  gap: 4px;
+  justify-content: flex-end;
+}
+
+.wf-stage-action-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.wf-stage-action-btn:hover:not(:disabled) {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.wf-stage-action-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.wf-stage-action-btn.danger:hover:not(:disabled) {
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+
+.wf-stage-action-btn.active {
+  border-color: var(--color-warning);
+}
+
+.wf-add-stage-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 10px;
+  background: transparent;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: var(--radius);
+  color: var(--color-text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 1px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.wf-add-stage-btn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  background: rgba(77, 171, 247, 0.05);
+}
+
+.wf-error-banner {
+  padding: 8px 16px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-danger);
+  background: rgba(255, 107, 107, 0.08);
+  border: 1px solid var(--color-danger);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+/* ═══════════════════════════════════════════
+   WORKFLOW — Config Panel
+   ═══════════════════════════════════════════ */
+.wf-config-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.form-hint {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--color-text-muted);
+  margin-top: 2px;
+}
+
+/* ═══════════════════════════════════════════
+   WORKFLOW — Transition Editor
+   ═══════════════════════════════════════════ */
+.wf-transition-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wf-transition-empty {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+.wf-transition-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.wf-transition-trigger {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-accent);
+}
+
+.wf-transition-arrow {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.wf-transition-target {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-text-bright);
+  flex: 1;
+}
+
+.wf-transition-label {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  color: var(--color-text-muted);
+  padding: 1px 6px;
+  background: var(--color-bg-surface);
+  border-radius: 2px;
+}
+
+.wf-transition-add {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  margin-top: 4px;
+}
+
+.wf-transition-add .form-input {
+  padding: 6px 8px;
+  font-size: 11px;
+  flex: 1;
+}
+
+.wf-transition-add-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: rgba(77, 171, 247, 0.1);
+  border: 1px solid rgba(77, 171, 247, 0.2);
+  border-radius: var(--radius);
+  color: var(--color-accent);
+  cursor: pointer;
+  transition: all var(--transition);
+  flex-shrink: 0;
+}
+
+.wf-transition-add-btn:hover:not(:disabled) {
+  background: rgba(77, 171, 247, 0.2);
+}
+
+.wf-transition-add-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
