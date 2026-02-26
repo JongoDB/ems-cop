@@ -318,4 +318,23 @@ M4b milestone (Network Map Enhancements) validated (2026-02-24):
 - Node type heuristics: port/vendor/OS-based classification (router, firewall, printer, VPN, IoT, server, workstation)
 - Version bumped to v0.6.0
 
-**Next: M4c — Dashboards** (drag/drop dashboard with tabs, core widgets, echelon templates)
+M4c milestone (Dashboards) validated (2026-02-24):
+- WS-Relay service: Socket.IO + NATS JetStream bridge, topic-based rooms with ref-counted subscriptions
+- Terminal proxy: bidirectional WebSocket proxy (xterm.js ↔ ws-relay ↔ C2 Gateway ↔ Sliver shell)
+- Dashboard service: full CRUD API (dashboards, tabs, widgets), layout batch update, metrics proxy endpoints
+- Echelon template seeding: 5 templates (Strategic/E1, Operational/E2, Tactical/E3, Operator, Planner) auto-inserted on startup
+- Auto-seed on first login: POST /dashboards/seed clones matching echelon template for new users
+- Frontend dashboard framework: react-grid-layout with preset sizes (S/M/L), tab bar, drag-and-drop, sidebar
+- Widget wrapper: drag handle, size toggle, fullscreen mode, error boundary, lazy loading
+- Add widget modal: categorized catalog of all 12 widgets
+- 12 functional widgets implemented:
+  - C2: Terminal (xterm.js + Socket.IO proxy), Sliver C2 Panel (live sessions), Command Palette (searchable), Remote Desktop (M6 shell)
+  - Operational: Network Topology (Cytoscape.js), Ticket Queue, Audit Log (streaming), Endpoint Table
+  - Analytics: Metrics Chart (Recharts), Operation Timeline, Notes (TipTap editor), Plugin IFrame (sandboxed)
+- Cross-widget communication: widgetEventBus (session selection, command execution, navigation)
+- Socket.IO store: Zustand with auto-reconnect, topic subscriptions, terminal proxy methods
+- Dashboard store: Zustand with CRUD actions, debounced layout persistence, optimistic updates
+- Traefik: WS route public (auth handled by ws-relay handshake)
+- Version bumped to v0.7.0
+
+**Next: M5 — Workflows** (linear workflow engine, approval gates, visual editor)

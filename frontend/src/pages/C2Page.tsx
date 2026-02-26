@@ -230,7 +230,7 @@ export default function C2Page() {
 
   return (
     <>
-    <div className="c2-layout" style={{ margin: '-24px', height: 'calc(100vh - 48px)' }}>
+    <div className="c2-layout" style={{ width: '100%', height: '100%' }}>
         {/* Left Sidebar — Sessions */}
         <aside className="c2-sidebar">
           <div className="c2-sidebar-header">

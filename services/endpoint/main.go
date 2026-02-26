@@ -3187,6 +3187,97 @@ func (s *Server) handleTestImportParser(w http.ResponseWriter, r *http.Request) 
 
 // ---------------------------------------------------------------------------
 // Server startup
+// ── Endpoints (managed targets) ─────────────────────────────────────────
+
+func (s *Server) handleListEndpoints(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.db.Query(r.Context(), `
+		SELECT e.id, e.hostname, e.fqdn, e.ip_addresses, e.os, e.os_version,
+		       e.architecture, e.environment, e.status, e.compliance_status,
+		       e.tags, e.first_seen, e.last_seen
+		FROM endpoints e
+		ORDER BY e.hostname ASC`)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "QUERY_FAILED", "message": err.Error()}})
+		return
+	}
+	defer rows.Close()
+
+	type Endpoint struct {
+		ID               string    `json:"id"`
+		Hostname         string    `json:"hostname"`
+		FQDN             *string   `json:"fqdn"`
+		IPAddresses      any       `json:"ip_addresses"`
+		OS               string    `json:"os"`
+		OSVersion        string    `json:"os_version"`
+		Architecture     string    `json:"architecture"`
+		Environment      string    `json:"environment"`
+		Status           string    `json:"health_status"`
+		ComplianceStatus string    `json:"compliance_status"`
+		Tags             []string  `json:"tags"`
+		FirstSeen        time.Time `json:"first_seen"`
+		LastSeen         time.Time `json:"last_seen"`
+	}
+
+	var endpoints []Endpoint
+	for rows.Next() {
+		var ep Endpoint
+		var ipJSON []byte
+		var tags []string
+		if err := rows.Scan(&ep.ID, &ep.Hostname, &ep.FQDN, &ipJSON, &ep.OS, &ep.OSVersion,
+			&ep.Architecture, &ep.Environment, &ep.Status, &ep.ComplianceStatus,
+			&tags, &ep.FirstSeen, &ep.LastSeen); err != nil {
+			s.logger.Error("scan endpoint", "error", err)
+			continue
+		}
+		json.Unmarshal(ipJSON, &ep.IPAddresses)
+		ep.Tags = tags
+		endpoints = append(endpoints, ep)
+	}
+	if endpoints == nil {
+		endpoints = []Endpoint{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"data": endpoints})
+}
+
+func (s *Server) handleGetEndpoint(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	type Endpoint struct {
+		ID               string    `json:"id"`
+		Hostname         string    `json:"hostname"`
+		FQDN             *string   `json:"fqdn"`
+		IPAddresses      any       `json:"ip_addresses"`
+		OS               string    `json:"os"`
+		OSVersion        string    `json:"os_version"`
+		Architecture     string    `json:"architecture"`
+		Environment      string    `json:"environment"`
+		Status           string    `json:"health_status"`
+		ComplianceStatus string    `json:"compliance_status"`
+		Tags             []string  `json:"tags"`
+		FirstSeen        time.Time `json:"first_seen"`
+		LastSeen         time.Time `json:"last_seen"`
+	}
+
+	var ep Endpoint
+	var ipJSON []byte
+	var tags []string
+	err := s.db.QueryRow(r.Context(), `
+		SELECT id, hostname, fqdn, ip_addresses, os, os_version,
+		       architecture, environment, status, compliance_status,
+		       tags, first_seen, last_seen
+		FROM endpoints WHERE id = $1`, id).
+		Scan(&ep.ID, &ep.Hostname, &ep.FQDN, &ipJSON, &ep.OS, &ep.OSVersion,
+			&ep.Architecture, &ep.Environment, &ep.Status, &ep.ComplianceStatus,
+			&tags, &ep.FirstSeen, &ep.LastSeen)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "NOT_FOUND", "message": "endpoint not found"}})
+		return
+	}
+	json.Unmarshal(ipJSON, &ep.IPAddresses)
+	ep.Tags = tags
+	writeJSON(w, http.StatusOK, ep)
+}
+
 // ---------------------------------------------------------------------------
 
 func (s *Server) Start() {
@@ -3215,6 +3306,10 @@ func (s *Server) Start() {
 	mux.HandleFunc("DELETE /api/v1/edges/{id}", s.handleDeleteEdge)
 
 	// Display Schemas
+	// Endpoints (managed targets from PostgreSQL endpoints table)
+	mux.HandleFunc("GET /api/v1/endpoints", s.handleListEndpoints)
+	mux.HandleFunc("GET /api/v1/endpoints/{id}", s.handleGetEndpoint)
+
 	mux.HandleFunc("GET /api/v1/display-schemas", s.handleListDisplaySchemas)
 	mux.HandleFunc("GET /api/v1/display-schemas/{id}", s.handleGetDisplaySchema)
 	mux.HandleFunc("POST /api/v1/display-schemas", s.handleCreateDisplaySchema)

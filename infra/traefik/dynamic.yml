@@ -173,12 +173,13 @@ http:
       middlewares: [auth-verify, cors-headers]
       priority: 50
 
+    # WebSocket relay — auth handled by ws-relay via handshake token
     ws:
       rule: "PathPrefix(`/ws`)"
       entryPoints: [web]
       service: ws
-      middlewares: [auth-verify, cors-headers]
-      priority: 50
+      middlewares: [cors-headers]
+      priority: 80
 
   # ════════════════════════════════════════════
   #  SERVICES (backend targets)

@@ -10,7 +10,7 @@ export default function AdminLayout() {
   const location = useLocation()
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100%', height: '100%', padding: '0 16px' }}>
       <div style={styles.tabBar}>
         {ADMIN_TABS.map(({ path, label, icon: Icon }) => {
           const active = location.pathname === path

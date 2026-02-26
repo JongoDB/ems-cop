@@ -5,6 +5,7 @@ import TicketsPage from './pages/TicketsPage'
 import C2Page from './pages/C2Page'
 import OperationsPage from './pages/OperationsPage'
 import OperationDetailPage from './pages/OperationDetailPage'
+import DashboardsPage from './pages/DashboardsPage'
 import OverviewTab from './pages/operation-tabs/OverviewTab'
 import NetworksTab from './pages/operation-tabs/NetworksTab'
 import C2Tab from './pages/operation-tabs/C2Tab'
@@ -17,31 +18,6 @@ import AppLayout from './components/AppLayout'
 import AdminLayout from './components/AdminLayout'
 
 const queryClient = new QueryClient()
-
-function DashboardsPlaceholder() {
-  return (
-    <div style={{
-      flex: 1,
-      display: 'flex',
-      flexDirection: 'column',
-      alignItems: 'center',
-      justifyContent: 'center',
-      padding: 60,
-      background: 'var(--color-bg-elevated)',
-      border: '1px solid var(--color-border)',
-    }}>
-      <p style={{
-        fontFamily: 'var(--font-mono)',
-        fontSize: 12,
-        letterSpacing: 1,
-        color: 'var(--color-text-muted)',
-        margin: 0,
-      }}>
-        Dashboards coming in M4 Phase 2
-      </p>
-    </div>
-  )
-}
 
 function App() {
   return (
@@ -60,7 +36,8 @@ function App() {
             </Route>
             <Route path="/tickets" element={<TicketsPage />} />
             <Route path="/c2" element={<C2Page />} />
-            <Route path="/dashboards" element={<DashboardsPlaceholder />} />
+            <Route path="/dashboards" element={<DashboardsPage />} />
+            <Route path="/dashboards/:id" element={<DashboardsPage />} />
             <Route path="/admin" element={<AdminLayout />}>
               <Route index element={<Navigate to="display-schemas" replace />} />
               <Route path="display-schemas" element={<DisplaySchemaEditor />} />

@@ -57,7 +57,7 @@ export default function AppLayout() {
         </div>
       </nav>
 
-      <main className="main-content">
+      <main className={`main-content${['/dashboards', '/c2', '/admin'].some(p => location.pathname.startsWith(p)) ? ' full-width' : ''}`}>
         <Outlet />
       </main>
     </div>

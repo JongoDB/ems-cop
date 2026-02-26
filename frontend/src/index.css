@@ -416,6 +416,12 @@ select.filter-select {
   margin: 0 auto;
 }
 
+.main-content.full-width {
+  max-width: none;
+  padding: 0;
+  gap: 0;
+}
+
 /* ═══════════════════════════════════════════
    HOME PAGE
    ═══════════════════════════════════════════ */
