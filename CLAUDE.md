@@ -105,12 +105,7 @@ ems-cop/
 - Frontend SPA — LoginPage, HomePage (ticket queue summary), TicketsPage (table + detail panel + create form), auth flows (Zustand store, token refresh, ProtectedRoute guard), tactical dark theme
 - Traefik ForwardAuth wiring — public routes (login/refresh) at priority 100, protected API routes with auth-verify middleware at priority 50, CORS middleware
 
-**What exists as scaffold (health endpoint only, needs implementation):**
-- workflow-engine (Go) — DAG engine, approval gates, kickbacks not implemented
-- dashboard-service (Node) — layout/config CRUD not implemented
-- notification-service (Node) — multi-channel dispatch not implemented
-- endpoint-service (Go) — endpoint registry, health/telemetry not implemented
-- ws-relay (Node) — WebSocket fan-out not implemented
+**All services now fully implemented** (no scaffolds remaining)
 
 ## Design Principles
 
@@ -210,9 +205,9 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 
 **M4b — Network Map Enhancements (Complete):** Tabbed node detail panel (Overview, Services, Vulns, Interfaces, Notes) with inline editing. Vulnerability drill-down with CVE tracking, exploit mapping, attack notes. Subnet-based auto-edge generation, traceroute-based edge inference, enrichment source tracking. Admin display schema editor, import parser CRUD, generic parser engine (XML/JSON/CSV/TSV), visual parser workbench with source inspector tree, target schema drop targets, and mapping canvas.
 
-**M5 — Workflows:** Linear workflow engine. Task → approval → execute flow. Kickback + conditional branch support. Visual editor.
+**M5 — Workflows (Complete):** Linear workflow engine. Task → approval → execute flow. Kickback + conditional branch support. Visual editor.
 
-**M6 — Integrations:** Notifications (in-app, email, webhooks), Sliver C2 panel widget, noVNC, Jira sync.
+**M6 — Integrations (Complete):** Notifications (in-app, email, webhooks), noVNC remote desktop, bidirectional Jira sync.
 
 **M7 — Hardening:** Security audit, perf testing, docs, Helm chart scaffolding.
 
@@ -241,6 +236,12 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - **Admin parser workbench:** `frontend/src/pages/admin/ParserWorkbench.tsx` + `ParserWorkbench/` directory
 - **M4 design doc:** `docs/plans/2026-02-23-m4-operations-networks-design.md`
 - **M4b enhancements design:** `docs/plans/2026-02-24-m4b-network-map-enhancements-design.md`
+- **Notification service:** `services/notification/src/index.js`
+- **Jira integration migration:** `infra/db/postgres/migrations/007_jira_integration.sql`
+- **Notification bell + store:** `frontend/src/components/NotificationBell.tsx`, `frontend/src/stores/notificationStore.ts`
+- **Remote desktop widget (noVNC):** `frontend/src/components/widgets/RemoteDesktopWidget.tsx`
+- **VNC proxy (C2 Gateway):** `services/c2-gateway/main.go` (handleVNCProxy)
+- **Jira admin page:** `frontend/src/pages/admin/JiraConfigPage.tsx`
 
 ## Testing
 
@@ -337,4 +338,32 @@ M4c milestone (Dashboards) validated (2026-02-24):
 - Traefik: WS route public (auth handled by ws-relay handshake)
 - Version bumped to v0.7.0
 
-**Next: M5 — Workflows** (linear workflow engine, approval gates, visual editor)
+M5 milestone (Workflows) validated (2026-02-25):
+- Workflow engine: linear DAG execution, approval gates, kickback support, conditional branches
+- Visual workflow editor: drag-and-drop stage reordering, stage config panel, transition editor
+- Workflow run execution: automatic stage progression, role-based approval enforcement
+- Admin workflow management: list, create, edit, delete workflows
+- Ticket integration: submit → auto-create workflow run, approval actions in ticket detail panel
+- Version bumped to v0.8.0
+
+M6 milestone (Integrations) implemented (2026-02-26):
+- Notification service: NATS consumer for ticket/workflow/operation events, recipient resolution, dispatch pipeline
+- In-app notifications: PostgreSQL storage, unread count, real-time push via NATS → ws-relay → Socket.IO
+- Email notifications: nodemailer with SMTP transport (optional, skip if no SMTP_HOST)
+- Webhook notifications: HTTP POST to configured URLs, fire-and-forget
+- Notification UI: bell icon with unread badge, dropdown panel, mark read/all read, delete, relative timestamps
+- Rate limiting (30/min per user) + dedup (60s per user+type+reference) via Redis
+- User notification preferences: opt-out per notification type via users.preferences JSONB
+- noVNC remote desktop: Ubuntu endpoints run Xvfb + fluxbox + x11vnc on port 5900
+- C2 Gateway VNC proxy: WebSocket binary relay to endpoint VNC servers, SSRF prevention (10.101.0.0/16 only)
+- RemoteDesktopWidget: noVNC RFB client with connect/disconnect, settings, screenshot, scale toggle
+- Jira bidirectional sync: outbound (ticket events → Jira API) + inbound (Jira webhook → ticket-service)
+- Jira sync loop prevention: Redis lock (30s TTL) prevents inbound webhook triggering outbound sync
+- Jira configuration CRUD: admin page with test connection, sync log viewer, webhook URL display
+- Jira sync mappings: ticket ↔ Jira issue key linking with sync status tracking
+- Ticket detail Jira badge: issue key, sync status, sync-now button, link-to-Jira button
+- Migration 007: jira_configs, jira_sync_mappings, jira_sync_log tables
+- Traefik: VNC WebSocket route (priority 90, no ForwardAuth), Jira webhook route (priority 90, no ForwardAuth)
+- Version bumped to v0.9.0
+
+**Next: M7 — Hardening** (security audit, perf testing, docs, Helm chart scaffolding)

@@ -352,6 +352,11 @@ services:
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
       SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@ems-cop.local}
+      TICKET_SERVICE_URL: http://ticket-service:3003
+      JIRA_DEFAULT_URL: ${JIRA_DEFAULT_URL:-}
+      JIRA_DEFAULT_EMAIL: ${JIRA_DEFAULT_EMAIL:-}
+      JIRA_DEFAULT_TOKEN: ${JIRA_DEFAULT_TOKEN:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -483,6 +488,7 @@ services:
     environment:
       ENDPOINT_ROLE: workstation
       ENDPOINT_SEGMENT: corp-a
+      VNC_PASSWORD: ${VNC_PASSWORD:-vnc_pass}
     networks:
       endpoint-net:
         ipv4_address: 10.101.1.10
@@ -497,6 +503,7 @@ services:
     environment:
       ENDPOINT_ROLE: workstation
       ENDPOINT_SEGMENT: corp-a
+      VNC_PASSWORD: ${VNC_PASSWORD:-vnc_pass}
     networks:
       endpoint-net:
         ipv4_address: 10.101.1.11

@@ -16,6 +16,7 @@ import DisplaySchemaEditor from './pages/admin/DisplaySchemaEditor'
 import ParserWorkbench from './pages/admin/ParserWorkbench'
 import WorkflowListPage from './pages/admin/WorkflowListPage'
 import WorkflowEditorPage from './pages/admin/WorkflowEditorPage'
+import JiraConfigPage from './pages/admin/JiraConfigPage'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppLayout from './components/AppLayout'
 import AdminLayout from './components/AdminLayout'
@@ -48,6 +49,7 @@ function App() {
               <Route path="import-parsers" element={<ParserWorkbench />} />
               <Route path="workflows" element={<WorkflowListPage />} />
               <Route path="workflows/:id" element={<WorkflowEditorPage />} />
+              <Route path="jira" element={<JiraConfigPage />} />
             </Route>
             <Route path="/" element={<Navigate to="/operations" replace />} />
           </Route>

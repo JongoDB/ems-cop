@@ -2,6 +2,7 @@ import { Outlet, Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
 import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal } from 'lucide-react'
 import { APP_VERSION } from '../version'
+import NotificationBell from './NotificationBell'
 
 const NAV_ITEMS = [
   { path: '/operations', label: 'OPERATIONS', icon: Crosshair },
@@ -43,6 +44,7 @@ export default function AppLayout() {
           )}
         </div>
         <div className="navbar-right">
+          <NotificationBell />
           <div className="user-badge">
             <span className="user-name">{user?.display_name}</span>
             <div className="role-tags">

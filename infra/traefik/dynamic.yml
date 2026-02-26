@@ -51,6 +51,22 @@ http:
       middlewares: [cors-headers]
       priority: 90
 
+    # C2 VNC WebSocket — auth handled by c2-gateway via query param token
+    c2-vnc:
+      rule: "PathPrefix(`/api/v1/c2/vnc`)"
+      entryPoints: [web]
+      service: c2
+      middlewares: [cors-headers]
+      priority: 90
+
+    # Jira inbound webhook — auth via shared secret, not ForwardAuth
+    jira-webhook:
+      rule: "Path(`/api/v1/notifications/jira/webhook`)"
+      entryPoints: [web]
+      service: notification
+      middlewares: [cors-headers]
+      priority: 90
+
     # Frontend SPA — public
     frontend:
       rule: "PathPrefix(`/`)"

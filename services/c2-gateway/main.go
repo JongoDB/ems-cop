@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -361,6 +362,9 @@ func (s *C2GatewayServer) Start() error {
 	// WebSocket for interactive shell sessions
 	mux.HandleFunc("GET /api/v1/c2/sessions/{sessionID}/shell", s.handleShellSession)
 
+	// VNC WebSocket proxy for noVNC
+	mux.HandleFunc("GET /api/v1/c2/vnc/{host}/{port}", s.handleVNCProxy)
+
 	// Health check
 	mux.HandleFunc("GET /api/v1/c2/health", s.handleHealth)
 
@@ -576,6 +580,107 @@ func (s *C2GatewayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"active_sessions":  activeSessions,
 		"time":             time.Now().UTC(),
 	})
+}
+
+// ════════════════════════════════════════════
+//  VNC WEBSOCKET PROXY
+//  Relays binary WebSocket frames ↔ raw TCP (noVNC RFB protocol)
+// ════════════════════════════════════════════
+
+// isEndpointSubnet validates that the host is within the endpoint network (10.101.0.0/16)
+func isEndpointSubnet(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	_, epNet, _ := net.ParseCIDR("10.101.0.0/16")
+	return epNet.Contains(ip)
+}
+
+func (s *C2GatewayServer) handleVNCProxy(w http.ResponseWriter, r *http.Request) {
+	host := r.PathValue("host")
+	vncPort := r.PathValue("port")
+
+	// Auth: X-User-ID header or JWT query param (WebSocket can't use ForwardAuth)
+	userID := r.Header.Get("X-User-ID")
+	if userID == "" {
+		tokenStr := r.URL.Query().Get("token")
+		if tokenStr == "" {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		sub, err := s.validateJWT(tokenStr)
+		if err != nil {
+			s.logger.Error("vnc auth failed", "error", err)
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+		userID = sub
+	}
+
+	// SSRF prevention: only allow connections to endpoint subnet
+	if !isEndpointSubnet(host) {
+		s.logger.Warn("vnc proxy blocked: host not in endpoint subnet", "host", host, "user", userID)
+		http.Error(w, "Forbidden: target not in endpoint subnet", http.StatusForbidden)
+		return
+	}
+
+	target := fmt.Sprintf("%s:%s", host, vncPort)
+	s.logger.Info("vnc proxy connecting", "target", target, "user", userID)
+
+	// Dial the VNC server via raw TCP
+	tcpConn, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		s.logger.Error("vnc tcp dial failed", "target", target, "error", err)
+		http.Error(w, "Failed to connect to VNC server: "+err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer tcpConn.Close()
+
+	// Upgrade to WebSocket
+	ws, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		s.logger.Error("vnc websocket upgrade failed", "error", err)
+		return
+	}
+	defer ws.Close()
+
+	s.publishAudit("c2.vnc_opened", r, host, "vnc_connect", fmt.Sprintf("target=%s user=%s", target, userID))
+
+	// Bidirectional relay: WebSocket binary ↔ TCP
+	done := make(chan struct{})
+
+	// TCP → WebSocket
+	go func() {
+		defer close(done)
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := tcpConn.Read(buf)
+			if err != nil {
+				return
+			}
+			if err := ws.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	// WebSocket → TCP
+	go func() {
+		for {
+			_, msg, err := ws.ReadMessage()
+			if err != nil {
+				tcpConn.Close()
+				return
+			}
+			if _, err := tcpConn.Write(msg); err != nil {
+				return
+			}
+		}
+	}()
+
+	<-done
+	s.publishAudit("c2.vnc_closed", r, host, "vnc_disconnect", fmt.Sprintf("target=%s user=%s", target, userID))
 }
 
 // ════════════════════════════════════════════

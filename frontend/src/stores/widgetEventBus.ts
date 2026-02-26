@@ -20,6 +20,11 @@ interface WidgetEventBus {
   pendingEndpointNavigation: string | null
   navigateToEndpoint: (endpointId: string) => void
   consumeEndpointNavigation: () => string | null
+
+  // VNC target selection
+  selectedVncTarget: { host: string; port: number } | null
+  selectVncTarget: (host: string, port: number) => void
+  clearVncTarget: () => void
 }
 
 export const useWidgetEventBus = create<WidgetEventBus>((set, get) => ({
@@ -50,4 +55,8 @@ export const useWidgetEventBus = create<WidgetEventBus>((set, get) => ({
     if (id) set({ pendingEndpointNavigation: null })
     return id
   },
+
+  selectedVncTarget: null,
+  selectVncTarget: (host, port) => set({ selectedVncTarget: { host, port } }),
+  clearVncTarget: () => set({ selectedVncTarget: null }),
 }))

@@ -1,5 +1,5 @@
 # EMS-COP Managed Endpoint — Ubuntu
-# Simulates a corporate workstation with common services
+# Simulates a corporate workstation with common services + VNC desktop
 
 FROM ubuntu:22.04
 
@@ -17,6 +17,11 @@ RUN apt-get update && apt-get install -y \
     python3 \
     sudo \
     cron \
+    xvfb \
+    x11vnc \
+    fluxbox \
+    xterm \
+    dbus-x11 \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure SSH
@@ -28,12 +33,12 @@ RUN mkdir /var/run/sshd && \
 RUN useradd -m -s /bin/bash -G sudo employee && \
     echo 'employee:Welcome1!' | chpasswd
 
-# Simulate some running services
-RUN printf '#!/bin/bash\nservice ssh start\npython3 -m http.server 8080 --directory /var/www/html &\necho "Endpoint $(hostname) ready"\ntail -f /dev/null\n' > /entrypoint.sh && chmod +x /entrypoint.sh
+# Simulate some running services + VNC desktop
+RUN printf '#!/bin/bash\nservice ssh start\npython3 -m http.server 8080 --directory /var/www/html &\n\n# Start VNC desktop\nexport DISPLAY=:1\nXvfb :1 -screen 0 1280x720x24 &\nsleep 1\nfluxbox &\nsleep 1\nx11vnc -display :1 -forever -shared -rfbport 5900 -passwd "${VNC_PASSWORD:-vnc_pass}" &\n\necho "Endpoint $(hostname) ready (VNC on :5900)"\ntail -f /dev/null\n' > /entrypoint.sh && chmod +x /entrypoint.sh
 
 RUN mkdir -p /var/www/html && \
     echo "<h1>Internal Portal - $(cat /etc/hostname 2>/dev/null || echo 'corp-ws')</h1>" > /var/www/html/index.html
 
-EXPOSE 22 8080
+EXPOSE 22 8080 5900
 
 CMD ["/entrypoint.sh"]

@@ -1,10 +1,11 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
-import { Database, FileCode, GitBranch } from 'lucide-react'
+import { Database, FileCode, GitBranch, ExternalLink } from 'lucide-react'
 
 const ADMIN_TABS = [
   { path: '/admin/display-schemas', label: 'Display Schemas', icon: Database },
   { path: '/admin/import-parsers', label: 'Import Parsers', icon: FileCode },
   { path: '/admin/workflows', label: 'Workflows', icon: GitBranch },
+  { path: '/admin/jira', label: 'Jira Sync', icon: ExternalLink },
 ]
 
 export default function AdminLayout() {

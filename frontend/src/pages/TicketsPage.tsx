@@ -8,7 +8,7 @@ import WorkflowRunViewer from '../components/workflow/WorkflowRunViewer'
 import type { WorkflowRun, Workflow } from '../types/workflow'
 import {
   Plus, Search, ChevronLeft, ChevronRight,
-  X, MessageSquare, ArrowRight,
+  X, MessageSquare, ArrowRight, ExternalLink, RefreshCw,
 } from 'lucide-react'
 
 interface TicketRecord {
@@ -100,6 +100,10 @@ export default function TicketsPage() {
   const [workflow, setWorkflow] = useState<Workflow | null>(null)
   const { fetchWorkflowRun } = useWorkflowStore()
 
+  // Jira sync state
+  const [jiraMapping, setJiraMapping] = useState<{ jira_issue_key: string; sync_status: string; last_synced_at: string | null } | null>(null)
+  const [jiraSyncing, setJiraSyncing] = useState(false)
+
   // Create form
   const [createTitle, setCreateTitle] = useState('')
   const [createDesc, setCreateDesc] = useState('')
@@ -164,12 +168,34 @@ export default function TicketsPage() {
     }
   }
 
+  const fetchJiraMapping = async (ticketId: string) => {
+    try {
+      const res = await apiFetch<{ data: Array<{ jira_issue_key: string; sync_status: string; last_synced_at: string | null }> }>(
+        `/notifications/jira/mappings?ticket_id=${ticketId}`
+      )
+      setJiraMapping(res.data[0] || null)
+    } catch {
+      setJiraMapping(null)
+    }
+  }
+
+  const handleJiraSync = async (ticketId: string) => {
+    setJiraSyncing(true)
+    try {
+      await apiFetch(`/notifications/jira/sync/${ticketId}`, { method: 'POST' })
+      await fetchJiraMapping(ticketId)
+    } catch { /* ignore */ }
+    setJiraSyncing(false)
+  }
+
   const openDetail = async (ticket: TicketRecord) => {
     setSelectedTicket(ticket)
     setShowCreate(false)
+    setJiraMapping(null)
     await Promise.all([
       fetchComments(ticket.id),
       fetchTicketWorkflow(ticket),
+      fetchJiraMapping(ticket.id),
     ])
   }
 
@@ -429,6 +455,47 @@ export default function TicketsPage() {
                   <div className="meta-row">
                     <span className="meta-label">ASSIGNEE</span>
                     <span>{selectedTicket.assignee_name || 'Unassigned'}</span>
+                  </div>
+                  {/* Jira Sync Badge */}
+                  <div className="meta-row">
+                    <span className="meta-label">JIRA</span>
+                    {jiraMapping ? (
+                      <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                        <ExternalLink size={10} style={{ color: 'var(--color-accent)' }} />
+                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--color-accent)' }}>
+                          {jiraMapping.jira_issue_key}
+                        </span>
+                        <span className="status-badge" style={{
+                          borderColor: jiraMapping.sync_status === 'synced' ? 'var(--color-success)' :
+                            jiraMapping.sync_status === 'error' ? 'var(--color-danger)' : 'var(--color-warning)',
+                          color: jiraMapping.sync_status === 'synced' ? 'var(--color-success)' :
+                            jiraMapping.sync_status === 'error' ? 'var(--color-danger)' : 'var(--color-warning)',
+                          fontSize: 9, padding: '1px 4px',
+                        }}>
+                          {jiraMapping.sync_status.toUpperCase()}
+                        </span>
+                        <button
+                          onClick={() => handleJiraSync(selectedTicket.id)}
+                          disabled={jiraSyncing}
+                          style={{ background: 'none', border: 'none', color: 'var(--color-text-muted)', cursor: 'pointer', padding: 2 }}
+                          title="Sync Now"
+                        >
+                          <RefreshCw size={10} style={jiraSyncing ? { animation: 'spin 1s linear infinite' } : undefined} />
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        onClick={() => handleJiraSync(selectedTicket.id)}
+                        disabled={jiraSyncing}
+                        style={{
+                          background: 'none', border: '1px solid var(--color-border)', borderRadius: 'var(--radius)',
+                          color: 'var(--color-text-muted)', cursor: 'pointer', padding: '2px 8px',
+                          fontFamily: 'var(--font-mono)', fontSize: 10,
+                        }}
+                      >
+                        {jiraSyncing ? 'Syncing...' : 'Link to Jira'}
+                      </button>
+                    )}
                   </div>
                 </div>
 
