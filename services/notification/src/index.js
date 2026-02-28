@@ -6,6 +6,7 @@ const { Pool } = require('pg');
 const Redis = require('ioredis');
 const { connect, StringCodec } = require('nats');
 const nodemailer = require('nodemailer');
+const crypto = require('crypto');
 
 const app = express();
 const port = process.env.SERVICE_PORT || 3007;
@@ -530,6 +531,24 @@ async function logJiraSync(configId, mappingId, direction, action, status, detai
 
 app.post('/api/v1/notifications/jira/webhook', async (req, res) => {
   try {
+    // Verify webhook signature (HMAC-SHA256)
+    const signature = req.headers['x-hub-signature'] || req.headers['x-atlassian-webhook-signature'];
+    if (!signature) {
+      return res.status(401).json({ error: { code: 'MISSING_SIGNATURE', message: 'Webhook signature required' } });
+    }
+
+    const configResult = await pool.query('SELECT webhook_secret FROM jira_configs LIMIT 1');
+    if (configResult.rows.length === 0 || !configResult.rows[0].webhook_secret) {
+      return res.status(500).json({ error: { code: 'NO_CONFIG', message: 'Jira not configured' } });
+    }
+
+    const secret = configResult.rows[0].webhook_secret;
+    const expectedSig = 'sha256=' + crypto.createHmac('sha256', secret).update(JSON.stringify(req.body)).digest('hex');
+    if (signature.length !== expectedSig.length ||
+        !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSig))) {
+      return res.status(401).json({ error: { code: 'INVALID_SIGNATURE', message: 'Invalid webhook signature' } });
+    }
+
     const event = req.body;
     const issueKey = event.issue?.key;
     if (!issueKey) return res.json({ ok: true, message: 'no issue key' });
