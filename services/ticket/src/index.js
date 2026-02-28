@@ -479,10 +479,28 @@ app.delete('/api/v1/commands/presets/:id', async (req, res) => {
 });
 
 // --- Start ---
+let server;
+
 async function start() {
   await connectNats();
-  app.listen(port, () => console.log(`[ticket] listening on :${port}`));
+  server = app.listen(port, () => console.log(`[ticket] listening on :${port}`));
 }
+
+async function shutdown(signal) {
+  console.log(`[ticket] ${signal} received, shutting down...`);
+  if (server) {
+    server.close(() => console.log('[ticket] HTTP server closed'));
+  }
+  if (nc) {
+    try { await nc.drain(); console.log('[ticket] NATS drained'); } catch (e) { /* ignore */ }
+  }
+  await pool.end();
+  console.log('[ticket] DB pool closed');
+  setTimeout(() => { console.error('[ticket] forced shutdown after timeout'); process.exit(1); }, 10000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch(err => {
   console.error('[ticket] startup failed:', err);

@@ -1063,6 +1063,8 @@ app.get('/api/v1/notifications/jira/log', async (req, res) => {
 //  STARTUP
 // ════════════════════════════════════════════
 
+let server;
+
 async function start() {
   try {
     await pool.query('SELECT 1');
@@ -1078,7 +1080,25 @@ async function start() {
     setTimeout(startNatsConsumer, 5000);
   }
 
-  app.listen(port, () => console.log(`[${name}] listening on :${port}`));
+  server = app.listen(port, () => console.log(`[${name}] listening on :${port}`));
 }
+
+async function shutdown(signal) {
+  console.log(`[${name}] ${signal} received, shutting down...`);
+  if (server) {
+    server.close(() => console.log(`[${name}] HTTP server closed`));
+  }
+  if (nc) {
+    try { await nc.drain(); console.log(`[${name}] NATS drained`); } catch (e) { /* ignore */ }
+  }
+  redis.disconnect();
+  console.log(`[${name}] Redis disconnected`);
+  await pool.end();
+  console.log(`[${name}] DB pool closed`);
+  setTimeout(() => { console.error(`[${name}] forced shutdown after timeout`); process.exit(1); }, 10000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 start();

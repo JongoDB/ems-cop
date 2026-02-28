@@ -858,11 +858,29 @@ async function seedTemplates() {
 // Start
 // ============================================================
 
+let server;
+
 async function start() {
   await connectNats();
   await seedTemplates();
-  app.listen(port, () => console.log(`[dashboard] listening on :${port}`));
+  server = app.listen(port, () => console.log(`[dashboard] listening on :${port}`));
 }
+
+async function shutdown(signal) {
+  console.log(`[dashboard] ${signal} received, shutting down...`);
+  if (server) {
+    server.close(() => console.log('[dashboard] HTTP server closed'));
+  }
+  if (nc) {
+    try { await nc.drain(); console.log('[dashboard] NATS drained'); } catch (e) { /* ignore */ }
+  }
+  await pool.end();
+  console.log('[dashboard] DB pool closed');
+  setTimeout(() => { console.error('[dashboard] forced shutdown after timeout'); process.exit(1); }, 10000);
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch(err => {
   console.error('[dashboard] startup failed:', err);
