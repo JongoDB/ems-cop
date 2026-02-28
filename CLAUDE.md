@@ -192,6 +192,7 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY`
 - `JWT_SECRET`
 - `SERVICE_NAME`, `SERVICE_PORT`
+- `ALLOWED_ORIGINS` (CORS + WebSocket origin allowlist, comma-separated)
 
 ## Milestone Roadmap
 
@@ -209,7 +210,11 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 
 **M6 — Integrations (Complete):** Notifications (in-app, email, webhooks), noVNC remote desktop, bidirectional Jira sync.
 
-**M7 — Hardening:** Security audit, perf testing, docs, Helm chart scaffolding.
+**M7a — Security Hardening (Complete):** Request body size limits (all services), CORS lockdown (Traefik + WebSocket), Redis-backed rate limiting on auth endpoints, error message sanitization (C2 gateway), Jira webhook HMAC-SHA256 verification, WebSocket origin checking.
+
+**M7b — Reliability & Observability:** Graceful shutdown, health probe overhaul (liveness + readiness), structured JSON logging (Node services), connection pool configuration, retry with exponential backoff.
+
+**M7c — Kubernetes Migration Path:** Helm chart scaffolding, Ingress configuration, resource requests/limits, ConfigMap/Secret separation.
 
 ## Key Files to Reference
 
@@ -366,4 +371,14 @@ M6 milestone (Integrations) implemented (2026-02-26):
 - Traefik: VNC WebSocket route (priority 90, no ForwardAuth), Jira webhook route (priority 90, no ForwardAuth)
 - Version bumped to v0.9.0
 
-**Next: M7 — Hardening** (security audit, perf testing, docs, Helm chart scaffolding)
+M7a milestone (Security Hardening) implemented (2026-02-28):
+- Request body size limits: http.MaxBytesReader middleware on all Go services (1 MB, c2-gateway 10 MB), express.json({ limit: '1mb' }) on all Node services
+- CORS lockdown: Traefik accessControlAllowOriginList restricted to ALLOWED_ORIGINS, Socket.IO CORS configurable
+- Rate limiting: Redis sorted-set sliding window on auth login (10/min/IP) and refresh (20/min/IP)
+- Error sanitization: All http.Error(w, err.Error(), ...) in c2-gateway replaced with logged errors + generic JSON responses
+- Jira webhook security: HMAC-SHA256 signature verification with timing-safe comparison
+- WebSocket origin check: c2-gateway upgrader validates Origin against ALLOWED_ORIGINS
+- ALLOWED_ORIGINS env var added to x-common-env in docker-compose
+- Version bumped to v0.10.0
+
+**Next: M7b — Reliability & Observability** (graceful shutdown, health probes, JSON logging, connection pools, retry backoff)
