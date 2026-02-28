@@ -28,10 +28,11 @@ import (
 // ---------------------------------------------------------------------------
 
 type Server struct {
-	db     *pgxpool.Pool
-	nc     *nats.Conn
-	port   string
-	logger *slog.Logger
+	db         *pgxpool.Pool
+	nc         *nats.Conn
+	port       string
+	logger     *slog.Logger
+	httpServer *http.Server
 }
 
 type Network struct {
@@ -3335,8 +3336,16 @@ func (s *Server) Start() {
 
 	handler := maxBodyMiddleware(1<<20, mux) // 1 MB
 
+	s.httpServer = &http.Server{
+		Addr:         fmt.Sprintf(":%s", s.port),
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
 	s.logger.Info("starting endpoint-service", "port", s.port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", s.port), handler); err != nil {
+	if err := s.httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		s.logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
@@ -3387,11 +3396,15 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info("shutting down")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if server.httpServer != nil {
+			server.httpServer.Shutdown(shutdownCtx)
+		}
 		if nc != nil {
 			nc.Close()
 		}
 		pool.Close()
-		os.Exit(0)
 	}()
 
 	server.Start()

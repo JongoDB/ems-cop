@@ -335,11 +335,12 @@ func (s *C2GatewayServer) publishAudit(eventType string, r *http.Request, resour
 // ════════════════════════════════════════════
 
 type C2GatewayServer struct {
-	provider  C2Provider
-	port      string
-	nc        *nats.Conn
-	logger    *slog.Logger
-	jwtSecret []byte
+	provider   C2Provider
+	port       string
+	nc         *nats.Conn
+	logger     *slog.Logger
+	jwtSecret  []byte
+	httpServer *http.Server
 }
 
 func NewC2GatewayServer(provider C2Provider, port string, nc *nats.Conn, logger *slog.Logger, jwtSecret string) *C2GatewayServer {
@@ -378,13 +379,16 @@ func (s *C2GatewayServer) Start() error {
 
 	handler := maxBodyMiddleware(10<<20, mux) // 10 MB (implant generation payloads)
 
-	server := &http.Server{
-		Addr:    ":" + s.port,
-		Handler: handler,
+	s.httpServer = &http.Server{
+		Addr:         ":" + s.port,
+		Handler:      handler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
 	s.logger.Info("c2-gateway starting", "port", s.port, "provider", s.provider.Name())
-	return server.ListenAndServe()
+	return s.httpServer.ListenAndServe()
 }
 
 func (s *C2GatewayServer) handleListSessions(w http.ResponseWriter, r *http.Request) {
@@ -1565,13 +1569,17 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info("shutting down")
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		if server.httpServer != nil {
+			server.httpServer.Shutdown(shutdownCtx)
+		}
 		provider.Disconnect()
 		nc.Close()
-		os.Exit(0)
 	}()
 
 	logger.Info("c2-gateway starting", "port", port)
-	if err := server.Start(); err != nil {
+	if err := server.Start(); err != nil && err != http.ErrServerClosed {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
