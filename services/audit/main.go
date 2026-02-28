@@ -138,7 +138,9 @@ func main() {
 
 	// HTTP
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", srv.handleHealth)
+	mux.HandleFunc("GET /health/live", srv.handleHealthLive)
+	mux.HandleFunc("GET /health/ready", srv.handleHealthReady)
+	mux.HandleFunc("GET /health", srv.handleHealthReady)
 	mux.HandleFunc("GET /api/v1/audit/events", srv.handleQueryEvents)
 
 	handler := maxBodyMiddleware(1<<20, mux) // 1 MB
@@ -172,8 +174,32 @@ func main() {
 	}
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleHealthLive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "audit"})
+}
+
+func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	status := http.StatusOK
+	overall := "ok"
+
+	if err := s.ch.Ping(r.Context()); err != nil {
+		checks["clickhouse"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["clickhouse"] = "ok"
+	}
+
+	if !s.nc.IsConnected() {
+		checks["nats"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["nats"] = "ok"
+	}
+
+	writeJSON(w, status, map[string]any{"status": overall, "service": "audit", "checks": checks})
 }
 
 func (s *Server) handleEvent(msg *nats.Msg) {

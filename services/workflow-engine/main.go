@@ -1108,13 +1108,32 @@ func isTruthy(v any) bool {
 // Handlers — Operations (existing)
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	err := s.db.Ping(r.Context())
-	status := "ok"
-	if err != nil {
-		status = "degraded"
+func (s *Server) handleHealthLive(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "workflow-engine"})
+}
+
+func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	status := http.StatusOK
+	overall := "ok"
+
+	if err := s.db.Ping(r.Context()); err != nil {
+		checks["postgres"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["postgres"] = "ok"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": status, "service": "workflow-engine"})
+
+	if !s.nc.IsConnected() {
+		checks["nats"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["nats"] = "ok"
+	}
+
+	writeJSON(w, status, map[string]any{"status": overall, "service": "workflow-engine", "checks": checks})
 }
 
 func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
@@ -2681,7 +2700,9 @@ func (s *Server) Start(ctx context.Context) {
 	mux := http.NewServeMux()
 
 	// Health
-	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /health/live", s.handleHealthLive)
+	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
+	mux.HandleFunc("GET /health", s.handleHealthReady)
 
 	// Operations CRUD
 	mux.HandleFunc("POST /api/v1/operations", s.handleCreateOperation)

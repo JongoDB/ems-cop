@@ -581,13 +581,32 @@ const edgeSelectCols = `id, network_id, source_node_id, target_node_id,
 // Handlers — Health
 // ---------------------------------------------------------------------------
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	err := s.db.Ping(r.Context())
-	status := "ok"
-	if err != nil {
-		status = "degraded"
+func (s *Server) handleHealthLive(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "endpoint-service"})
+}
+
+func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	status := http.StatusOK
+	overall := "ok"
+
+	if err := s.db.Ping(r.Context()); err != nil {
+		checks["postgres"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["postgres"] = "ok"
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": status, "service": "endpoint-service"})
+
+	if !s.nc.IsConnected() {
+		checks["nats"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["nats"] = "ok"
+	}
+
+	writeJSON(w, status, map[string]any{"status": overall, "service": "endpoint-service", "checks": checks})
 }
 
 // ---------------------------------------------------------------------------
@@ -3293,7 +3312,9 @@ func (s *Server) handleGetEndpoint(w http.ResponseWriter, r *http.Request) {
 func (s *Server) Start() {
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /health/live", s.handleHealthLive)
+	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
+	mux.HandleFunc("GET /health", s.handleHealthReady)
 
 	// Networks
 	mux.HandleFunc("POST /api/v1/networks", s.handleCreateNetwork)

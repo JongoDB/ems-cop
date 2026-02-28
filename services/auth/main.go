@@ -120,7 +120,9 @@ func main() {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /health", srv.handleHealth)
+	mux.HandleFunc("GET /health/live", srv.handleHealthLive)
+	mux.HandleFunc("GET /health/ready", srv.handleHealthReady)
+	mux.HandleFunc("GET /health", srv.handleHealthReady)
 	mux.HandleFunc("POST /api/v1/auth/login", srv.rateLimitMiddleware(10, 60, "login", srv.handleLogin))
 	mux.HandleFunc("POST /api/v1/auth/refresh", srv.rateLimitMiddleware(20, 60, "refresh", srv.handleRefresh))
 	mux.HandleFunc("POST /api/v1/auth/logout", srv.handleLogout)
@@ -157,8 +159,40 @@ func main() {
 	}
 }
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleHealthLive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "service": "auth"})
+}
+
+func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	status := http.StatusOK
+	overall := "ok"
+
+	if err := s.db.Ping(r.Context()); err != nil {
+		checks["postgres"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["postgres"] = "ok"
+	}
+
+	if err := s.rdb.Ping(r.Context()).Err(); err != nil {
+		checks["redis"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["redis"] = "ok"
+	}
+
+	if !s.nc.IsConnected() {
+		checks["nats"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["nats"] = "ok"
+	}
+
+	writeJSON(w, status, map[string]any{"status": overall, "service": "auth", "checks": checks})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {

@@ -74,9 +74,26 @@ function sendError(res, status, code, message) {
 
 // --- Routes ---
 
-app.get('/health', (_req, res) => {
+app.get('/health/live', (_req, res) => {
   res.json({ status: 'ok', service: 'ticket' });
 });
+
+async function readyCheck(_req, res) {
+  const checks = {};
+  let overall = 'ok';
+  let httpStatus = 200;
+
+  try { await pool.query('SELECT 1'); checks.postgres = 'ok'; }
+  catch { checks.postgres = 'error'; overall = 'degraded'; httpStatus = 503; }
+
+  checks.nats = (nc && !nc.isClosed()) ? 'ok' : 'error';
+  if (checks.nats === 'error') { overall = 'degraded'; httpStatus = 503; }
+
+  res.status(httpStatus).json({ status: overall, service: 'ticket', checks });
+}
+
+app.get('/health/ready', readyCheck);
+app.get('/health', readyCheck);
 
 // CREATE TICKET
 app.post('/api/v1/tickets', async (req, res) => {

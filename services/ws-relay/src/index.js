@@ -67,14 +67,28 @@ async function connectNats() {
 // ---------------------------------------------------------------------------
 // Health endpoint
 // ---------------------------------------------------------------------------
-app.get('/health', (_req, res) => {
-  res.json({
-    status: 'ok',
+app.get('/health/live', (_req, res) => {
+  res.json({ status: 'ok', service: NAME });
+});
+
+function readyCheck(_req, res) {
+  const checks = {};
+  let overall = 'ok';
+  let httpStatus = 200;
+
+  checks.nats = (nc && !nc.isClosed()) ? 'ok' : 'error';
+  if (checks.nats === 'error') { overall = 'degraded'; httpStatus = 503; }
+
+  res.status(httpStatus).json({
+    status: overall,
     service: NAME,
-    nats: nc ? 'connected' : 'disconnected',
+    checks,
     clients: io.engine ? io.engine.clientsCount : 0,
   });
-});
+}
+
+app.get('/health/ready', readyCheck);
+app.get('/health', readyCheck);
 
 // ---------------------------------------------------------------------------
 // Socket.IO auth middleware — validate JWT via auth-service

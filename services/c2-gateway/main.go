@@ -375,6 +375,9 @@ func (s *C2GatewayServer) Start() error {
 	mux.HandleFunc("GET /api/v1/c2/vnc/{host}/{port}", s.handleVNCProxy)
 
 	// Health check
+	mux.HandleFunc("GET /health/live", s.handleHealthLive)
+	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
+	mux.HandleFunc("GET /health", s.handleHealthReady)
 	mux.HandleFunc("GET /api/v1/c2/health", s.handleHealth)
 
 	handler := maxBodyMiddleware(10<<20, mux) // 10 MB (implant generation payloads)
@@ -586,6 +589,29 @@ func (s *C2GatewayServer) handleShellSession(w http.ResponseWriter, r *http.Requ
 
 	// Publish session closed
 	s.publishAudit("c2.session_closed", r, sessionID, "shell_close", "")
+}
+
+func (s *C2GatewayServer) handleHealthLive(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "c2-gateway"})
+}
+
+func (s *C2GatewayServer) handleHealthReady(w http.ResponseWriter, r *http.Request) {
+	checks := map[string]string{}
+	status := http.StatusOK
+	overall := "ok"
+
+	if !s.nc.IsConnected() {
+		checks["nats"] = "error"
+		overall = "degraded"
+		status = http.StatusServiceUnavailable
+	} else {
+		checks["nats"] = "ok"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{"status": overall, "service": "c2-gateway", "checks": checks})
 }
 
 func (s *C2GatewayServer) handleHealth(w http.ResponseWriter, r *http.Request) {

@@ -651,7 +651,29 @@ app.post('/api/v1/notifications/jira/webhook', async (req, res) => {
 // ════════════════════════════════════════════
 
 // Health
-app.get('/health', (req, res) => res.json({ status: 'ok', service: name }));
+app.get('/health/live', (_req, res) => {
+  res.json({ status: 'ok', service: name });
+});
+
+async function readyCheck(_req, res) {
+  const checks = {};
+  let overall = 'ok';
+  let httpStatus = 200;
+
+  try { await pool.query('SELECT 1'); checks.postgres = 'ok'; }
+  catch { checks.postgres = 'error'; overall = 'degraded'; httpStatus = 503; }
+
+  checks.redis = (redis && redis.status === 'ready') ? 'ok' : 'error';
+  if (checks.redis === 'error') { overall = 'degraded'; httpStatus = 503; }
+
+  checks.nats = (nc && !nc.isClosed()) ? 'ok' : 'error';
+  if (checks.nats === 'error') { overall = 'degraded'; httpStatus = 503; }
+
+  res.status(httpStatus).json({ status: overall, service: name, checks });
+}
+
+app.get('/health/ready', readyCheck);
+app.get('/health', readyCheck);
 
 // List notifications for current user
 app.get('/api/v1/notifications', async (req, res) => {
