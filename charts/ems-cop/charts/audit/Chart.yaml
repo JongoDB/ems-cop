@@ -1,0 +1,6 @@
+apiVersion: v2
+name: audit
+description: EMS-COP Audit Service
+type: application
+version: 0.12.0
+appVersion: "0.12.0"

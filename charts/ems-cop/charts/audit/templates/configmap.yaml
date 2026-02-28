@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "audit.fullname" . }}-config
+  labels: {{- include "audit.labels" . | nindent 4 }}
+data:
+  SERVICE_NAME: "audit-service"
+  SERVICE_PORT: "3006"
+  POSTGRES_HOST: {{ .Values.global.postgres.host | quote }}
+  POSTGRES_PORT: {{ .Values.global.postgres.port | quote }}
+  POSTGRES_DB: {{ .Values.global.postgres.database | quote }}
+  NATS_URL: {{ .Values.global.nats.url | quote }}
+  CLICKHOUSE_HOST: {{ .Values.global.clickhouse.host | quote }}
+  CLICKHOUSE_PORT: {{ .Values.global.clickhouse.port | quote }}
+  CLICKHOUSE_DB: {{ .Values.global.clickhouse.database | quote }}
+  ALLOWED_ORIGINS: {{ .Values.global.allowedOrigins | quote }}

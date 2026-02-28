@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "ws-relay.fullname" . }}
+  labels: {{- include "ws-relay.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3009
+      targetPort: http
+      protocol: TCP
+      name: http
+  selector: {{- include "ws-relay.selectorLabels" . | nindent 4 }}

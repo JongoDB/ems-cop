@@ -1,0 +1,180 @@
+global:
+  imageRegistry: ""
+  imagePullSecrets: []
+
+  postgres:
+    host: "ems-cop-postgresql"
+    port: "5432"
+    database: ems_cop
+    user: ems_admin
+    password: CHANGE_ME
+
+  redis:
+    url: "redis://ems-cop-redis-master:6379"
+
+  nats:
+    url: "nats://ems-cop-nats:4222"
+
+  clickhouse:
+    host: clickhouse
+    port: "9000"
+    database: ems_audit
+    user: default
+    password: CHANGE_ME
+
+  minio:
+    endpoint: "ems-cop-minio:9000"
+    accessKey: CHANGE_ME
+    secretKey: CHANGE_ME
+
+  jwtSecret: CHANGE_ME
+  allowedOrigins: "https://ems-cop.example.com"
+
+# Infrastructure toggles
+postgresql:
+  enabled: true
+redis:
+  enabled: true
+nats:
+  enabled: true
+
+# Service configurations
+auth:
+  replicaCount: 2
+  image:
+    repository: ems-cop/auth
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+workflow-engine:
+  replicaCount: 1
+  image:
+    repository: ems-cop/workflow-engine
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ticket:
+  replicaCount: 2
+  image:
+    repository: ems-cop/ticket
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+dashboard:
+  replicaCount: 1
+  image:
+    repository: ems-cop/dashboard
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi
+
+c2-gateway:
+  replicaCount: 1
+  image:
+    repository: ems-cop/c2-gateway
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 200m
+      memory: 256Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+
+audit:
+  replicaCount: 1
+  image:
+    repository: ems-cop/audit
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+notification:
+  replicaCount: 1
+  image:
+    repository: ems-cop/notification
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+endpoint:
+  replicaCount: 1
+  image:
+    repository: ems-cop/endpoint
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+ws-relay:
+  replicaCount: 2
+  image:
+    repository: ems-cop/ws-relay
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+frontend:
+  replicaCount: 2
+  image:
+    repository: ems-cop/frontend
+    tag: latest
+    pullPolicy: IfNotPresent
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi

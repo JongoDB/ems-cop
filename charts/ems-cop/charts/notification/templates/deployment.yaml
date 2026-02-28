@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "notification.fullname" . }}
+  labels: {{- include "notification.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels: {{- include "notification.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels: {{- include "notification.selectorLabels" . | nindent 8 }}
+    spec:
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 3007
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ include "notification.fullname" . }}-config
+            - secretRef:
+                name: {{ include "notification.fullname" . }}-secrets
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            failureThreshold: 30
+            periodSeconds: 2
+          resources: {{- toYaml .Values.resources | nindent 12 }}

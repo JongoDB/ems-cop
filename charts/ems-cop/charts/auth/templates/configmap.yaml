@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "auth.fullname" . }}-config
+  labels: {{- include "auth.labels" . | nindent 4 }}
+data:
+  SERVICE_NAME: "auth-service"
+  SERVICE_PORT: "3001"
+  POSTGRES_HOST: {{ .Values.global.postgres.host | quote }}
+  POSTGRES_PORT: {{ .Values.global.postgres.port | quote }}
+  POSTGRES_DB: {{ .Values.global.postgres.database | quote }}
+  NATS_URL: {{ .Values.global.nats.url | quote }}
+  REDIS_URL: {{ .Values.global.redis.url | quote }}
+  ALLOWED_ORIGINS: {{ .Values.global.allowedOrigins | quote }}
