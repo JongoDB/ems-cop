@@ -119,8 +119,8 @@ func main() {
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", srv.handleHealth)
-	mux.HandleFunc("POST /api/v1/auth/login", srv.handleLogin)
-	mux.HandleFunc("POST /api/v1/auth/refresh", srv.handleRefresh)
+	mux.HandleFunc("POST /api/v1/auth/login", srv.rateLimitMiddleware(10, 60, "login", srv.handleLogin))
+	mux.HandleFunc("POST /api/v1/auth/refresh", srv.rateLimitMiddleware(20, 60, "refresh", srv.handleRefresh))
 	mux.HandleFunc("POST /api/v1/auth/logout", srv.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/verify", srv.handleVerify)
 	mux.HandleFunc("GET /api/v1/auth/me", srv.handleMe)
@@ -372,6 +372,31 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	user.Roles = roles
 
 	writeJSON(w, http.StatusOK, map[string]any{"data": user})
+}
+
+// --- Rate Limiting ---
+
+func (s *Server) rateLimitMiddleware(maxRequests int, windowSecs int, keyPrefix string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := clientIP(r)
+		key := fmt.Sprintf("ratelimit:%s:%s", keyPrefix, ip)
+		ctx := r.Context()
+		now := time.Now().UnixMilli()
+		windowMs := int64(windowSecs) * 1000
+
+		pipe := s.rdb.Pipeline()
+		pipe.ZRemRangeByScore(ctx, key, "0", fmt.Sprintf("%d", now-windowMs))
+		countCmd := pipe.ZCard(ctx, key)
+		pipe.ZAdd(ctx, key, redis.Z{Score: float64(now), Member: fmt.Sprintf("%d", now)})
+		pipe.Expire(ctx, key, time.Duration(windowSecs*2)*time.Second)
+		pipe.Exec(ctx)
+
+		if countCmd.Val() >= int64(maxRequests) {
+			writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "Too many requests, try again later")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // --- Helpers ---
