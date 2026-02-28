@@ -249,6 +249,15 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func envOrInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -2768,7 +2777,17 @@ func main() {
 		getEnv("POSTGRES_PORT", "5432"),
 		getEnv("POSTGRES_DB", "ems_cop"))
 
-	pool, err := pgxpool.New(context.Background(), pgURL)
+	pgConfig, err := pgxpool.ParseConfig(pgURL)
+	if err != nil {
+		logger.Error("failed to parse pg config", "error", err)
+		os.Exit(1)
+	}
+	pgConfig.MaxConns = int32(envOrInt("PG_MAX_CONNS", 10))
+	pgConfig.MinConns = int32(envOrInt("PG_MIN_CONNS", 2))
+	pgConfig.MaxConnLifetime = time.Duration(envOrInt("PG_CONN_MAX_LIFETIME_MINS", 30)) * time.Minute
+	pgConfig.MaxConnIdleTime = 5 * time.Minute
+
+	pool, err := pgxpool.NewWithConfig(context.Background(), pgConfig)
 	if err != nil {
 		logger.Error("postgres connect failed", "error", err)
 		os.Exit(1)

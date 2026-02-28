@@ -17,17 +17,31 @@ const pool = new Pool({
   database: process.env.POSTGRES_DB || 'ems_cop',
   user: process.env.POSTGRES_USER || 'ems',
   password: process.env.POSTGRES_PASSWORD || 'ems_dev_password',
+  max: parseInt(process.env.PG_MAX_CONNS || '10'),
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 // --- NATS ---
 let nc = null;
+let natsRetryCount = 0;
+
 async function connectNats() {
   try {
-    nc = await connect({ servers: process.env.NATS_URL || 'nats://localhost:4222' });
+    nc = await connect({
+      servers: process.env.NATS_URL || 'nats://localhost:4222',
+      maxReconnectAttempts: -1,
+      reconnectTimeWait: 2000,
+    });
+    natsRetryCount = 0;
     logger.info('connected to nats');
   } catch (err) {
-    logger.error({ err: err.message }, 'nats connection failed, retrying in 5s');
-    setTimeout(connectNats, 5000);
+    natsRetryCount++;
+    const baseDelay = Math.min(1000 * Math.pow(2, natsRetryCount), 30000);
+    const jitter = Math.random() * 1000;
+    const delay = baseDelay + jitter;
+    logger.warn({ err: err.message, retryMs: Math.round(delay) }, 'NATS connection failed, retrying');
+    setTimeout(connectNats, delay);
   }
 }
 

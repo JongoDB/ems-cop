@@ -25,13 +25,16 @@ const pool = new Pool({
   database: process.env.POSTGRES_DB || 'ems_cop',
   user: process.env.POSTGRES_USER || 'ems_user',
   password: process.env.POSTGRES_PASSWORD || 'ems_password',
-  max: 10,
+  max: parseInt(process.env.PG_MAX_CONNS || '10'),
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 5000,
 });
 
 const redis = new Redis(process.env.REDIS_URL || 'redis://redis:6379');
 
 let nc = null; // NATS connection
 let sc = null; // String codec
+let natsRetryCount = 0;
 
 // Email transport (optional — skip if SMTP_HOST not set)
 let mailTransport = null;
@@ -1099,9 +1102,14 @@ async function start() {
 
   try {
     await startNatsConsumer();
+    natsRetryCount = 0;
   } catch (err) {
-    logger.error({ err: err.message }, 'NATS connection failed, will retry');
-    setTimeout(startNatsConsumer, 5000);
+    natsRetryCount++;
+    const baseDelay = Math.min(1000 * Math.pow(2, natsRetryCount), 30000);
+    const jitter = Math.random() * 1000;
+    const delay = baseDelay + jitter;
+    logger.warn({ err: err.message, retryMs: Math.round(delay) }, 'NATS connection failed, retrying');
+    setTimeout(startNatsConsumer, delay);
   }
 
   server = app.listen(port, () => logger.info({ port }, 'listening'));

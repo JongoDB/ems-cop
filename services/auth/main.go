@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -69,7 +70,17 @@ func main() {
 		envOr("POSTGRES_PORT", "5432"),
 		envOr("POSTGRES_DB", "ems_cop"),
 	)
-	db, err := pgxpool.New(ctx, pgURL)
+	pgConfig, err := pgxpool.ParseConfig(pgURL)
+	if err != nil {
+		logger.Error("failed to parse pg config", "error", err)
+		os.Exit(1)
+	}
+	pgConfig.MaxConns = int32(envOrInt("PG_MAX_CONNS", 10))
+	pgConfig.MinConns = int32(envOrInt("PG_MIN_CONNS", 2))
+	pgConfig.MaxConnLifetime = time.Duration(envOrInt("PG_CONN_MAX_LIFETIME_MINS", 30)) * time.Minute
+	pgConfig.MaxConnIdleTime = 5 * time.Minute
+
+	db, err := pgxpool.NewWithConfig(ctx, pgConfig)
 	if err != nil {
 		logger.Error("failed to connect to postgres", "error", err)
 		os.Exit(1)
@@ -575,6 +586,15 @@ func maxBodyMiddleware(maxBytes int64, next http.Handler) http.Handler {
 func envOr(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
+	}
+	return fallback
+}
+
+func envOrInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
 	}
 	return fallback
 }
