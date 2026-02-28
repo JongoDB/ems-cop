@@ -212,7 +212,7 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 
 **M7a — Security Hardening (Complete):** Request body size limits (all services), CORS lockdown (Traefik + WebSocket), Redis-backed rate limiting on auth endpoints, error message sanitization (C2 gateway), Jira webhook HMAC-SHA256 verification, WebSocket origin checking.
 
-**M7b — Reliability & Observability:** Graceful shutdown, health probe overhaul (liveness + readiness), structured JSON logging (Node services), connection pool configuration, retry with exponential backoff.
+**M7b — Reliability & Observability (Complete):** Graceful shutdown (all services), health probe overhaul (/health/live + /health/ready with dependency checks), HTTP server timeouts (ReadTimeout/WriteTimeout/IdleTimeout), structured JSON logging (pino for Node services), configurable connection pools (PG_MAX_CONNS/PG_MIN_CONNS env vars), NATS retry with exponential backoff + jitter.
 
 **M7c — Kubernetes Migration Path:** Helm chart scaffolding, Ingress configuration, resource requests/limits, ConfigMap/Secret separation.
 
@@ -381,4 +381,13 @@ M7a milestone (Security Hardening) implemented (2026-02-28):
 - ALLOWED_ORIGINS env var added to x-common-env in docker-compose
 - Version bumped to v0.10.0
 
-**Next: M7b — Reliability & Observability** (graceful shutdown, health probes, JSON logging, connection pools, retry backoff)
+M7b milestone (Reliability & Observability) implemented (2026-02-28):
+- Graceful shutdown: all Go services use http.Server.Shutdown with 10s context, all Node services drain NATS + close PG pool + 10s forced timeout
+- HTTP server timeouts: ReadTimeout 15s, WriteTimeout 30s, IdleTimeout 60s on all Go services
+- Health probes: /health/live (always 200) + /health/ready (checks PG, Redis, NATS, CH) + /health (alias for ready) on all 9 services
+- Structured JSON logging: pino for ticket, dashboard, notification services (Go services already used slog JSON)
+- Connection pools: PG_MAX_CONNS, PG_MIN_CONNS, PG_CONN_MAX_LIFETIME_MINS env vars for Go services; max/idleTimeout/connectionTimeout for Node services
+- NATS retry: exponential backoff (2s→30s cap) with random jitter for ticket, dashboard, notification services
+- Version bumped to v0.11.0
+
+**Next: M7c — Kubernetes Migration Path** (Helm chart scaffolding, Ingress, resource limits)
