@@ -1,6 +1,8 @@
 const express = require('express');
 const { Pool } = require('pg');
 const { connect, StringCodec } = require('nats');
+const pino = require('pino');
+const logger = pino({ name: 'ticket-service' });
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -36,9 +38,9 @@ let nc = null;
 async function connectNats() {
   try {
     nc = await connect({ servers: process.env.NATS_URL || 'nats://localhost:4222' });
-    console.log('[ticket] connected to nats');
+    logger.info('connected to nats');
   } catch (err) {
-    console.error('[ticket] nats connection failed, retrying in 5s:', err.message);
+    logger.error({ err: err.message }, 'nats connection failed, retrying in 5s');
     setTimeout(connectNats, 5000);
   }
 }
@@ -123,7 +125,7 @@ app.post('/api/v1/tickets', async (req, res) => {
     publishEvent('ticket.created', userId, null, ticket.id, { title, priority: ticket.priority });
     res.status(201).json({ data: ticket });
   } catch (err) {
-    console.error('[ticket] create error:', err.message);
+    logger.error({ err: err.message }, 'create error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create ticket');
   }
 });
@@ -190,7 +192,7 @@ app.get('/api/v1/tickets', async (req, res) => {
       pagination: { page, limit, total },
     });
   } catch (err) {
-    console.error('[ticket] list error:', err.message);
+    logger.error({ err: err.message }, 'list error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list tickets');
   }
 });
@@ -211,7 +213,7 @@ app.get('/api/v1/tickets/:id', async (req, res) => {
     }
     res.json({ data: result.rows[0] });
   } catch (err) {
-    console.error('[ticket] get error:', err.message);
+    logger.error({ err: err.message }, 'get error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to get ticket');
   }
 });
@@ -248,7 +250,7 @@ app.patch('/api/v1/tickets/:id', async (req, res) => {
     publishEvent('ticket.updated', userId, null, req.params.id, { fields: Object.keys(req.body) });
     res.json({ data: result.rows[0] });
   } catch (err) {
-    console.error('[ticket] update error:', err.message);
+    logger.error({ err: err.message }, 'update error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update ticket');
   }
 });
@@ -310,7 +312,7 @@ app.post('/api/v1/tickets/:id/transition', async (req, res) => {
 
     res.json({ data: result.rows[0] });
   } catch (err) {
-    console.error('[ticket] transition error:', err.message);
+    logger.error({ err: err.message }, 'transition error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to transition ticket');
   }
 });
@@ -342,7 +344,7 @@ app.post('/api/v1/tickets/:id/comments', async (req, res) => {
 
     res.status(201).json({ data: result.rows[0] });
   } catch (err) {
-    console.error('[ticket] comment error:', err.message);
+    logger.error({ err: err.message }, 'comment error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to add comment');
   }
 });
@@ -360,7 +362,7 @@ app.get('/api/v1/tickets/:id/comments', async (req, res) => {
     );
     res.json({ data: result.rows });
   } catch (err) {
-    console.error('[ticket] list comments error:', err.message);
+    logger.error({ err: err.message }, 'list comments error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list comments');
   }
 });
@@ -380,7 +382,7 @@ app.get('/api/v1/commands/presets', async (req, res) => {
     );
     res.json({ data: result.rows });
   } catch (err) {
-    console.error('[ticket] list command presets error:', err.message);
+    logger.error({ err: err.message }, 'list command presets error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list command presets');
   }
 });
@@ -414,7 +416,7 @@ app.post('/api/v1/commands/presets', async (req, res) => {
     publishEvent('command_preset.created', userId, roles, preset.id, { name, os, scope });
     res.status(201).json({ data: preset });
   } catch (err) {
-    console.error('[ticket] create command preset error:', err.message);
+    logger.error({ err: err.message }, 'create command preset error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create command preset');
   }
 });
@@ -462,7 +464,7 @@ app.patch('/api/v1/commands/presets/:id', async (req, res) => {
     publishEvent('command_preset.updated', userId, roles, req.params.id, { fields: Object.keys(req.body) });
     res.json({ data: result.rows[0] });
   } catch (err) {
-    console.error('[ticket] update command preset error:', err.message);
+    logger.error({ err: err.message }, 'update command preset error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update command preset');
   }
 });
@@ -490,7 +492,7 @@ app.delete('/api/v1/commands/presets/:id', async (req, res) => {
     publishEvent('command_preset.deleted', userId, roles, req.params.id, { name: preset.name });
     res.json({ data: { deleted: true } });
   } catch (err) {
-    console.error('[ticket] delete command preset error:', err.message);
+    logger.error({ err: err.message }, 'delete command preset error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to delete command preset');
   }
 });
@@ -500,26 +502,26 @@ let server;
 
 async function start() {
   await connectNats();
-  server = app.listen(port, () => console.log(`[ticket] listening on :${port}`));
+  server = app.listen(port, () => logger.info({ port }, 'listening'));
 }
 
 async function shutdown(signal) {
-  console.log(`[ticket] ${signal} received, shutting down...`);
+  logger.info({ signal }, 'shutting down');
   if (server) {
-    server.close(() => console.log('[ticket] HTTP server closed'));
+    server.close(() => logger.info('HTTP server closed'));
   }
   if (nc) {
-    try { await nc.drain(); console.log('[ticket] NATS drained'); } catch (e) { /* ignore */ }
+    try { await nc.drain(); logger.info('NATS drained'); } catch (e) { /* ignore */ }
   }
   await pool.end();
-  console.log('[ticket] DB pool closed');
-  setTimeout(() => { console.error('[ticket] forced shutdown after timeout'); process.exit(1); }, 10000);
+  logger.info('DB pool closed');
+  setTimeout(() => { logger.error('forced shutdown after timeout'); process.exit(1); }, 10000);
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch(err => {
-  console.error('[ticket] startup failed:', err);
+  logger.error({ err }, 'startup failed');
   process.exit(1);
 });

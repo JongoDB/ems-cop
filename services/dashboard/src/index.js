@@ -1,6 +1,8 @@
 const express = require('express');
 const { Pool } = require('pg');
 const { connect, StringCodec } = require('nats');
+const pino = require('pino');
+const logger = pino({ name: 'dashboard-service' });
 
 const app = express();
 app.use(express.json({ limit: '1mb' }));
@@ -22,9 +24,9 @@ let nc = null;
 async function connectNats() {
   try {
     nc = await connect({ servers: process.env.NATS_URL || 'nats://localhost:4222' });
-    console.log('[dashboard] connected to nats');
+    logger.info('connected to nats');
   } catch (err) {
-    console.error('[dashboard] nats connection failed, retrying in 5s:', err.message);
+    logger.error({ err: err.message }, 'nats connection failed, retrying in 5s');
     setTimeout(connectNats, 5000);
   }
 }
@@ -91,7 +93,7 @@ app.get('/api/v1/dashboards/templates', async (_req, res) => {
     );
     res.json({ data: result.rows });
   } catch (err) {
-    console.error('[dashboard] list templates error:', err.message);
+    logger.error({ err: err.message }, 'list templates error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list templates');
   }
 });
@@ -180,7 +182,7 @@ app.post('/api/v1/dashboards/seed', async (req, res) => {
       client.release();
     }
   } catch (err) {
-    console.error('[dashboard] seed error:', err.message);
+    logger.error({ err: err.message }, 'seed error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to seed dashboard');
   }
 });
@@ -203,7 +205,7 @@ app.get('/api/v1/dashboards/metrics/tickets', async (req, res) => {
     }
     res.json({ data: { by_status: counts, total: tickets.length } });
   } catch (err) {
-    console.error('[dashboard] metrics/tickets error:', err.message);
+    logger.error({ err: err.message }, 'metrics/tickets error');
     sendError(res, 502, 'UPSTREAM_ERROR', 'Failed to fetch ticket metrics');
   }
 });
@@ -217,7 +219,7 @@ app.get('/api/v1/dashboards/metrics/sessions', async (req, res) => {
     const sessions = body.data || body.sessions || [];
     res.json({ data: { total: sessions.length, sessions } });
   } catch (err) {
-    console.error('[dashboard] metrics/sessions error:', err.message);
+    logger.error({ err: err.message }, 'metrics/sessions error');
     sendError(res, 502, 'UPSTREAM_ERROR', 'Failed to fetch session metrics');
   }
 });
@@ -237,7 +239,7 @@ app.get('/api/v1/dashboards/metrics/endpoints', async (req, res) => {
     }
     res.json({ data: { by_status: counts, total: endpoints.length } });
   } catch (err) {
-    console.error('[dashboard] metrics/endpoints error:', err.message);
+    logger.error({ err: err.message }, 'metrics/endpoints error');
     sendError(res, 502, 'UPSTREAM_ERROR', 'Failed to fetch endpoint metrics');
   }
 });
@@ -287,7 +289,7 @@ app.get('/api/v1/dashboards', async (req, res) => {
       pagination: { page, limit, total },
     });
   } catch (err) {
-    console.error('[dashboard] list error:', err.message);
+    logger.error({ err: err.message }, 'list error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list dashboards');
   }
 });
@@ -311,7 +313,7 @@ app.post('/api/v1/dashboards', async (req, res) => {
     publishEvent('dashboard.created', userId, dashboard.id, { name });
     res.status(201).json(dashboard);
   } catch (err) {
-    console.error('[dashboard] create error:', err.message);
+    logger.error({ err: err.message }, 'create error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create dashboard');
   }
 });
@@ -361,7 +363,7 @@ app.get('/api/v1/dashboards/:id', async (req, res) => {
 
     res.json(dashboard);
   } catch (err) {
-    console.error('[dashboard] get error:', err.message);
+    logger.error({ err: err.message }, 'get error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to get dashboard');
   }
 });
@@ -381,7 +383,7 @@ app.patch('/api/v1/dashboards/:id', async (req, res) => {
       return sendError(res, 403, 'FORBIDDEN', 'Only the dashboard owner can update it');
     }
   } catch (err) {
-    console.error('[dashboard] update owner check error:', err.message);
+    logger.error({ err: err.message }, 'update owner check error');
     return sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update dashboard');
   }
 
@@ -409,7 +411,7 @@ app.patch('/api/v1/dashboards/:id', async (req, res) => {
     publishEvent('dashboard.updated', userId, req.params.id, { fields: Object.keys(req.body) });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error('[dashboard] update error:', err.message);
+    logger.error({ err: err.message }, 'update error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update dashboard');
   }
 });
@@ -432,7 +434,7 @@ app.delete('/api/v1/dashboards/:id', async (req, res) => {
     publishEvent('dashboard.deleted', userId, req.params.id, {});
     res.json({ deleted: true });
   } catch (err) {
-    console.error('[dashboard] delete error:', err.message);
+    logger.error({ err: err.message }, 'delete error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to delete dashboard');
   }
 });
@@ -482,7 +484,7 @@ app.post('/api/v1/dashboards/:id/tabs', async (req, res) => {
     publishEvent('dashboard.updated', userId, req.params.id, { action: 'tab_added', tab_id: result.rows[0].id });
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error('[dashboard] create tab error:', err.message);
+    logger.error({ err: err.message }, 'create tab error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create tab');
   }
 });
@@ -527,7 +529,7 @@ app.patch('/api/v1/dashboards/:id/tabs/:tabId', async (req, res) => {
     publishEvent('dashboard.updated', userId, req.params.id, { action: 'tab_updated', tab_id: req.params.tabId });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error('[dashboard] update tab error:', err.message);
+    logger.error({ err: err.message }, 'update tab error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update tab');
   }
 });
@@ -553,7 +555,7 @@ app.delete('/api/v1/dashboards/:id/tabs/:tabId', async (req, res) => {
     publishEvent('dashboard.updated', userId, req.params.id, { action: 'tab_deleted', tab_id: req.params.tabId });
     res.json({ deleted: true });
   } catch (err) {
-    console.error('[dashboard] delete tab error:', err.message);
+    logger.error({ err: err.message }, 'delete tab error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to delete tab');
   }
 });
@@ -606,7 +608,7 @@ app.post('/api/v1/dashboards/:id/tabs/:tabId/widgets', async (req, res) => {
     publishEvent('dashboard.updated', userId, req.params.id, { action: 'widget_added', widget_id: result.rows[0].id });
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error('[dashboard] create widget error:', err.message);
+    logger.error({ err: err.message }, 'create widget error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to create widget');
   }
 });
@@ -656,7 +658,7 @@ app.patch('/api/v1/dashboards/:id/tabs/:tabId/widgets/:wId', async (req, res) =>
     publishEvent('dashboard.updated', userId, req.params.id, { action: 'widget_updated', widget_id: req.params.wId });
     res.json(result.rows[0]);
   } catch (err) {
-    console.error('[dashboard] update widget error:', err.message);
+    logger.error({ err: err.message }, 'update widget error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update widget');
   }
 });
@@ -682,7 +684,7 @@ app.delete('/api/v1/dashboards/:id/tabs/:tabId/widgets/:wId', async (req, res) =
     publishEvent('dashboard.updated', userId, req.params.id, { action: 'widget_deleted', widget_id: req.params.wId });
     res.json({ deleted: true });
   } catch (err) {
-    console.error('[dashboard] delete widget error:', err.message);
+    logger.error({ err: err.message }, 'delete widget error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to delete widget');
   }
 });
@@ -738,7 +740,7 @@ app.put('/api/v1/dashboards/:id/tabs/:tabId/layout', async (req, res) => {
     res.json({ data: widgetsResult.rows });
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('[dashboard] layout update error:', err.message);
+    logger.error({ err: err.message }, 'layout update error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to update layout');
   } finally {
     client.release();
@@ -813,11 +815,11 @@ const ECHELON_TEMPLATES = [
 async function seedTemplates() {
   const existing = await pool.query('SELECT COUNT(*) FROM dashboards WHERE is_template = true');
   if (parseInt(existing.rows[0].count) > 0) {
-    console.log('[dashboard] templates already exist, skipping seed');
+    logger.info('templates already exist, skipping seed');
     return;
   }
 
-  console.log('[dashboard] seeding echelon templates...');
+  logger.info('seeding echelon templates');
 
   // Find admin user to own templates
   const adminResult = await pool.query(
@@ -825,7 +827,7 @@ async function seedTemplates() {
   );
   const adminId = adminResult.rows[0]?.id;
   if (!adminId) {
-    console.error('[dashboard] admin user not found, cannot seed templates');
+    logger.error('admin user not found, cannot seed templates');
     return;
   }
 
@@ -862,10 +864,10 @@ async function seedTemplates() {
     }
 
     await client.query('COMMIT');
-    console.log(`[dashboard] seeded ${ECHELON_TEMPLATES.length} echelon templates`);
+    logger.info({ count: ECHELON_TEMPLATES.length }, 'seeded echelon templates');
   } catch (err) {
     await client.query('ROLLBACK');
-    console.error('[dashboard] template seed failed:', err.message);
+    logger.error({ err: err.message }, 'template seed failed');
   } finally {
     client.release();
   }
@@ -880,26 +882,26 @@ let server;
 async function start() {
   await connectNats();
   await seedTemplates();
-  server = app.listen(port, () => console.log(`[dashboard] listening on :${port}`));
+  server = app.listen(port, () => logger.info({ port }, 'listening'));
 }
 
 async function shutdown(signal) {
-  console.log(`[dashboard] ${signal} received, shutting down...`);
+  logger.info({ signal }, 'shutting down');
   if (server) {
-    server.close(() => console.log('[dashboard] HTTP server closed'));
+    server.close(() => logger.info('HTTP server closed'));
   }
   if (nc) {
-    try { await nc.drain(); console.log('[dashboard] NATS drained'); } catch (e) { /* ignore */ }
+    try { await nc.drain(); logger.info('NATS drained'); } catch (e) { /* ignore */ }
   }
   await pool.end();
-  console.log('[dashboard] DB pool closed');
-  setTimeout(() => { console.error('[dashboard] forced shutdown after timeout'); process.exit(1); }, 10000);
+  logger.info('DB pool closed');
+  setTimeout(() => { logger.error('forced shutdown after timeout'); process.exit(1); }, 10000);
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 start().catch(err => {
-  console.error('[dashboard] startup failed:', err);
+  logger.error({ err }, 'startup failed');
   process.exit(1);
 });

@@ -7,6 +7,8 @@ const Redis = require('ioredis');
 const { connect, StringCodec } = require('nats');
 const nodemailer = require('nodemailer');
 const crypto = require('crypto');
+const pino = require('pino');
+const logger = pino({ name: 'notification-service' });
 
 const app = express();
 const port = process.env.SERVICE_PORT || 3007;
@@ -70,7 +72,7 @@ async function publishEvent(eventType, details) {
     };
     nc.publish(eventType, sc.encode(JSON.stringify(payload)));
   } catch (err) {
-    console.error(`[${name}] publish event error:`, err.message);
+    logger.error({ err: err.message }, 'publish event error');
   }
 }
 
@@ -86,7 +88,7 @@ async function startNatsConsumer() {
     reconnectTimeWait: 2000,
   });
   sc = StringCodec();
-  console.log(`[${name}] connected to NATS`);
+  logger.info('connected to NATS');
 
   // Subscribe to event topics
   const topics = ['ticket.>', 'workflow.>', 'operation.>'];
@@ -99,7 +101,7 @@ async function startNatsConsumer() {
           const event = JSON.parse(raw);
           await handleEvent(msg.subject, event);
         } catch (err) {
-          console.error(`[${name}] event processing error on ${msg.subject}:`, err.message);
+          logger.error({ err: err.message, subject: msg.subject }, 'event processing error');
         }
       }
     })();
@@ -232,7 +234,7 @@ async function resolveNotifications(subject, data, eventType) {
       }
     }
   } catch (err) {
-    console.error(`[${name}] recipient resolution error for ${subject}:`, err.message);
+    logger.error({ err: err.message, subject }, 'recipient resolution error');
   }
 
   return notifications;
@@ -331,7 +333,7 @@ async function dispatchNotification(notif) {
           }
         }
       } catch (err) {
-        console.error(`[${name}] email dispatch error:`, err.message);
+        logger.error({ err: err.message }, 'email dispatch error');
       }
     }
 
@@ -353,12 +355,12 @@ async function dispatchNotification(notif) {
         }
       }
     } catch (err) {
-      console.error(`[${name}] webhook dispatch error:`, err.message);
+      logger.error({ err: err.message }, 'webhook dispatch error');
     }
 
     await publishEvent('notification.dispatched', { user_id, notification_type, reference_id });
   } catch (err) {
-    console.error(`[${name}] dispatch error:`, err.message);
+    logger.error({ err: err.message }, 'dispatch error');
   }
 }
 
@@ -407,7 +409,7 @@ async function handleJiraOutbound(subject, data) {
       }
     }
   } catch (err) {
-    console.error(`[${name}] jira outbound error:`, err.message);
+    logger.error({ err: err.message }, 'jira outbound error');
   }
 }
 
@@ -455,7 +457,7 @@ async function jiraCreateIssue(config, ticket) {
     }
   } catch (err) {
     await logJiraSync(config.id, null, 'outbound', 'create_issue', 'error', {}, err.message);
-    console.error(`[${name}] jira create issue error:`, err.message);
+    logger.error({ err: err.message }, 'jira create issue error');
   }
 }
 
@@ -521,7 +523,7 @@ async function logJiraSync(configId, mappingId, direction, action, status, detai
       [configId, mappingId, direction, action, status, JSON.stringify(details), errorMessage || null]
     );
   } catch (err) {
-    console.error(`[${name}] sync log error:`, err.message);
+    logger.error({ err: err.message }, 'sync log error');
   }
 }
 
@@ -641,7 +643,7 @@ app.post('/api/v1/notifications/jira/webhook', async (req, res) => {
 
     res.json({ ok: true });
   } catch (err) {
-    console.error(`[${name}] jira webhook error:`, err.message);
+    logger.error({ err: err.message }, 'jira webhook error');
     res.status(500).json({ error: { code: 'WEBHOOK_ERROR', message: err.message } });
   }
 });
@@ -1090,34 +1092,34 @@ let server;
 async function start() {
   try {
     await pool.query('SELECT 1');
-    console.log(`[${name}] connected to PostgreSQL`);
+    logger.info('connected to PostgreSQL');
   } catch (err) {
-    console.error(`[${name}] PostgreSQL connection failed:`, err.message);
+    logger.error({ err: err.message }, 'PostgreSQL connection failed');
   }
 
   try {
     await startNatsConsumer();
   } catch (err) {
-    console.error(`[${name}] NATS connection failed, will retry:`, err.message);
+    logger.error({ err: err.message }, 'NATS connection failed, will retry');
     setTimeout(startNatsConsumer, 5000);
   }
 
-  server = app.listen(port, () => console.log(`[${name}] listening on :${port}`));
+  server = app.listen(port, () => logger.info({ port }, 'listening'));
 }
 
 async function shutdown(signal) {
-  console.log(`[${name}] ${signal} received, shutting down...`);
+  logger.info({ signal }, 'shutting down');
   if (server) {
-    server.close(() => console.log(`[${name}] HTTP server closed`));
+    server.close(() => logger.info('HTTP server closed'));
   }
   if (nc) {
-    try { await nc.drain(); console.log(`[${name}] NATS drained`); } catch (e) { /* ignore */ }
+    try { await nc.drain(); logger.info('NATS drained'); } catch (e) { /* ignore */ }
   }
   redis.disconnect();
-  console.log(`[${name}] Redis disconnected`);
+  logger.info('Redis disconnected');
   await pool.end();
-  console.log(`[${name}] DB pool closed`);
-  setTimeout(() => { console.error(`[${name}] forced shutdown after timeout`); process.exit(1); }, 10000);
+  logger.info('DB pool closed');
+  setTimeout(() => { logger.error('forced shutdown after timeout'); process.exit(1); }, 10000);
 }
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
