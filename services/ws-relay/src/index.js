@@ -20,7 +20,10 @@ const logErr = (msg, ...args) => console.error(`[${NAME}] ${msg}`, ...args);
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: {
+    origin: (process.env.ALLOWED_ORIGINS || 'http://localhost:18080').split(','),
+    methods: ['GET', 'POST']
+  },
   pingTimeout: 30000,
   pingInterval: 10000,
 });

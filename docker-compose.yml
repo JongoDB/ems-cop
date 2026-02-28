@@ -20,6 +20,7 @@ x-common-env: &common-env
   MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-ems_minio_admin}
   MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-ems_minio_secret_change_me}
   JWT_SECRET: ${JWT_SECRET:-ems_jwt_secret_change_me_in_production}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:18080}
 
 networks:
   ems-net:
