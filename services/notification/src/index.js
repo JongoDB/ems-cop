@@ -10,7 +10,7 @@ const nodemailer = require('nodemailer');
 const app = express();
 const port = process.env.SERVICE_PORT || 3007;
 const name = process.env.SERVICE_NAME || 'notification-service';
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 // ════════════════════════════════════════════
 //  DATABASE & CONNECTIONS

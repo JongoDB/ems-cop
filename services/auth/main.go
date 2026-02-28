@@ -125,8 +125,10 @@ func main() {
 	mux.HandleFunc("GET /api/v1/auth/verify", srv.handleVerify)
 	mux.HandleFunc("GET /api/v1/auth/me", srv.handleMe)
 
+	handler := maxBodyMiddleware(1<<20, mux) // 1 MB
+
 	logger.Info("auth-service starting", "port", port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), mux); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), handler); err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
@@ -476,6 +478,15 @@ func writeError(w http.ResponseWriter, status int, code, message string) {
 			"code":    code,
 			"message": message,
 		},
+	})
+}
+
+func maxBodyMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 

@@ -25,7 +25,7 @@ const io = new Server(server, {
   pingInterval: 10000,
 });
 
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 // ---------------------------------------------------------------------------
 // NATS connection state

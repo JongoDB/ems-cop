@@ -139,8 +139,10 @@ func main() {
 	mux.HandleFunc("GET /health", srv.handleHealth)
 	mux.HandleFunc("GET /api/v1/audit/events", srv.handleQueryEvents)
 
+	handler := maxBodyMiddleware(1<<20, mux) // 1 MB
+
 	logger.Info("audit-service starting", "port", port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), mux); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%s", port), handler); err != nil {
 		logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
@@ -345,6 +347,15 @@ func (s *Server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 // --- Helpers ---
+
+func maxBodyMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func writeJSON(w http.ResponseWriter, status int, data any) {
 	w.Header().Set("Content-Type", "application/json")

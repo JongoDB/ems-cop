@@ -368,9 +368,11 @@ func (s *C2GatewayServer) Start() error {
 	// Health check
 	mux.HandleFunc("GET /api/v1/c2/health", s.handleHealth)
 
+	handler := maxBodyMiddleware(10<<20, mux) // 10 MB (implant generation payloads)
+
 	server := &http.Server{
 		Addr:    ":" + s.port,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	s.logger.Info("c2-gateway starting", "port", s.port, "provider", s.provider.Name())
@@ -1453,6 +1455,15 @@ func (p *SliverProvider) SubscribeTelemetry(ctx context.Context, filter *Telemet
 // ════════════════════════════════════════════
 //  MAIN
 // ════════════════════════════════════════════
+
+func maxBodyMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

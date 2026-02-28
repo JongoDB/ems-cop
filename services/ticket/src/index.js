@@ -3,7 +3,7 @@ const { Pool } = require('pg');
 const { connect, StringCodec } = require('nats');
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '1mb' }));
 
 const port = process.env.SERVICE_PORT || 3003;
 const sc = StringCodec();

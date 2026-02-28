@@ -232,6 +232,15 @@ func isValidTransition(from, to string) bool {
 // Helpers
 // ---------------------------------------------------------------------------
 
+func maxBodyMiddleware(maxBytes int64, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func getEnv(key, fallback string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -2706,8 +2715,10 @@ func (s *Server) Start(ctx context.Context) {
 	// Start escalation ticker
 	go s.runEscalationTicker(ctx)
 
+	handler := maxBodyMiddleware(1<<20, mux) // 1 MB
+
 	s.logger.Info("starting workflow-engine", "port", s.port)
-	if err := http.ListenAndServe(fmt.Sprintf(":%s", s.port), mux); err != nil {
+	if err := http.ListenAndServe(fmt.Sprintf(":%s", s.port), handler); err != nil {
 		s.logger.Error("server failed", "error", err)
 		os.Exit(1)
 	}
