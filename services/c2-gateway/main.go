@@ -346,6 +346,14 @@ func NewC2GatewayServer(provider C2Provider, port string, nc *nats.Conn, logger 
 	return &C2GatewayServer{provider: provider, port: port, nc: nc, logger: logger, jwtSecret: []byte(jwtSecret)}
 }
 
+func writeError(w http.ResponseWriter, status int, code, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]any{
+		"error": map[string]string{"code": code, "message": message},
+	})
+}
+
 func (s *C2GatewayServer) Start() error {
 	mux := http.NewServeMux()
 
@@ -382,7 +390,8 @@ func (s *C2GatewayServer) Start() error {
 func (s *C2GatewayServer) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	sessions, err := s.provider.ListSessions(r.Context(), nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Error("handler failed", "handler", "handleListSessions", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -392,7 +401,8 @@ func (s *C2GatewayServer) handleListSessions(w http.ResponseWriter, r *http.Requ
 func (s *C2GatewayServer) handleListImplants(w http.ResponseWriter, r *http.Request) {
 	implants, err := s.provider.ListImplants(r.Context(), nil)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Error("handler failed", "handler", "handleListImplants", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -402,7 +412,8 @@ func (s *C2GatewayServer) handleListImplants(w http.ResponseWriter, r *http.Requ
 func (s *C2GatewayServer) handleListListeners(w http.ResponseWriter, r *http.Request) {
 	listeners, err := s.provider.ListListeners(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Error("handler failed", "handler", "handleListListeners", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -417,7 +428,8 @@ func (s *C2GatewayServer) handleCreateListener(w http.ResponseWriter, r *http.Re
 	}
 	listener, err := s.provider.CreateListener(r.Context(), spec)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Error("handler failed", "handler", "handleCreateListener", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -433,8 +445,8 @@ func (s *C2GatewayServer) handleGenerateImplant(w http.ResponseWriter, r *http.R
 	}
 	binary, err := s.provider.GenerateImplant(r.Context(), spec)
 	if err != nil {
-		s.logger.Error("generate implant failed", "error", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Error("handler failed", "handler", "handleGenerateImplant", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		return
 	}
 	s.publishAudit("c2.implant_generated", r, spec.Transport, "generate_implant",
@@ -462,7 +474,8 @@ func (s *C2GatewayServer) handleExecuteTask(w http.ResponseWriter, r *http.Reque
 
 	result, err := s.provider.ExecuteTask(r.Context(), sessionID, task)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.logger.Error("handler failed", "handler", "handleExecuteTask", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		return
 	}
 
@@ -633,8 +646,8 @@ func (s *C2GatewayServer) handleVNCProxy(w http.ResponseWriter, r *http.Request)
 	// Dial the VNC server via raw TCP
 	tcpConn, err := net.DialTimeout("tcp", target, 10*time.Second)
 	if err != nil {
-		s.logger.Error("vnc tcp dial failed", "target", target, "error", err)
-		http.Error(w, "Failed to connect to VNC server: "+err.Error(), http.StatusBadGateway)
+		s.logger.Error("VNC connection failed", "target", target, "error", err)
+		writeError(w, http.StatusBadGateway, "VNC_ERROR", "Failed to connect to remote desktop")
 		return
 	}
 	defer tcpConn.Close()
