@@ -489,7 +489,22 @@ func (s *C2GatewayServer) handleExecuteTask(w http.ResponseWriter, r *http.Reque
 
 // WebSocket upgrader for shell sessions
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		allowed := os.Getenv("ALLOWED_ORIGINS")
+		if allowed == "" {
+			allowed = "http://localhost:18080"
+		}
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // Non-browser clients (curl, etc.) don't send Origin
+		}
+		for _, o := range strings.Split(allowed, ",") {
+			if strings.TrimSpace(o) == origin {
+				return true
+			}
+		}
+		return false
+	},
 }
 
 func (s *C2GatewayServer) handleShellSession(w http.ResponseWriter, r *http.Request) {
