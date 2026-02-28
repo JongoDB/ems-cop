@@ -1,0 +1,463 @@
+{{- /*
+  Ingress configuration for EMS-COP.
+  Supports two modes:
+    1. Traefik IngressRoute CRD (default) — mirrors infra/traefik/dynamic.yml
+    2. Standard Kubernetes Ingress (for nginx-ingress or other controllers)
+*/ -}}
+
+{{- if .Values.ingress.traefik.enabled }}
+---
+# ════════════════════════════════════════════════════════════════
+#  Traefik ForwardAuth Middleware
+# ════════════════════════════════════════════════════════════════
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ .Release.Name }}-forward-auth
+  labels:
+    {{- include "ems-cop.labels" . | nindent 4 }}
+spec:
+  forwardAuth:
+    address: "http://{{ .Release.Name }}-auth:3001/api/v1/auth/verify"
+    authResponseHeaders:
+      - X-User-ID
+      - X-User-Roles
+      - X-Session-ID
+---
+# ════════════════════════════════════════════════════════════════
+#  Traefik IngressRoute — Public Routes (no ForwardAuth)
+# ════════════════════════════════════════════════════════════════
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ .Release.Name }}-public
+  labels:
+    {{- include "ems-cop.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    {{- toYaml .Values.ingress.traefik.entryPoints | nindent 4 }}
+  {{- if .Values.ingress.traefik.tls }}
+  tls:
+    {{- toYaml .Values.ingress.traefik.tls | nindent 4 }}
+  {{- end }}
+  routes:
+    # ── Auth public endpoints (login + refresh) — priority 100 ──
+    - match: "PathPrefix(`/api/v1/auth/login`) || PathPrefix(`/api/v1/auth/refresh`)"
+      kind: Rule
+      priority: 100
+      services:
+        - name: {{ .Release.Name }}-auth
+          port: 3001
+
+    # ── C2 shell WebSocket — priority 90 ──
+    - match: "PathRegexp(`/api/v1/c2/sessions/.+/shell`)"
+      kind: Rule
+      priority: 90
+      services:
+        - name: {{ .Release.Name }}-c2-gateway
+          port: 3005
+
+    # ── C2 VNC WebSocket — priority 90 ──
+    - match: "PathPrefix(`/api/v1/c2/vnc`)"
+      kind: Rule
+      priority: 90
+      services:
+        - name: {{ .Release.Name }}-c2-gateway
+          port: 3005
+
+    # ── Jira inbound webhook — priority 90 ──
+    - match: "Path(`/api/v1/notifications/jira/webhook`)"
+      kind: Rule
+      priority: 90
+      services:
+        - name: {{ .Release.Name }}-notification
+          port: 3007
+
+    # ── WebSocket relay — priority 80 ──
+    - match: "PathPrefix(`/ws`)"
+      kind: Rule
+      priority: 80
+      services:
+        - name: {{ .Release.Name }}-ws-relay
+          port: 3009
+
+    # ── Frontend SPA catch-all — priority 1 ──
+    - match: "PathPrefix(`/`)"
+      kind: Rule
+      priority: 1
+      services:
+        - name: {{ .Release.Name }}-frontend
+          port: 80
+---
+# ════════════════════════════════════════════════════════════════
+#  Traefik IngressRoute — Protected Routes (ForwardAuth)
+# ════════════════════════════════════════════════════════════════
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ .Release.Name }}-protected
+  labels:
+    {{- include "ems-cop.labels" . | nindent 4 }}
+spec:
+  entryPoints:
+    {{- toYaml .Values.ingress.traefik.entryPoints | nindent 4 }}
+  {{- if .Values.ingress.traefik.tls }}
+  tls:
+    {{- toYaml .Values.ingress.traefik.tls | nindent 4 }}
+  {{- end }}
+  routes:
+    # ── auth-service ──
+    - match: "PathPrefix(`/api/v1/auth`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-auth
+          port: 3001
+
+    # ── workflow-engine ──
+    - match: "PathPrefix(`/api/v1/workflows`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-workflow-engine
+          port: 3002
+
+    # ── ticket-service (tickets) ──
+    - match: "PathPrefix(`/api/v1/tickets`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-ticket
+          port: 3003
+
+    # ── ticket-service (commands) ──
+    - match: "PathPrefix(`/api/v1/commands`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-ticket
+          port: 3003
+
+    # ── dashboard-service ──
+    - match: "PathPrefix(`/api/v1/dashboards`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-dashboard
+          port: 3004
+
+    # ── c2-gateway ──
+    - match: "PathPrefix(`/api/v1/c2`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-c2-gateway
+          port: 3005
+
+    # ── audit-service ──
+    - match: "PathPrefix(`/api/v1/audit`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-audit
+          port: 3006
+
+    # ── notification-service ──
+    - match: "PathPrefix(`/api/v1/notifications`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-notification
+          port: 3007
+
+    # ── workflow-engine (workflow-runs) ──
+    - match: "PathPrefix(`/api/v1/workflow-runs`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-workflow-engine
+          port: 3002
+
+    # ── workflow-engine (operations) ──
+    - match: "PathPrefix(`/api/v1/operations`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-workflow-engine
+          port: 3002
+
+    # ── endpoint-service (networks) ──
+    - match: "PathPrefix(`/api/v1/networks`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+
+    # ── endpoint-service (nodes) ──
+    - match: "PathPrefix(`/api/v1/nodes`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+
+    # ── endpoint-service (edges) ──
+    - match: "PathPrefix(`/api/v1/edges`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+
+    # ── endpoint-service (display-schemas) ──
+    - match: "PathPrefix(`/api/v1/display-schemas`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+
+    # ── endpoint-service (import-parsers) ──
+    - match: "PathPrefix(`/api/v1/import-parsers`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+
+    # ── ticket-service (findings) ──
+    - match: "PathPrefix(`/api/v1/findings`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-ticket
+          port: 3003
+
+    # ── endpoint-service (endpoints) ──
+    - match: "PathPrefix(`/api/v1/endpoints`)"
+      kind: Rule
+      priority: 50
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+{{- end }}
+
+{{- if .Values.ingress.standard.enabled }}
+---
+# ════════════════════════════════════════════════════════════════
+#  Standard Kubernetes Ingress (nginx-ingress or other controllers)
+# ════════════════════════════════════════════════════════════════
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-ingress
+  labels:
+    {{- include "ems-cop.labels" . | nindent 4 }}
+  annotations:
+    # ForwardAuth equivalent for nginx-ingress
+    nginx.ingress.kubernetes.io/auth-url: "http://{{ .Release.Name }}-auth.{{ .Release.Namespace }}.svc.cluster.local:3001/api/v1/auth/verify"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-User-ID,X-User-Roles,X-Session-ID"
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "120"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "120"
+    # WebSocket support
+    nginx.ingress.kubernetes.io/proxy-http-version: "1.1"
+    nginx.ingress.kubernetes.io/configuration-snippet: |
+      proxy_set_header Upgrade $http_upgrade;
+      proxy_set_header Connection "upgrade";
+    {{- with .Values.ingress.standard.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.ingress.standard.className }}
+  ingressClassName: {{ .Values.ingress.standard.className }}
+  {{- end }}
+  {{- if .Values.ingress.standard.tls }}
+  tls:
+    {{- toYaml .Values.ingress.standard.tls | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.ingress.standard.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          # ── auth-service ──
+          - path: /api/v1/auth
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-auth
+                port:
+                  number: 3001
+          # ── workflow-engine ──
+          - path: /api/v1/workflows
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-workflow-engine
+                port:
+                  number: 3002
+          - path: /api/v1/workflow-runs
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-workflow-engine
+                port:
+                  number: 3002
+          - path: /api/v1/operations
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-workflow-engine
+                port:
+                  number: 3002
+          # ── ticket-service ──
+          - path: /api/v1/tickets
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-ticket
+                port:
+                  number: 3003
+          - path: /api/v1/commands
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-ticket
+                port:
+                  number: 3003
+          - path: /api/v1/findings
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-ticket
+                port:
+                  number: 3003
+          # ── dashboard-service ──
+          - path: /api/v1/dashboards
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-dashboard
+                port:
+                  number: 3004
+          # ── c2-gateway ──
+          - path: /api/v1/c2
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-c2-gateway
+                port:
+                  number: 3005
+          # ── audit-service ──
+          - path: /api/v1/audit
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-audit
+                port:
+                  number: 3006
+          # ── notification-service ──
+          - path: /api/v1/notifications
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-notification
+                port:
+                  number: 3007
+          # ── endpoint-service ──
+          - path: /api/v1/networks
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          - path: /api/v1/nodes
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          - path: /api/v1/edges
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          - path: /api/v1/display-schemas
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          - path: /api/v1/import-parsers
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          - path: /api/v1/endpoints
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          # ── ws-relay ──
+          - path: /ws
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-ws-relay
+                port:
+                  number: 3009
+          # ── frontend catch-all (must be last) ──
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-frontend
+                port:
+                  number: 80
+    {{- end }}
+{{- end }}

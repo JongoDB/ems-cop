@@ -178,3 +178,19 @@ frontend:
     limits:
       cpu: 250m
       memory: 256Mi
+
+# Ingress configuration
+ingress:
+  traefik:
+    enabled: true
+    entryPoints:
+      - web
+      - websecure
+    tls: {}
+  standard:
+    enabled: false
+    className: nginx
+    annotations: {}
+    tls: []
+    hosts:
+      - host: ems-cop.example.com
