@@ -214,7 +214,7 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 
 **M7b — Reliability & Observability (Complete):** Graceful shutdown (all services), health probe overhaul (/health/live + /health/ready with dependency checks), HTTP server timeouts (ReadTimeout/WriteTimeout/IdleTimeout), structured JSON logging (pino for Node services), configurable connection pools (PG_MAX_CONNS/PG_MIN_CONNS env vars), NATS retry with exponential backoff + jitter.
 
-**M7c — Kubernetes Migration Path:** Helm chart scaffolding, Ingress configuration, resource requests/limits, ConfigMap/Secret separation.
+**M7c — Kubernetes Migration Path (Complete):** Helm umbrella chart with 10 sub-charts (auth, workflow-engine, ticket, dashboard, c2-gateway, audit, notification, endpoint, ws-relay, frontend). Bitnami PostgreSQL/Redis + NATS official chart dependencies. Traefik IngressRoute CRD mirroring all dynamic.yml routes (23 routes, public/protected split with ForwardAuth middleware). Standard K8s Ingress alternative for nginx-ingress. ConfigMap/Secret separation per service. Liveness/readiness probes referencing M7b health endpoints. Resource requests/limits per service.
 
 ## Key Files to Reference
 
@@ -247,6 +247,10 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - **Remote desktop widget (noVNC):** `frontend/src/components/widgets/RemoteDesktopWidget.tsx`
 - **VNC proxy (C2 Gateway):** `services/c2-gateway/main.go` (handleVNCProxy)
 - **Jira admin page:** `frontend/src/pages/admin/JiraConfigPage.tsx`
+- **Helm umbrella chart:** `charts/ems-cop/Chart.yaml` (dependencies, versioning)
+- **Helm values:** `charts/ems-cop/values.yaml` (global config, service replicas/resources, ingress)
+- **Kubernetes Ingress:** `charts/ems-cop/templates/ingress.yaml` (Traefik IngressRoute + standard Ingress)
+- **M7 hardening design:** `docs/plans/2026-02-28-m7-hardening-design.md`
 
 ## Testing
 
@@ -268,7 +272,7 @@ All services receive common env vars via `x-common-env` in docker-compose.yml:
 - All host ports are parameterized via `.env` to avoid conflicts with other Docker projects. Default dev ports: HTTP=18080, PG=15432, CH=18123, Redis=16379, NATS=14222, MinIO API=19090.
 - ClickHouse TTL expressions must use `toDateTime(timestamp)` — raw `DateTime64` is not supported in TTL.
 
-## Current Progress (M4a Complete — 2026-02-24)
+## Current Progress (M7 Complete — 2026-02-28)
 
 M1 milestone fully validated (2026-02-22):
 - All 21 containers start and stay healthy
@@ -390,4 +394,16 @@ M7b milestone (Reliability & Observability) implemented (2026-02-28):
 - NATS retry: exponential backoff (2s→30s cap) with random jitter for ticket, dashboard, notification services
 - Version bumped to v0.11.0
 
-**Next: M7c — Kubernetes Migration Path** (Helm chart scaffolding, Ingress, resource limits)
+M7c milestone (Kubernetes Migration Path) implemented (2026-02-28):
+- Helm umbrella chart: `charts/ems-cop/Chart.yaml` with Bitnami PostgreSQL (~16.0), Redis (~19.0), NATS (~1.2) dependencies
+- 10 sub-charts: auth, workflow-engine, ticket, dashboard, c2-gateway, audit, notification, endpoint, ws-relay, frontend
+- Each sub-chart: Deployment, Service, ConfigMap, Secret, _helpers.tpl with standard labels
+- Liveness probes: httpGet /health/live, readiness probes: httpGet /health/ready
+- Resource limits per service (cpu/memory requests and limits)
+- Global values: postgres, redis, nats, clickhouse, minio connection configs
+- Traefik IngressRoute CRD: 23 routes (6 public + 17 protected with ForwardAuth Middleware CRD)
+- Standard Kubernetes Ingress alternative: nginx auth-url annotations, WebSocket support, configurable TLS
+- Ingress toggle: `ingress.traefik.enabled` (default true), `ingress.standard.enabled` (default false)
+- Version bumped to v0.12.0
+
+**M7 complete.** All three sub-milestones (Security, Reliability, Kubernetes) implemented.
