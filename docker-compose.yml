@@ -300,7 +300,7 @@ services:
       sliver-server:
         condition: service_started
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/api/v1/c2/health || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 5

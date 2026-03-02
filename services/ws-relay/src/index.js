@@ -11,8 +11,10 @@ const AUTH_VERIFY_URL = 'http://auth-service:3001/api/v1/auth/verify';
 const C2_GATEWAY_URL = process.env.C2_GATEWAY_URL || 'http://c2-gateway:3005';
 const MAX_TERMINALS_PER_CLIENT = 3;
 
-const log = (msg, ...args) => console.log(`[${NAME}] ${msg}`, ...args);
-const logErr = (msg, ...args) => console.error(`[${NAME}] ${msg}`, ...args);
+const pino = require('pino');
+const logger = pino({ name: NAME });
+const log = (msg, ...args) => logger.info({ extra: args.length ? args : undefined }, msg);
+const logErr = (msg, ...args) => logger.error({ extra: args.length ? args : undefined }, msg);
 
 // ---------------------------------------------------------------------------
 // Express + Socket.IO setup
