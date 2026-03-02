@@ -17,6 +17,9 @@ http:
 
     cors-headers:
       headers:
+        # NOTE: Traefik file provider does not support env var interpolation.
+        # For Docker dev, this is hardcoded. For Kubernetes, use the Helm chart's
+        # global.allowedOrigins value which is passed to each service's ALLOWED_ORIGINS env var.
         accessControlAllowOriginList:
           - "http://localhost:18080"
         accessControlAllowMethods:
@@ -31,6 +34,14 @@ http:
           - "Content-Type"
         accessControlMaxAge: 86400
 
+    security-headers:
+      headers:
+        customResponseHeaders:
+          X-Content-Type-Options: "nosniff"
+          X-Frame-Options: "DENY"
+          Referrer-Policy: "strict-origin-when-cross-origin"
+        contentSecurityPolicy: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-ancestors 'none'"
+
   # ════════════════════════════════════════════
   #  ROUTERS — PUBLIC (no auth required)
   # ════════════════════════════════════════════
@@ -40,7 +51,7 @@ http:
       rule: "PathPrefix(`/api/v1/auth/login`) || PathPrefix(`/api/v1/auth/refresh`)"
       entryPoints: [web]
       service: auth
-      middlewares: [cors-headers]
+      middlewares: [cors-headers, security-headers]
       priority: 100
 
     # C2 shell WebSocket — auth handled by c2-gateway via query param token
@@ -48,7 +59,7 @@ http:
       rule: "PathRegexp(`/api/v1/c2/sessions/.+/shell`)"
       entryPoints: [web]
       service: c2
-      middlewares: [cors-headers]
+      middlewares: [cors-headers, security-headers]
       priority: 90
 
     # C2 VNC WebSocket — auth handled by c2-gateway via query param token
@@ -56,7 +67,7 @@ http:
       rule: "PathPrefix(`/api/v1/c2/vnc`)"
       entryPoints: [web]
       service: c2
-      middlewares: [cors-headers]
+      middlewares: [cors-headers, security-headers]
       priority: 90
 
     # Jira inbound webhook — auth via shared secret, not ForwardAuth
@@ -64,7 +75,7 @@ http:
       rule: "Path(`/api/v1/notifications/jira/webhook`)"
       entryPoints: [web]
       service: notification
-      middlewares: [cors-headers]
+      middlewares: [cors-headers, security-headers]
       priority: 90
 
     # Frontend SPA — public
@@ -72,6 +83,7 @@ http:
       rule: "PathPrefix(`/`)"
       entryPoints: [web]
       service: frontend
+      middlewares: [security-headers]
       priority: 1
 
   # ════════════════════════════════════════════
@@ -81,119 +93,119 @@ http:
       rule: "PathPrefix(`/api/v1/auth`)"
       entryPoints: [web]
       service: auth
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     workflow:
       rule: "PathPrefix(`/api/v1/workflows`)"
       entryPoints: [web]
       service: workflow
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     ticket:
       rule: "PathPrefix(`/api/v1/tickets`)"
       entryPoints: [web]
       service: ticket
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     commands:
       rule: "PathPrefix(`/api/v1/commands`)"
       entryPoints: [web]
       service: ticket
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     dashboard-api:
       rule: "PathPrefix(`/api/v1/dashboards`)"
       entryPoints: [web]
       service: dashboard-api
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     c2:
       rule: "PathPrefix(`/api/v1/c2`)"
       entryPoints: [web]
       service: c2
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     audit:
       rule: "PathPrefix(`/api/v1/audit`)"
       entryPoints: [web]
       service: audit
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     notification:
       rule: "PathPrefix(`/api/v1/notifications`)"
       entryPoints: [web]
       service: notification
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     workflow-runs:
       rule: "PathPrefix(`/api/v1/workflow-runs`)"
       entryPoints: [web]
       service: workflow
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     operations:
       rule: "PathPrefix(`/api/v1/operations`)"
       entryPoints: [web]
       service: workflow
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     networks:
       rule: "PathPrefix(`/api/v1/networks`)"
       entryPoints: [web]
       service: endpoint
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     nodes:
       rule: "PathPrefix(`/api/v1/nodes`)"
       entryPoints: [web]
       service: endpoint
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     edges:
       rule: "PathPrefix(`/api/v1/edges`)"
       entryPoints: [web]
       service: endpoint
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     display-schemas:
       rule: "PathPrefix(`/api/v1/display-schemas`)"
       entryPoints: [web]
       service: endpoint
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     import-parsers:
       rule: "PathPrefix(`/api/v1/import-parsers`)"
       entryPoints: [web]
       service: endpoint
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     findings:
       rule: "PathPrefix(`/api/v1/findings`)"
       entryPoints: [web]
       service: ticket
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     endpoint:
       rule: "PathPrefix(`/api/v1/endpoints`)"
       entryPoints: [web]
       service: endpoint
-      middlewares: [auth-verify, cors-headers]
+      middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
     # WebSocket relay — auth handled by ws-relay via handshake token
@@ -201,7 +213,7 @@ http:
       rule: "PathPrefix(`/ws`)"
       entryPoints: [web]
       service: ws
-      middlewares: [cors-headers]
+      middlewares: [cors-headers, security-headers]
       priority: 80
 
   # ════════════════════════════════════════════

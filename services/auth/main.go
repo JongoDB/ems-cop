@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -601,12 +602,18 @@ func envOrInt(key string, fallback int) int {
 
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		return strings.Split(xff, ",")[0]
+		parts := strings.Split(xff, ",")
+		// Take rightmost IP — the one appended by our trusted proxy (Traefik)
+		return strings.TrimSpace(parts[len(parts)-1])
 	}
 	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
 		return xri
 	}
-	return strings.Split(r.RemoteAddr, ":")[0]
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 func generateUUID() string {

@@ -305,6 +305,14 @@ func (s *Server) handleQueryEvents(w http.ResponseWriter, r *http.Request) {
 	conditions := []string{}
 	params := []any{}
 
+	// RBAC: non-leadership users can only see their own events
+	userRoles := r.Header.Get("X-User-Roles")
+	userID := r.Header.Get("X-User-ID")
+	if userID != "" && !hasAnyRole(userRoles, "admin", "e1_strategic", "e2_operational") {
+		conditions = append(conditions, "actor_id = ?")
+		params = append(params, parseUUID(userID))
+	}
+
 	if v := r.URL.Query().Get("event_type"); v != "" {
 		conditions = append(conditions, "event_type = ?")
 		params = append(params, v)
@@ -463,4 +471,16 @@ func parseUUID(s string) uuid.UUID {
 		return uuid.UUID{}
 	}
 	return u
+}
+
+func hasAnyRole(rolesHeader string, allowed ...string) bool {
+	for _, role := range strings.Split(rolesHeader, ",") {
+		role = strings.TrimSpace(role)
+		for _, a := range allowed {
+			if role == a {
+				return true
+			}
+		}
+	}
+	return false
 }
