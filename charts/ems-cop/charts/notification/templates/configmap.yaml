@@ -12,3 +12,9 @@ data:
   NATS_URL: {{ .Values.global.nats.url | quote }}
   REDIS_URL: {{ .Values.global.redis.url | quote }}
   ALLOWED_ORIGINS: {{ .Values.global.allowedOrigins | quote }}
+  SMTP_HOST: {{ .Values.global.smtp.host | quote }}
+  SMTP_PORT: {{ .Values.global.smtp.port | quote }}
+  SMTP_FROM: {{ .Values.global.smtp.from | quote }}
+  TICKET_SERVICE_URL: "http://{{ .Release.Name }}-ticket:3003"
+  JIRA_DEFAULT_URL: {{ .Values.global.jira.url | quote }}
+  JIRA_DEFAULT_EMAIL: {{ .Values.global.jira.email | quote }}

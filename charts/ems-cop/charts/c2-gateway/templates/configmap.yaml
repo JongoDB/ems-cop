@@ -11,4 +11,7 @@ data:
   POSTGRES_DB: {{ .Values.global.postgres.database | quote }}
   NATS_URL: {{ .Values.global.nats.url | quote }}
   ALLOWED_ORIGINS: {{ .Values.global.allowedOrigins | quote }}
-  SLIVER_CONFIG: "/etc/sliver/operator.cfg"
+  SLIVER_GRPC_HOST: {{ .Values.global.sliver.host | quote }}
+  SLIVER_GRPC_PORT: {{ .Values.global.sliver.port | quote }}
+  SLIVER_OPERATOR_CONFIG: {{ .Values.global.sliver.operatorConfig | quote }}
+  MINIO_ENDPOINT: {{ .Values.global.minio.endpoint | quote }}

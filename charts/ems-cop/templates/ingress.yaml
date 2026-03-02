@@ -376,6 +376,14 @@ spec:
                 name: {{ $.Release.Name }}-dashboard
                 port:
                   number: 3004
+          # ── c2-gateway (VNC WebSocket) ──
+          - path: /api/v1/c2/vnc
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-c2-gateway
+                port:
+                  number: 3005
           # ── c2-gateway ──
           - path: /api/v1/c2
             pathType: Prefix

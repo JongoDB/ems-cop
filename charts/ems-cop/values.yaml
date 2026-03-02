@@ -5,7 +5,7 @@ global:
   postgres:
     host: "ems-cop-postgresql"
     port: "5432"
-    database: ems_cop
+    database: ems
     user: ems_admin
     password: CHANGE_ME
 
@@ -29,6 +29,23 @@ global:
 
   jwtSecret: CHANGE_ME
   allowedOrigins: "https://ems-cop.example.com"
+
+  sliver:
+    host: "sliver-server"
+    port: "31337"
+    operatorConfig: "/etc/sliver/operator.cfg"
+
+  smtp:
+    host: ""
+    port: "587"
+    user: ""
+    password: ""
+    from: "noreply@ems-cop.local"
+
+  jira:
+    url: ""
+    email: ""
+    token: ""
 
 # Infrastructure toggles
 postgresql:
