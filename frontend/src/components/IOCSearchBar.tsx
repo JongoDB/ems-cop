@@ -49,7 +49,7 @@ export default function IOCSearchBar({ onSelect, className = '' }: IOCSearchBarP
       const res = await apiFetch<{ data: IOC[] }>('/endpoints/iocs/search', {
         method: 'POST',
         body: JSON.stringify({
-          query: searchQuery,
+          value: searchQuery,
           ioc_type: searchType || undefined,
         }),
       })

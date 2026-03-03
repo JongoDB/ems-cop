@@ -18,10 +18,27 @@ interface AuthState {
   hydrateFromStorage: () => boolean;
 }
 
+// Read persisted auth state from localStorage (runs once at module load)
+function loadPersistedAuth(): { user: AuthUser; isAuthenticated: boolean } | null {
+  try {
+    const userJSON = localStorage.getItem('ems_user');
+    const refreshToken = localStorage.getItem('ems_refresh_token');
+    if (userJSON && refreshToken) {
+      const user = JSON.parse(userJSON) as AuthUser;
+      return { user, isAuthenticated: true };
+    }
+  } catch {
+    // corrupt data — fall through to default state
+  }
+  return null;
+}
+
+const persisted = loadPersistedAuth();
+
 export const useAuthStore = create<AuthState>((set) => ({
-  user: null,
+  user: persisted?.user ?? null,
   accessToken: null,
-  isAuthenticated: false,
+  isAuthenticated: persisted?.isAuthenticated ?? false,
 
   setAuth: (user, accessToken, refreshToken) => {
     setAccessToken(accessToken);

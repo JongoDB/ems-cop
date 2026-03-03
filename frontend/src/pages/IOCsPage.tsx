@@ -40,6 +40,8 @@ export default function IOCsPage() {
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
 
+  const [error, setError] = useState<string | null>(null)
+
   // Filters
   const [typeFilter, setTypeFilter] = useState('')
   const [threatFilter, setThreatFilter] = useState('')
@@ -62,7 +64,7 @@ export default function IOCsPage() {
     try {
       const params = new URLSearchParams()
       params.set('page', String(page))
-      params.set('limit', String(limit))
+      params.set('page_size', String(limit))
       params.set('sort', 'last_seen')
       params.set('order', 'desc')
       if (typeFilter) params.set('ioc_type', typeFilter)
@@ -75,9 +77,11 @@ export default function IOCsPage() {
       )
       setIOCs(data.data || [])
       setTotal(data.pagination?.total || 0)
-    } catch {
+      setError(null)
+    } catch (err) {
       setIOCs([])
       setTotal(0)
+      setError(err instanceof Error ? err.message : 'Failed to fetch IOCs')
     } finally {
       setLoading(false)
     }
@@ -107,8 +111,8 @@ export default function IOCsPage() {
       setCreateTags('')
       setShowCreate(false)
       fetchIOCs()
-    } catch {
-      // error handled
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create IOC')
     }
   }
 
@@ -119,8 +123,8 @@ export default function IOCsPage() {
         body: JSON.stringify({ is_active: !ioc.is_active }),
       })
       fetchIOCs()
-    } catch {
-      // error handled
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to toggle IOC status')
     }
   }
 
@@ -150,13 +154,15 @@ export default function IOCsPage() {
     }).filter((r) => r.value)
 
     try {
-      await apiFetch('/endpoints/iocs/bulk', {
-        method: 'POST',
-        body: JSON.stringify({ iocs: records }),
-      })
+      for (const record of records) {
+        await apiFetch('/endpoints/iocs', {
+          method: 'POST',
+          body: JSON.stringify(record),
+        })
+      }
       fetchIOCs()
-    } catch {
-      // error handled
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to import IOCs')
     }
 
     // Reset file input
@@ -171,6 +177,13 @@ export default function IOCsPage() {
       <div style={{ marginBottom: 12 }}>
         <IOCSearchBar onSelect={handleSearchSelect} />
       </div>
+
+      {/* Error Banner */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded" style={{ marginBottom: 12, fontSize: 12 }}>
+          {error}
+        </div>
+      )}
 
       {/* Toolbar */}
       <div className="tickets-toolbar">

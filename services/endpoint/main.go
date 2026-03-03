@@ -5079,6 +5079,11 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		args = append(args, ed)
 		argIdx++
 	}
+	if search := r.URL.Query().Get("search"); search != "" {
+		where = append(where, fmt.Sprintf("(title ILIKE $%d OR description ILIKE $%d)", argIdx, argIdx))
+		args = append(args, "%"+search+"%")
+		argIdx++
+	}
 
 	// Enclave enforcement: filter out SECRET alerts on low side
 	if os.Getenv("ENCLAVE") == "low" {
@@ -5285,12 +5290,15 @@ func (s *Server) handleEscalateAlert(w http.ResponseWriter, r *http.Request) {
 		userID = "system"
 	}
 
+	ticketNumber := fmt.Sprintf("INC-%d", time.Now().UnixMilli())
+
 	var ticketID string
 	err = s.db.QueryRow(r.Context(),
-		`INSERT INTO tickets (title, description, type, priority, status, classification,
+		`INSERT INTO tickets (ticket_number, title, description, ticket_type, priority, status, classification,
 		 alert_source, alert_ids, incident_severity, created_by, assigned_to)
-		 VALUES ($1, $2, 'incident', $3, 'open', $4, 'alert_escalation', ARRAY[$5]::uuid[], $6, $7, $8)
+		 VALUES ($1, $2, $3, 'incident', $4, 'open', $5, 'alert_escalation', ARRAY[$6]::uuid[], $7, $8, $9)
 		 RETURNING id`,
+		ticketNumber,
 		req.Title,
 		fmt.Sprintf("Escalated from alert %s", id),
 		req.Severity,
@@ -5366,6 +5374,11 @@ func (s *Server) handleListIOCs(w http.ResponseWriter, r *http.Request) {
 	if val := r.URL.Query().Get("value"); val != "" {
 		where = append(where, fmt.Sprintf("value ILIKE $%d", argIdx))
 		args = append(args, "%"+val+"%")
+		argIdx++
+	}
+	if search := r.URL.Query().Get("search"); search != "" {
+		where = append(where, fmt.Sprintf("(value ILIKE $%d OR description ILIKE $%d)", argIdx, argIdx))
+		args = append(args, "%"+search+"%")
 		argIdx++
 	}
 

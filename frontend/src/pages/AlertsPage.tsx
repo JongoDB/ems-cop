@@ -43,6 +43,7 @@ export default function AlertsPage() {
   // UI state
   const [showFeed, setShowFeed] = useState(true)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [error, setError] = useState<string | null>(null)
 
   const limit = 25
 
@@ -51,7 +52,7 @@ export default function AlertsPage() {
     try {
       const params = new URLSearchParams()
       params.set('page', String(page))
-      params.set('limit', String(limit))
+      params.set('page_size', String(limit))
       params.set('sort', 'created_at')
       params.set('order', 'desc')
       if (severityFilter) params.set('severity', severityFilter)
@@ -64,9 +65,11 @@ export default function AlertsPage() {
       )
       setAlerts(data.data || [])
       setTotal(data.pagination?.total || 0)
-    } catch {
+      setError(null)
+    } catch (err) {
       setAlerts([])
       setTotal(0)
+      setError(err instanceof Error ? err.message : 'Failed to fetch alerts')
     } finally {
       setLoading(false)
     }
@@ -86,14 +89,16 @@ export default function AlertsPage() {
     const ids = Array.from(selected)
     if (ids.length === 0) return
     try {
-      await apiFetch('/endpoints/alerts/bulk', {
-        method: 'POST',
-        body: JSON.stringify({ ids, action: 'acknowledge' }),
-      })
+      for (const id of ids) {
+        await apiFetch(`/endpoints/alerts/${id}`, {
+          method: 'PATCH',
+          body: JSON.stringify({ status: 'acknowledged' }),
+        })
+      }
       setSelected(new Set())
       fetchAlerts()
-    } catch {
-      // error handled
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to acknowledge alerts')
     }
   }
 
@@ -101,14 +106,21 @@ export default function AlertsPage() {
     const ids = Array.from(selected)
     if (ids.length === 0) return
     try {
-      await apiFetch('/tickets/incidents', {
-        method: 'POST',
-        body: JSON.stringify({ alert_ids: ids }),
-      })
+      for (const id of ids) {
+        const alert = alerts.find((a) => a.id === id)
+        await apiFetch(`/endpoints/alerts/${id}/escalate`, {
+          method: 'POST',
+          body: JSON.stringify({
+            title: alert?.title || 'Escalated Alert',
+            severity: alert?.severity || 'medium',
+            assigned_to: '',
+          }),
+        })
+      }
       setSelected(new Set())
       fetchAlerts()
-    } catch {
-      // error handled
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to escalate alerts')
     }
   }
 
@@ -169,6 +181,13 @@ export default function AlertsPage() {
         )}
       </div>
 
+      {/* Error Banner */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded" style={{ marginBottom: 12, fontSize: 12 }}>
+          {error}
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="tickets-toolbar">
         <div className="toolbar-left">
@@ -195,10 +214,10 @@ export default function AlertsPage() {
               className="filter-select"
             >
               <option value="">All Sources</option>
-              <option value="siem">SIEM</option>
-              <option value="edr">EDR</option>
-              <option value="ids">IDS</option>
-              <option value="manual">MANUAL</option>
+              <option value="splunk">Splunk</option>
+              <option value="elastic">Elastic/ELK</option>
+              <option value="crowdstrike">CrowdStrike</option>
+              <option value="generic">Generic</option>
             </select>
             <select
               value={statusFilter}

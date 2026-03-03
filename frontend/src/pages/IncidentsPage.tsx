@@ -11,7 +11,7 @@ import {
 interface IncidentRecord {
   id: string
   title: string
-  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  incident_severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
   status: string
   source: string
   mitre_techniques?: string[]
@@ -24,8 +24,8 @@ interface IncidentRecord {
 interface IncidentStats {
   total_open: number
   by_severity: Record<string, number>
-  mttd_minutes?: number
-  mttr_minutes?: number
+  mttd_hours?: number
+  mttr_hours?: number
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -45,12 +45,10 @@ const CONTAINMENT_COLORS: Record<string, string> = {
   failed: '#ef4444',
 }
 
-function formatDuration(minutes?: number): string {
-  if (minutes === undefined || minutes === null) return '--'
-  if (minutes < 60) return `${Math.round(minutes)}m`
-  const hours = Math.floor(minutes / 60)
-  const mins = Math.round(minutes % 60)
-  return `${hours}h ${mins}m`
+function formatDuration(hours?: number): string {
+  if (hours === undefined || hours === null) return '--'
+  if (hours < 1) return `${Math.round(hours * 60)}m`
+  return `${hours.toFixed(1)} hrs`
 }
 
 export default function IncidentsPage() {
@@ -61,6 +59,8 @@ export default function IncidentsPage() {
   const [page, setPage] = useState(1)
   const [loading, setLoading] = useState(true)
   const [stats, setStats] = useState<IncidentStats | null>(null)
+
+  const [error, setError] = useState<string | null>(null)
 
   // Filters
   const [severityFilter, setSeverityFilter] = useState('')
@@ -75,10 +75,10 @@ export default function IncidentsPage() {
     try {
       const params = new URLSearchParams()
       params.set('page', String(page))
-      params.set('limit', String(limit))
+      params.set('page_size', String(limit))
       params.set('sort', 'created_at')
       params.set('order', 'desc')
-      if (severityFilter) params.set('severity', severityFilter)
+      if (severityFilter) params.set('incident_severity', severityFilter)
       if (statusFilter) params.set('status', statusFilter)
       if (containmentFilter) params.set('containment_status', containmentFilter)
       if (searchQuery) params.set('search', searchQuery)
@@ -88,9 +88,11 @@ export default function IncidentsPage() {
       )
       setIncidents(data.data || [])
       setTotal(data.pagination?.total || 0)
-    } catch {
+      setError(null)
+    } catch (err) {
       setIncidents([])
       setTotal(0)
+      setError(err instanceof Error ? err.message : 'Failed to fetch incidents')
     } finally {
       setLoading(false)
     }
@@ -100,8 +102,9 @@ export default function IncidentsPage() {
     try {
       const data = await apiFetch<IncidentStats>('/tickets/incidents/stats')
       setStats(data)
-    } catch {
+    } catch (err) {
       setStats(null)
+      setError(err instanceof Error ? err.message : 'Failed to fetch incident stats')
     }
   }, [])
 
@@ -175,7 +178,7 @@ export default function IncidentsPage() {
               <Clock size={10} /> MTTD
             </div>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 700, color: 'var(--color-text-bright)' }}>
-              {formatDuration(stats.mttd_minutes)}
+              {formatDuration(stats.mttd_hours)}
             </div>
           </div>
           <div style={{
@@ -189,9 +192,16 @@ export default function IncidentsPage() {
               <Clock size={10} /> MTTR
             </div>
             <div style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 700, color: 'var(--color-text-bright)' }}>
-              {formatDuration(stats.mttr_minutes)}
+              {formatDuration(stats.mttr_hours)}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Error Banner */}
+      {error && (
+        <div className="bg-red-50 border border-red-200 text-red-700 p-3 rounded" style={{ marginBottom: 12, fontSize: 12 }}>
+          {error}
         </div>
       )}
 
@@ -284,7 +294,7 @@ export default function IncidentsPage() {
                   onClick={() => navigate(`/incidents/${inc.id}`)}
                 >
                   <td>
-                    <SeverityBadge severity={inc.severity} />
+                    <SeverityBadge severity={inc.incident_severity} />
                   </td>
                   <td className="title-cell">{inc.title}</td>
                   <td>

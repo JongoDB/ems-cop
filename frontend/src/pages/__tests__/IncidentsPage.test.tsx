@@ -42,8 +42,8 @@ describe('IncidentsPage', () => {
         return Promise.resolve({
           total_open: 5,
           by_severity: { critical: 2, high: 3 },
-          mttd_minutes: 15,
-          mttr_minutes: 120,
+          mttd_hours: 0.25,
+          mttr_hours: 2.0,
         });
       }
       return Promise.resolve({
@@ -51,7 +51,7 @@ describe('IncidentsPage', () => {
           {
             id: '1',
             title: 'Test Incident',
-            severity: 'critical',
+            incident_severity: 'critical',
             status: 'investigating',
             source: 'siem',
             mitre_techniques: ['T1059'],
@@ -93,7 +93,7 @@ describe('IncidentsPage', () => {
       expect(screen.getByText('MTTD')).toBeInTheDocument();
       expect(screen.getByText('15m')).toBeInTheDocument();
       expect(screen.getByText('MTTR')).toBeInTheDocument();
-      expect(screen.getByText('2h 0m')).toBeInTheDocument();
+      expect(screen.getByText('2.0 hrs')).toBeInTheDocument();
     });
   });
 
@@ -128,8 +128,8 @@ describe('IncidentsPage', () => {
         return Promise.resolve({
           total_open: 0,
           by_severity: {},
-          mttd_minutes: undefined,
-          mttr_minutes: undefined,
+          mttd_hours: undefined,
+          mttr_hours: undefined,
         });
       }
       return Promise.resolve({ data: [], pagination: { total: 0 } });
