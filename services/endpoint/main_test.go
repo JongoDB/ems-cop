@@ -3800,3 +3800,119 @@ func TestExtractClientIP(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Test: cvssToSeverity — CVSS v3.1 score to severity mapping
+// ---------------------------------------------------------------------------
+
+func TestCvssToSeverity(t *testing.T) {
+	tests := []struct {
+		name  string
+		score float64
+		want  string
+	}{
+		{"zero = info", 0.0, "info"},
+		{"0.1 = low", 0.1, "low"},
+		{"3.9 = low", 3.9, "low"},
+		{"4.0 = medium", 4.0, "medium"},
+		{"6.9 = medium", 6.9, "medium"},
+		{"7.0 = high", 7.0, "high"},
+		{"8.9 = high", 8.9, "high"},
+		{"9.0 = critical", 9.0, "critical"},
+		{"10.0 = critical", 10.0, "critical"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := cvssToSeverity(tt.score)
+			if got != tt.want {
+				t.Errorf("cvssToSeverity(%v) = %q, want %q", tt.score, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: isValidCVSSScore — edge case validation
+// ---------------------------------------------------------------------------
+
+func TestIsValidCVSSScore(t *testing.T) {
+	tests := []struct {
+		name  string
+		score float64
+		want  bool
+	}{
+		{"zero is valid", 0.0, true},
+		{"10.0 is valid", 10.0, true},
+		{"5.5 is valid", 5.5, true},
+		{"negative is invalid", -0.1, false},
+		{"above 10 is invalid", 10.1, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isValidCVSSScore(tt.score)
+			if got != tt.want {
+				t.Errorf("isValidCVSSScore(%v) = %v, want %v", tt.score, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleIngestAlert — CVSS score auto-derives severity
+// ---------------------------------------------------------------------------
+
+func TestHandleIngestAlert_CVSSOverridesSeverity(t *testing.T) {
+	// We test the logic by verifying that when a CVSS score is provided,
+	// the severity is auto-derived. We test this via the cvssToSeverity function
+	// and validate the struct fields, since the handler requires a database.
+	score := 9.8
+	vector := "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H"
+	req := IngestAlertRequest{
+		SourceSystem: "crowdstrike",
+		Severity:     "low", // manually specified as low
+		Title:        "Test CVSS override",
+		CVSSScore:    &score,
+		CVSSVector:   &vector,
+	}
+
+	// When CVSS score is provided, severity should be overridden
+	derivedSeverity := cvssToSeverity(*req.CVSSScore)
+	if derivedSeverity != "critical" {
+		t.Errorf("expected severity 'critical' for CVSS 9.8, got %q", derivedSeverity)
+	}
+
+	// Verify the struct fields are set correctly
+	if req.CVSSScore == nil || *req.CVSSScore != 9.8 {
+		t.Errorf("expected CVSSScore 9.8, got %v", req.CVSSScore)
+	}
+	if req.CVSSVector == nil || *req.CVSSVector != vector {
+		t.Errorf("expected CVSSVector %q, got %v", vector, req.CVSSVector)
+	}
+
+	// Test medium CVSS
+	medScore := 5.4
+	derivedMed := cvssToSeverity(medScore)
+	if derivedMed != "medium" {
+		t.Errorf("expected severity 'medium' for CVSS 5.4, got %q", derivedMed)
+	}
+
+	// Test high CVSS
+	highScore := 7.5
+	derivedHigh := cvssToSeverity(highScore)
+	if derivedHigh != "high" {
+		t.Errorf("expected severity 'high' for CVSS 7.5, got %q", derivedHigh)
+	}
+
+	// Verify isValidCVSSScore is working correctly with the score
+	if !isValidCVSSScore(score) {
+		t.Errorf("expected isValidCVSSScore(%v) = true", score)
+	}
+	if isValidCVSSScore(10.1) {
+		t.Errorf("expected isValidCVSSScore(10.1) = false")
+	}
+	if isValidCVSSScore(-0.1) {
+		t.Errorf("expected isValidCVSSScore(-0.1) = false")
+	}
+}

@@ -16,6 +16,8 @@ interface AlertRecord {
   status: string
   mitre_techniques?: string[]
   raw_payload?: Record<string, unknown>
+  cvss_score?: number | null
+  cvss_vector?: string | null
   created_at: string
 }
 
@@ -26,6 +28,14 @@ const STATUS_COLORS: Record<string, string> = {
   escalated: '#ef4444',
   resolved: '#22c55e',
   closed: '#6b7280',
+}
+
+function cvssColorClass(score: number | null | undefined): string {
+  if (score == null || score === 0) return 'text-gray-400'
+  if (score >= 9.0) return 'text-red-600'
+  if (score >= 7.0) return 'text-orange-600'
+  if (score >= 4.0) return 'text-yellow-600'
+  return 'text-blue-600'
 }
 
 export default function AlertsPage() {
@@ -282,6 +292,7 @@ export default function AlertsPage() {
                 />
               </th>
               <th>SEVERITY</th>
+              <th>CVSS</th>
               <th>TITLE</th>
               <th>SOURCE</th>
               <th>STATUS</th>
@@ -291,9 +302,9 @@ export default function AlertsPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="table-empty">Loading...</td></tr>
+              <tr><td colSpan={8} className="table-empty">Loading...</td></tr>
             ) : alerts.length === 0 ? (
-              <tr><td colSpan={7} className="table-empty">No alerts found</td></tr>
+              <tr><td colSpan={8} className="table-empty">No alerts found</td></tr>
             ) : (
               alerts.map((alert) => (
                 <tr key={alert.id} className="ticket-row">
@@ -306,6 +317,15 @@ export default function AlertsPage() {
                   </td>
                   <td>
                     <SeverityBadge severity={alert.severity} />
+                  </td>
+                  <td>
+                    <span
+                      className={cvssColorClass(alert.cvss_score)}
+                      title={alert.cvss_vector || undefined}
+                      style={{ fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600 }}
+                    >
+                      {alert.cvss_score != null && alert.cvss_score > 0 ? alert.cvss_score.toFixed(1) : 'N/A'}
+                    </span>
                   </td>
                   <td className="title-cell">{alert.title}</td>
                   <td>

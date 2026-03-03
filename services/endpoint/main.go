@@ -337,6 +337,8 @@ type Alert struct {
 	AssignedTo       *string  `json:"assigned_to"`
 	IncidentTicketID *string  `json:"incident_ticket_id"`
 	Classification   string   `json:"classification"`
+	CVSSScore        *float64 `json:"cvss_score,omitempty"`
+	CVSSVector       *string  `json:"cvss_vector,omitempty"`
 	CreatedAt        string   `json:"created_at"`
 	UpdatedAt        string   `json:"updated_at"`
 }
@@ -353,6 +355,8 @@ type IngestAlertRequest struct {
 	EndpointID      *string  `json:"endpoint_id"`
 	OperationID     *string  `json:"operation_id"`
 	Classification  string   `json:"classification"`
+	CVSSScore       *float64 `json:"cvss_score"`
+	CVSSVector      *string  `json:"cvss_vector"`
 }
 
 type UpdateAlertRequest struct {
@@ -425,6 +429,28 @@ var validAlertSeverities = map[string]bool{
 
 var validAlertStatuses = map[string]bool{
 	"new": true, "acknowledged": true, "investigating": true, "resolved": true, "false_positive": true,
+}
+
+// cvssToSeverity maps a CVSS v3.1 base score to a severity level
+// per NIST/FIRST standard: https://nvd.nist.gov/vuln-metrics/cvss
+func cvssToSeverity(score float64) string {
+	switch {
+	case score >= 9.0:
+		return "critical"
+	case score >= 7.0:
+		return "high"
+	case score >= 4.0:
+		return "medium"
+	case score >= 0.1:
+		return "low"
+	default:
+		return "info"
+	}
+}
+
+// isValidCVSSScore validates a CVSS v3.1 base score (0.0-10.0)
+func isValidCVSSScore(score float64) bool {
+	return score >= 0.0 && score <= 10.0
 }
 
 var validIOCTypes = map[string]bool{
@@ -4629,7 +4655,8 @@ func (s *Server) handleSyncFindingToHigh(w http.ResponseWriter, r *http.Request)
 
 const alertSelectCols = `id, external_id, source_system, severity, title, description,
        raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id,
-       status, assigned_to, incident_ticket_id, classification, created_at, updated_at`
+       status, assigned_to, incident_ticket_id, classification, cvss_score, cvss_vector,
+       created_at, updated_at`
 
 func scanAlert(scanner interface{ Scan(dest ...any) error }) (Alert, error) {
 	var a Alert
@@ -4643,6 +4670,8 @@ func scanAlert(scanner interface{ Scan(dest ...any) error }) (Alert, error) {
 		operationID      *string
 		assignedTo       *string
 		incidentTicketID *string
+		cvssScore        *float64
+		cvssVector       *string
 		createdAt        time.Time
 		updatedAt        time.Time
 	)
@@ -4650,6 +4679,7 @@ func scanAlert(scanner interface{ Scan(dest ...any) error }) (Alert, error) {
 		&a.ID, &externalID, &a.SourceSystem, &a.Severity, &a.Title, &description,
 		&rawPayload, &mitreTechniques, &iocValues, &endpointID, &operationID,
 		&a.Status, &assignedTo, &incidentTicketID, &a.Classification,
+		&cvssScore, &cvssVector,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -4670,6 +4700,8 @@ func scanAlert(scanner interface{ Scan(dest ...any) error }) (Alert, error) {
 	a.OperationID = operationID
 	a.AssignedTo = assignedTo
 	a.IncidentTicketID = incidentTicketID
+	a.CVSSScore = cvssScore
+	a.CVSSVector = cvssVector
 	a.CreatedAt = createdAt.UTC().Format(time.RFC3339)
 	a.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
 	return a, nil
@@ -4788,11 +4820,27 @@ func (s *Server) handleIngestAlert(w http.ResponseWriter, r *http.Request) {
 			"source_system must be one of: splunk, elastic, crowdstrike, generic")
 		return
 	}
-	if req.Severity == "" {
+	// If CVSS score is provided, validate and auto-derive severity
+	severity := req.Severity
+	if req.CVSSScore != nil {
+		if !isValidCVSSScore(*req.CVSSScore) {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+				"cvss_score must be between 0.0 and 10.0")
+			return
+		}
+		derived := cvssToSeverity(*req.CVSSScore)
+		if severity != "" && severity != derived {
+			s.logger.Info("CVSS score overrides manual severity",
+				"cvss_score", *req.CVSSScore, "manual_severity", severity, "derived_severity", derived)
+		}
+		severity = derived
+	}
+
+	if severity == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "severity is required")
 		return
 	}
-	if !validAlertSeverities[req.Severity] {
+	if !validAlertSeverities[severity] {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
 			"severity must be one of: critical, high, medium, low, info")
 		return
@@ -4821,11 +4869,12 @@ func (s *Server) handleIngestAlert(w http.ResponseWriter, r *http.Request) {
 	var alertID string
 	err := s.db.QueryRow(r.Context(),
 		`INSERT INTO alerts (external_id, source_system, severity, title, description,
-		 raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id, classification)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-		req.ExternalID, req.SourceSystem, req.Severity, req.Title, req.Description,
+		 raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id, classification,
+		 cvss_score, cvss_vector)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
+		req.ExternalID, req.SourceSystem, severity, req.Title, req.Description,
 		rawPayloadBytes, mitreTechniques, iocValues, req.EndpointID, req.OperationID,
-		classification).Scan(&alertID)
+		classification, req.CVSSScore, req.CVSSVector).Scan(&alertID)
 	if err != nil {
 		s.logger.Error("alert ingest insert failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to ingest alert")
@@ -4966,7 +5015,23 @@ func (s *Server) handleIngestAlertBatch(w http.ResponseWriter, r *http.Request) 
 			errors = append(errors, map[string]any{"index": i, "error": "invalid or missing source_system"})
 			continue
 		}
-		if req.Severity == "" || !validAlertSeverities[req.Severity] {
+
+		// If CVSS score is provided, validate and auto-derive severity
+		severity := req.Severity
+		if req.CVSSScore != nil {
+			if !isValidCVSSScore(*req.CVSSScore) {
+				errors = append(errors, map[string]any{"index": i, "error": "cvss_score must be between 0.0 and 10.0"})
+				continue
+			}
+			derived := cvssToSeverity(*req.CVSSScore)
+			if severity != "" && severity != derived {
+				s.logger.Info("CVSS score overrides manual severity (batch)",
+					"index", i, "cvss_score", *req.CVSSScore, "manual_severity", severity, "derived_severity", derived)
+			}
+			severity = derived
+		}
+
+		if severity == "" || !validAlertSeverities[severity] {
 			errors = append(errors, map[string]any{"index": i, "error": "invalid or missing severity"})
 			continue
 		}
@@ -4993,11 +5058,12 @@ func (s *Server) handleIngestAlertBatch(w http.ResponseWriter, r *http.Request) 
 		var alertID string
 		err := s.db.QueryRow(r.Context(),
 			`INSERT INTO alerts (external_id, source_system, severity, title, description,
-			 raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id, classification)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
-			req.ExternalID, req.SourceSystem, req.Severity, req.Title, req.Description,
+			 raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id, classification,
+			 cvss_score, cvss_vector)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
+			req.ExternalID, req.SourceSystem, severity, req.Title, req.Description,
 			rawPayloadBytes, mitreTechniques, iocValues, req.EndpointID, req.OperationID,
-			classification).Scan(&alertID)
+			classification, req.CVSSScore, req.CVSSVector).Scan(&alertID)
 		if err != nil {
 			s.logger.Warn("batch alert ingest failed", "index", i, "error", err)
 			errors = append(errors, map[string]any{"index": i, "error": "insert failed"})
@@ -5085,6 +5151,22 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		argIdx++
 	}
 
+	// CVSS range filters
+	if minCVSS := r.URL.Query().Get("min_cvss"); minCVSS != "" {
+		if v, err := strconv.ParseFloat(minCVSS, 64); err == nil {
+			where = append(where, fmt.Sprintf("cvss_score >= $%d", argIdx))
+			args = append(args, v)
+			argIdx++
+		}
+	}
+	if maxCVSS := r.URL.Query().Get("max_cvss"); maxCVSS != "" {
+		if v, err := strconv.ParseFloat(maxCVSS, 64); err == nil {
+			where = append(where, fmt.Sprintf("cvss_score <= $%d", argIdx))
+			args = append(args, v)
+			argIdx++
+		}
+	}
+
 	// Enclave enforcement: filter out SECRET alerts on low side
 	if os.Getenv("ENCLAVE") == "low" {
 		where = append(where, "classification != 'SECRET'")
@@ -5095,9 +5177,15 @@ func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
 		whereClause = "WHERE " + strings.Join(where, " AND ")
 	}
 
+	// Sort option: default is created_at DESC, also support cvss_score
+	orderBy := "created_at DESC"
+	if sortParam := r.URL.Query().Get("sort"); sortParam == "cvss_score" {
+		orderBy = "cvss_score DESC NULLS LAST"
+	}
+
 	args = append(args, pageSize, offset)
-	query := fmt.Sprintf("SELECT %s FROM alerts %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d",
-		alertSelectCols, whereClause, argIdx, argIdx+1)
+	query := fmt.Sprintf("SELECT %s FROM alerts %s ORDER BY %s LIMIT $%d OFFSET $%d",
+		alertSelectCols, whereClause, orderBy, argIdx, argIdx+1)
 
 	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {

@@ -13,6 +13,7 @@ interface Alert {
   status: string
   mitre_techniques?: string[]
   raw_payload?: Record<string, unknown>
+  cvss_score?: number | null
   created_at: string
 }
 
@@ -88,6 +89,16 @@ export default function AlertFeed({ limit = 20, className = '' }: AlertFeedProps
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11 }}>
                 <SeverityBadge severity={alert.severity} />
+                {alert.cvss_score != null && alert.cvss_score > 0 && (
+                  <span style={{
+                    fontFamily: 'var(--font-mono)',
+                    fontSize: 9,
+                    fontWeight: 600,
+                    color: alert.cvss_score >= 9.0 ? '#dc2626' : alert.cvss_score >= 7.0 ? '#ea580c' : alert.cvss_score >= 4.0 ? '#ca8a04' : '#2563eb',
+                  }}>
+                    {alert.cvss_score.toFixed(1)}
+                  </span>
+                )}
                 <span style={{
                   flex: 1,
                   fontFamily: 'var(--font-mono)',

@@ -232,6 +232,8 @@ api_call POST "/api/v1/endpoints/alerts/ingest" '{
   "description": "Endpoint WKSTN-042 detected ransomware encryption behavior. Multiple files renamed with .lockbit extension. Volume shadow copies deleted. Matches LockBit 3.0 TTP profile.",
   "mitre_techniques": ["T1486", "T1490", "T1059.001"],
   "ioc_values": ["185.220.101.42", "lockbit3-payment.onion", "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"],
+  "cvss_score": 9.8,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H",
   "raw_payload": {
     "sensor_id": "CS-042",
     "detection_id": "DET-2024-88421",
@@ -256,6 +258,8 @@ api_call POST "/api/v1/endpoints/alerts/ingest" '{
   "description": "Suspicious remote service installation detected from WKSTN-042 to SRV-DC01. PsExec-style behavior with ADMIN$ share access. Possible credential reuse from compromised endpoint.",
   "mitre_techniques": ["T1570", "T1021.002", "T1569.002"],
   "ioc_values": ["10.10.5.42", "PSEXESVC.exe"],
+  "cvss_score": 7.5,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:N/A:N",
   "raw_payload": {
     "source_ip": "10.10.5.42",
     "dest_ip": "10.10.5.10",
@@ -280,6 +284,8 @@ api_call POST "/api/v1/endpoints/alerts/ingest" '{
   "description": "User clicked a link in a phishing email that redirected to a credential harvesting page mimicking the internal SSO portal. DNS query to suspicious domain detected.",
   "mitre_techniques": ["T1566.002", "T1598.003"],
   "ioc_values": ["auth-portal-update.evil.com", "phish@malware-domain.net"],
+  "cvss_score": 5.4,
+  "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:R/S:U/C:L/I:L/A:N",
   "raw_payload": {
     "email_subject": "Urgent: Password Reset Required",
     "sender": "phish@malware-domain.net",
