@@ -231,6 +231,55 @@ http:
       priority: 50
       tls: {}
 
+    # ── M13 DCO/SOC Routes ──
+    endpoint-alerts:
+      rule: "PathPrefix(`/api/v1/endpoints/alerts`)"
+      entryPoints: [web, websecure]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+      tls: {}
+
+    endpoint-iocs:
+      rule: "PathPrefix(`/api/v1/endpoints/iocs`)"
+      entryPoints: [web, websecure]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+      tls: {}
+
+    c2-containment:
+      rule: "PathPrefix(`/api/v1/c2/containment`)"
+      entryPoints: [web, websecure]
+      service: c2
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+      tls: {}
+
+    workflow-playbooks:
+      rule: "PathPrefix(`/api/v1/workflows/playbooks`)"
+      entryPoints: [web, websecure]
+      service: workflow
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+      tls: {}
+
+    workflow-playbook-executions:
+      rule: "PathPrefix(`/api/v1/workflows/playbook-executions`)"
+      entryPoints: [web, websecure]
+      service: workflow
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+      tls: {}
+
+    ticket-incidents:
+      rule: "PathPrefix(`/api/v1/tickets/incidents`)"
+      entryPoints: [web, websecure]
+      service: ticket
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+      tls: {}
+
     # WebSocket relay — auth handled by ws-relay via handshake token
     ws:
       rule: "PathPrefix(`/ws`)"

@@ -1,0 +1,249 @@
+---
+# EMS Services role — deploy all 10 EMS-COP microservices
+# Uses Docker images from the configured registry
+
+- name: Create Docker network for EMS
+  community.docker.docker_network:
+    name: "ems-net-{{ enclave }}"
+    driver: bridge
+    ipam_config:
+      - subnet: "{{ ems_net_cidr }}"
+
+- name: Create endpoint network (low-side only)
+  community.docker.docker_network:
+    name: "endpoint-net-{{ enclave }}"
+    driver: bridge
+    ipam_config:
+      - subnet: "{{ endpoint_net_cidr }}"
+  when: endpoint_net_enabled | default(false)
+
+- name: Define common environment variables
+  ansible.builtin.set_fact:
+    ems_common_env:
+      NODE_ENV: production
+      TZ: UTC
+      ENCLAVE: "{{ enclave }}"
+      POSTGRES_HOST: "ems-postgres-{{ enclave }}"
+      POSTGRES_PORT: "{{ postgres_port }}"
+      POSTGRES_DB: "{{ postgres_db }}"
+      POSTGRES_USER: "{{ postgres_user }}"
+      POSTGRES_PASSWORD: "{{ postgres_password }}"
+      REDIS_URL: "redis://:{{ redis_password }}@ems-redis-{{ enclave }}:6379"
+      NATS_URL: "nats://ems-nats-{{ enclave }}:4222"
+      CLICKHOUSE_HOST: "ems-clickhouse-{{ enclave }}"
+      CLICKHOUSE_PORT: "{{ clickhouse_http_port }}"
+      CLICKHOUSE_DB: "{{ clickhouse_db }}"
+      CLICKHOUSE_PASSWORD: "{{ clickhouse_password }}"
+      MINIO_ENDPOINT: "ems-minio-{{ enclave }}:9000"
+      MINIO_ACCESS_KEY: "{{ minio_access_key }}"
+      MINIO_SECRET_KEY: "{{ minio_secret_key }}"
+      JWT_SECRET: "{{ jwt_secret }}"
+      ALLOWED_ORIGINS: "{{ allowed_origins }}"
+
+# ════════════════════════════════════════════
+#  Go Services
+# ════════════════════════════════════════════
+- name: Deploy auth service
+  community.docker.docker_container:
+    name: "ems-auth-{{ enclave }}"
+    image: "{{ docker_registry }}/auth:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'auth-service', 'SERVICE_PORT': '3001'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+- name: Deploy workflow-engine service
+  community.docker.docker_container:
+    name: "ems-workflow-{{ enclave }}"
+    image: "{{ docker_registry }}/workflow-engine:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'workflow-engine', 'SERVICE_PORT': '3002'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+- name: Deploy c2-gateway service
+  community.docker.docker_container:
+    name: "ems-c2-gateway-{{ enclave }}"
+    image: "{{ docker_registry }}/c2-gateway:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'c2-gateway', 'SERVICE_PORT': '3005'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+      - name: "endpoint-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  when: endpoint_net_enabled | default(false)
+
+- name: Deploy c2-gateway service (high-side, no endpoint-net)
+  community.docker.docker_container:
+    name: "ems-c2-gateway-{{ enclave }}"
+    image: "{{ docker_registry }}/c2-gateway:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'c2-gateway', 'SERVICE_PORT': '3005'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  when: not (endpoint_net_enabled | default(false))
+
+- name: Deploy audit service
+  community.docker.docker_container:
+    name: "ems-audit-{{ enclave }}"
+    image: "{{ docker_registry }}/audit:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'audit-service', 'SERVICE_PORT': '3006'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3006/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+- name: Deploy endpoint service
+  community.docker.docker_container:
+    name: "ems-endpoint-{{ enclave }}"
+    image: "{{ docker_registry }}/endpoint:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'endpoint-service', 'SERVICE_PORT': '3008'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3008/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+# ════════════════════════════════════════════
+#  Node/TS Services
+# ════════════════════════════════════════════
+- name: Deploy ticket service
+  community.docker.docker_container:
+    name: "ems-ticket-{{ enclave }}"
+    image: "{{ docker_registry }}/ticket:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'ticket-service', 'SERVICE_PORT': '3003'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+- name: Deploy dashboard service
+  community.docker.docker_container:
+    name: "ems-dashboard-{{ enclave }}"
+    image: "{{ docker_registry }}/dashboard:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'dashboard-service', 'SERVICE_PORT': '3004'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+- name: Deploy notification service
+  community.docker.docker_container:
+    name: "ems-notification-{{ enclave }}"
+    image: "{{ docker_registry }}/notification:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: >
+      {{ ems_common_env | combine({
+        'SERVICE_NAME': 'notification-service',
+        'SERVICE_PORT': '3007',
+        'SMTP_HOST': smtp_host | default(''),
+        'SMTP_PORT': smtp_port | default('587') | string,
+        'SMTP_FROM': smtp_from | default('noreply@ems-cop.local'),
+        'TICKET_SERVICE_URL': 'http://ems-ticket-' + enclave + ':3003'
+      }) }}
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3007/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+- name: Deploy ws-relay service
+  community.docker.docker_container:
+    name: "ems-ws-relay-{{ enclave }}"
+    image: "{{ docker_registry }}/ws-relay:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: "{{ ems_common_env | combine({'SERVICE_NAME': 'ws-relay', 'SERVICE_PORT': '3009'}) }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3009/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+# ════════════════════════════════════════════
+#  Frontend
+# ════════════════════════════════════════════
+- name: Deploy frontend
+  community.docker.docker_container:
+    name: "ems-frontend-{{ enclave }}"
+    image: "{{ docker_registry }}/frontend:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+# ════════════════════════════════════════════
+#  CTI Relay (if enabled)
+# ════════════════════════════════════════════
+- name: Deploy cti-relay service
+  community.docker.docker_container:
+    name: "ems-cti-relay-{{ enclave }}"
+    image: "{{ docker_registry }}/cti-relay:{{ ems_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env: >
+      {{ ems_common_env | combine({
+        'SERVICE_NAME': 'cti-relay',
+        'SERVICE_PORT': '3010',
+        'CTI_API_TOKEN': cti_api_token
+      }) }}
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3010/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+  when: cti_relay_enabled | default(false)

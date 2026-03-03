@@ -1,0 +1,58 @@
+---
+# EMS-COP CTI Zone Variables
+# Cross-domain bridge between low and high enclaves
+# Apache NiFi provides provenance and policy-based data flow control
+
+# ════════════════════════════════════════════
+#  Zone Identity
+# ════════════════════════════════════════════
+enclave: cti
+enclave_label: "CTI Zone (Cross-Domain Bridge)"
+
+# ════════════════════════════════════════════
+#  NiFi Configuration
+# ════════════════════════════════════════════
+nifi_enabled: true
+nifi_version: "1.25.0"
+nifi_port: 8443
+nifi_sensitive_props_key: "{{ vault_nifi_sensitive_props_key | default('CHANGE_ME') }}"
+nifi_admin_user: admin
+nifi_admin_password: "{{ vault_nifi_admin_password | default('CHANGE_ME') }}"
+
+# NiFi flow templates directory (deployed from repo)
+nifi_flow_templates_src: "{{ playbook_dir }}/../../nifi/"
+
+# ════════════════════════════════════════════
+#  CTI Relay Service
+# ════════════════════════════════════════════
+cti_relay_enabled: true
+cti_relay_port: 3010
+cti_api_token: "{{ vault_cti_api_token | default('CHANGE_ME') }}"
+
+# ════════════════════════════════════════════
+#  Cross-Domain Network
+# ════════════════════════════════════════════
+# CTI zone connects to BOTH enclaves via isolated cti-net
+cti_net_cidr: "10.102.0.0/16"
+
+# Low-side connection endpoint (for NiFi data pulls)
+low_enclave_cti_endpoint: "http://10.200.1.10:3010"
+
+# High-side connection endpoint (for NiFi data pushes)
+high_enclave_cti_endpoint: "http://10.200.2.10:3010"
+
+# ════════════════════════════════════════════
+#  Classification Policy
+# ════════════════════════════════════════════
+# SECRET data must NEVER cross the CTI bridge
+# NiFi flow enforces classification downgrade prevention
+allowed_classifications:
+  - UNCLASSIFIED
+  - CUI
+# SECRET is explicitly excluded — enforced at NiFi flow level
+
+# ════════════════════════════════════════════
+#  Secrets (use Ansible Vault in production)
+# ════════════════════════════════════════════
+cti_low_pg_password: "{{ vault_cti_low_pg_password | default('CHANGE_ME') }}"
+cti_high_pg_password: "{{ vault_cti_high_pg_password | default('CHANGE_ME') }}"

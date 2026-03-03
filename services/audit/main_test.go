@@ -1999,3 +1999,441 @@ func TestHashChainDeterministic(t *testing.T) {
 		t.Error("different events should produce different hashes")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// DCO NATS Event Handling Tests (M13)
+// ---------------------------------------------------------------------------
+
+func TestHandleDCOAlertEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.alert_received",
+		"actor_id": "system",
+		"actor_username": "siem",
+		"action": "alert_received",
+		"details": "{\"severity\":\"critical\",\"source\":\"siem\"}",
+		"timestamp": "2026-03-01T12:00:00Z",
+		"classification": "CUI"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.alert_received",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.alert_received" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.alert_received")
+	}
+	if event.Classification != "CUI" {
+		t.Errorf("Classification = %q, want %q", event.Classification, "CUI")
+	}
+	if event.Hash == "" {
+		t.Error("Hash should not be empty")
+	}
+}
+
+func TestHandleDCOIncidentCreatedEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.incident_created",
+		"actor_id": "user-123",
+		"actor_username": "analyst1",
+		"action": "incident_created",
+		"resource_type": "incident",
+		"resource_id": "incident-456",
+		"details": "{\"title\":\"Malware detected\"}",
+		"timestamp": "2026-03-01T12:01:00Z"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.incident_created",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.incident_created" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.incident_created")
+	}
+	if event.Action != "incident_created" {
+		t.Errorf("Action = %q, want %q", event.Action, "incident_created")
+	}
+}
+
+func TestHandleDCOContainmentExecutedEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.containment_executed",
+		"actor_id": "user-op1",
+		"actor_username": "op1",
+		"action": "containment_executed",
+		"resource_type": "containment_action",
+		"resource_id": "action-789",
+		"details": "{\"action_type\":\"isolate_host\",\"hostname\":\"target-1\"}",
+		"timestamp": "2026-03-01T12:05:00Z"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.containment_executed",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.containment_executed" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.containment_executed")
+	}
+}
+
+func TestHandleDCOPlaybookTriggeredEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.playbook_triggered",
+		"actor_id": "system",
+		"actor_username": "system:auto-trigger",
+		"action": "playbook_triggered",
+		"resource_type": "playbook",
+		"resource_id": "pb-123",
+		"details": "{\"playbook_id\":\"pb-123\",\"execution_id\":\"exec-456\"}",
+		"timestamp": "2026-03-01T12:10:00Z"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.playbook_triggered",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.playbook_triggered" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.playbook_triggered")
+	}
+}
+
+func TestHandleDCOContainmentRolledBackEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.containment_rolled_back",
+		"actor_id": "user-admin",
+		"actor_username": "admin",
+		"action": "containment_rolled_back",
+		"resource_type": "containment_action",
+		"resource_id": "action-789",
+		"details": "{\"rolled_back_by\":\"admin\"}",
+		"timestamp": "2026-03-01T12:15:00Z"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.containment_rolled_back",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.containment_rolled_back" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.containment_rolled_back")
+	}
+}
+
+func TestHandleDCOEnrichmentCompletedEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.enrichment_completed",
+		"actor_id": "system",
+		"actor_username": "enrichment-engine",
+		"action": "enrichment_completed",
+		"resource_type": "ioc",
+		"resource_id": "ioc-123",
+		"details": "{\"sources\":[\"virustotal\",\"shodan\"]}",
+		"timestamp": "2026-03-01T12:20:00Z"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.enrichment_completed",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.enrichment_completed" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.enrichment_completed")
+	}
+}
+
+func TestHandleDCOIOCCreatedEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.ioc_created",
+		"actor_id": "user-analyst",
+		"actor_username": "analyst1",
+		"action": "ioc_created",
+		"resource_type": "ioc",
+		"resource_id": "ioc-789",
+		"details": "{\"type\":\"ip\",\"value\":\"10.0.0.1\"}",
+		"timestamp": "2026-03-01T12:25:00Z"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.ioc_created",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.ioc_created" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.ioc_created")
+	}
+}
+
+func TestHandleDCOIncidentStatusChangedEvent(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	payload := `{
+		"event_type": "dco.incident_status_changed",
+		"actor_id": "user-analyst",
+		"actor_username": "analyst1",
+		"action": "incident_status_changed",
+		"resource_type": "incident",
+		"resource_id": "incident-456",
+		"details": "{\"from\":\"open\",\"to\":\"investigating\"}",
+		"timestamp": "2026-03-01T12:30:00Z"
+	}`
+	msg := &nats.Msg{
+		Subject: "dco.incident_status_changed",
+		Data:    []byte(payload),
+	}
+	srv.handleEvent(msg)
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 1 {
+		t.Fatalf("buffer length = %d, want 1", len(srv.buffer))
+	}
+
+	event := srv.buffer[0]
+	if event.EventType != "dco.incident_status_changed" {
+		t.Errorf("EventType = %q, want %q", event.EventType, "dco.incident_status_changed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Multiple DCO events chain correctly
+// ---------------------------------------------------------------------------
+
+func TestDCOEventHashChain(t *testing.T) {
+	srv := &Server{
+		buffer:   make([]AuditEvent, 0, batchSize),
+		lastHash: "",
+		logger:   testLogger(),
+	}
+
+	events := []struct {
+		subject string
+		payload string
+	}{
+		{
+			"dco.alert_received",
+			`{"event_type":"dco.alert_received","actor_id":"system","action":"alert_received","timestamp":"2026-03-01T12:00:00Z"}`,
+		},
+		{
+			"dco.incident_created",
+			`{"event_type":"dco.incident_created","actor_id":"analyst","action":"incident_created","timestamp":"2026-03-01T12:01:00Z"}`,
+		},
+		{
+			"dco.containment_executed",
+			`{"event_type":"dco.containment_executed","actor_id":"operator","action":"containment_executed","timestamp":"2026-03-01T12:02:00Z"}`,
+		},
+		{
+			"dco.playbook_triggered",
+			`{"event_type":"dco.playbook_triggered","actor_id":"system","action":"playbook_triggered","timestamp":"2026-03-01T12:03:00Z"}`,
+		},
+	}
+
+	for _, e := range events {
+		msg := &nats.Msg{
+			Subject: e.subject,
+			Data:    []byte(e.payload),
+		}
+		srv.handleEvent(msg)
+	}
+
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+
+	if len(srv.buffer) != 4 {
+		t.Fatalf("buffer length = %d, want 4", len(srv.buffer))
+	}
+
+	// Verify hash chain continuity
+	for i := 1; i < len(srv.buffer); i++ {
+		if srv.buffer[i].PreviousHash != srv.buffer[i-1].Hash {
+			t.Errorf("event[%d].PreviousHash = %q, want %q (event[%d].Hash)",
+				i, srv.buffer[i].PreviousHash, srv.buffer[i-1].Hash, i-1)
+		}
+	}
+
+	// Verify all hashes are unique
+	hashes := make(map[string]bool)
+	for i, e := range srv.buffer {
+		if hashes[e.Hash] {
+			t.Errorf("duplicate hash at index %d", i)
+		}
+		hashes[e.Hash] = true
+	}
+
+	// Verify first event has empty previous hash
+	if srv.buffer[0].PreviousHash != "" {
+		t.Errorf("first event PreviousHash = %q, want empty", srv.buffer[0].PreviousHash)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: DCO event with classification enforcement
+// ---------------------------------------------------------------------------
+
+func TestDCOEventClassificationEnforcement(t *testing.T) {
+	origEnclave := enclave
+	defer func() { enclave = origEnclave }()
+
+	t.Run("low side drops SECRET dco events", func(t *testing.T) {
+		enclave = "low"
+		srv := &Server{
+			buffer:   make([]AuditEvent, 0, batchSize),
+			lastHash: "",
+			logger:   testLogger(),
+		}
+
+		payload := `{
+			"event_type": "dco.alert_received",
+			"actor_id": "system",
+			"action": "alert_received",
+			"timestamp": "2026-03-01T12:00:00Z",
+			"classification": "SECRET"
+		}`
+		msg := &nats.Msg{
+			Subject: "dco.alert_received",
+			Data:    []byte(payload),
+		}
+		srv.handleEvent(msg)
+
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+
+		if len(srv.buffer) != 0 {
+			t.Errorf("buffer length = %d, want 0 (SECRET should be dropped on low side)", len(srv.buffer))
+		}
+	})
+
+	t.Run("high side keeps SECRET dco events", func(t *testing.T) {
+		enclave = "high"
+		srv := &Server{
+			buffer:   make([]AuditEvent, 0, batchSize),
+			lastHash: "",
+			logger:   testLogger(),
+		}
+
+		payload := `{
+			"event_type": "dco.alert_received",
+			"actor_id": "system",
+			"action": "alert_received",
+			"timestamp": "2026-03-01T12:00:00Z",
+			"classification": "SECRET"
+		}`
+		msg := &nats.Msg{
+			Subject: "dco.alert_received",
+			Data:    []byte(payload),
+		}
+		srv.handleEvent(msg)
+
+		srv.mu.Lock()
+		defer srv.mu.Unlock()
+
+		if len(srv.buffer) != 1 {
+			t.Errorf("buffer length = %d, want 1 (SECRET should be kept on high side)", len(srv.buffer))
+		}
+	})
+}

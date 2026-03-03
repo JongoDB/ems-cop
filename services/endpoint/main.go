@@ -318,6 +318,130 @@ var validImportParserFormats = map[string]bool{
 }
 
 // ---------------------------------------------------------------------------
+// DCO/SOC Types
+// ---------------------------------------------------------------------------
+
+type Alert struct {
+	ID               string   `json:"id"`
+	ExternalID       *string  `json:"external_id"`
+	SourceSystem     string   `json:"source_system"`
+	Severity         string   `json:"severity"`
+	Title            string   `json:"title"`
+	Description      *string  `json:"description"`
+	RawPayload       any      `json:"raw_payload"`
+	MitreTechniques  []string `json:"mitre_techniques"`
+	IOCValues        []string `json:"ioc_values"`
+	EndpointID       *string  `json:"endpoint_id"`
+	OperationID      *string  `json:"operation_id"`
+	Status           string   `json:"status"`
+	AssignedTo       *string  `json:"assigned_to"`
+	IncidentTicketID *string  `json:"incident_ticket_id"`
+	Classification   string   `json:"classification"`
+	CreatedAt        string   `json:"created_at"`
+	UpdatedAt        string   `json:"updated_at"`
+}
+
+type IngestAlertRequest struct {
+	ExternalID      *string  `json:"external_id"`
+	SourceSystem    string   `json:"source_system"`
+	Severity        string   `json:"severity"`
+	Title           string   `json:"title"`
+	Description     *string  `json:"description"`
+	RawPayload      any      `json:"raw_payload"`
+	MitreTechniques []string `json:"mitre_techniques"`
+	IOCValues       []string `json:"ioc_values"`
+	EndpointID      *string  `json:"endpoint_id"`
+	OperationID     *string  `json:"operation_id"`
+	Classification  string   `json:"classification"`
+}
+
+type UpdateAlertRequest struct {
+	Status         *string `json:"status"`
+	AssignedTo     *string `json:"assigned_to"`
+	Classification *string `json:"classification"`
+}
+
+type EscalateAlertRequest struct {
+	Title      string  `json:"title"`
+	Severity   string  `json:"severity"`
+	AssignedTo *string `json:"assigned_to"`
+}
+
+type IOCRecord struct {
+	ID              string   `json:"id"`
+	IOCType         string   `json:"ioc_type"`
+	Value           string   `json:"value"`
+	Description     *string  `json:"description"`
+	Source          string   `json:"source"`
+	ThreatLevel     string   `json:"threat_level"`
+	MitreTechniques []string `json:"mitre_techniques"`
+	Tags            []string `json:"tags"`
+	FirstSeen       string   `json:"first_seen"`
+	LastSeen        *string  `json:"last_seen"`
+	Expiry          *string  `json:"expiry"`
+	IsActive        bool     `json:"is_active"`
+	Classification  string   `json:"classification"`
+	CreatedBy       *string  `json:"created_by"`
+	CreatedAt       string   `json:"created_at"`
+	UpdatedAt       string   `json:"updated_at"`
+}
+
+type CreateIOCRequest struct {
+	IOCType         string   `json:"ioc_type"`
+	Value           string   `json:"value"`
+	Description     *string  `json:"description"`
+	Source          string   `json:"source"`
+	ThreatLevel     string   `json:"threat_level"`
+	MitreTechniques []string `json:"mitre_techniques"`
+	Tags            []string `json:"tags"`
+	Expiry          *string  `json:"expiry"`
+	Classification  string   `json:"classification"`
+}
+
+type UpdateIOCRequest struct {
+	Description     *string  `json:"description"`
+	ThreatLevel     *string  `json:"threat_level"`
+	MitreTechniques *[]string `json:"mitre_techniques"`
+	Tags            *[]string `json:"tags"`
+	Expiry          *string  `json:"expiry"`
+	IsActive        *bool    `json:"is_active"`
+	Classification  *string  `json:"classification"`
+}
+
+type SearchIOCRequest struct {
+	Value   string  `json:"value"`
+	IOCType *string `json:"ioc_type"`
+}
+
+// DCO/SOC valid enum values
+
+var validAlertSourceSystems = map[string]bool{
+	"splunk": true, "elastic": true, "crowdstrike": true, "generic": true,
+}
+
+var validAlertSeverities = map[string]bool{
+	"critical": true, "high": true, "medium": true, "low": true, "info": true,
+}
+
+var validAlertStatuses = map[string]bool{
+	"new": true, "acknowledged": true, "investigating": true, "resolved": true, "false_positive": true,
+}
+
+var validIOCTypes = map[string]bool{
+	"ip": true, "domain": true, "hash_md5": true, "hash_sha1": true,
+	"hash_sha256": true, "url": true, "email": true, "file_name": true,
+	"registry_key": true, "mutex": true,
+}
+
+var validIOCSources = map[string]bool{
+	"manual": true, "siem": true, "threat_feed": true, "investigation": true,
+}
+
+var validIOCThreatLevels = map[string]bool{
+	"critical": true, "high": true, "medium": true, "low": true, "unknown": true,
+}
+
+// ---------------------------------------------------------------------------
 // Nmap XML structures
 // ---------------------------------------------------------------------------
 
@@ -530,6 +654,79 @@ func (s *Server) publishEvent(eventType string, data any) {
 
 func getUserID(r *http.Request) string {
 	return r.Header.Get("X-User-ID")
+}
+
+// ---------------------------------------------------------------------------
+// Alert Ingest Auth Check
+// ---------------------------------------------------------------------------
+
+// requireIngestAuth checks for X-User-ID header or Authorization: Bearer token.
+// Returns true if authenticated, false (and writes 401) if not.
+func requireIngestAuth(w http.ResponseWriter, r *http.Request) bool {
+	if r.Header.Get("X-User-ID") != "" {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") && len(auth) > 7 {
+		return true
+	}
+	writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "Authentication required: provide X-User-ID or Authorization Bearer token")
+	return false
+}
+
+// ---------------------------------------------------------------------------
+// Alert Ingest Rate Limiter (in-memory, per source IP)
+// ---------------------------------------------------------------------------
+
+type alertRateLimiter struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+var ingestRateLimiter = &alertRateLimiter{
+	counts: make(map[string]int),
+}
+
+func init() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			ingestRateLimiter.mu.Lock()
+			ingestRateLimiter.counts = make(map[string]int)
+			ingestRateLimiter.mu.Unlock()
+		}
+	}()
+}
+
+// checkIngestRateLimit returns true if the request is within rate limits.
+// Returns false (and writes 429) if the limit is exceeded.
+func checkIngestRateLimit(w http.ResponseWriter, r *http.Request) bool {
+	ip := extractClientIP(r)
+	ingestRateLimiter.mu.Lock()
+	ingestRateLimiter.counts[ip]++
+	count := ingestRateLimiter.counts[ip]
+	ingestRateLimiter.mu.Unlock()
+	if count > 100 {
+		writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", "Too many alert ingest requests, limit is 100 per minute")
+		return false
+	}
+	return true
+}
+
+func extractClientIP(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[len(parts)-1])
+	}
+	if xri := r.Header.Get("X-Real-Ip"); xri != "" {
+		return xri
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
 }
 
 // Classification helpers
@@ -4427,6 +4624,1076 @@ func (s *Server) handleSyncFindingToHigh(w http.ResponseWriter, r *http.Request)
 }
 
 // ---------------------------------------------------------------------------
+// DCO/SOC Scan Helpers
+// ---------------------------------------------------------------------------
+
+const alertSelectCols = `id, external_id, source_system, severity, title, description,
+       raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id,
+       status, assigned_to, incident_ticket_id, classification, created_at, updated_at`
+
+func scanAlert(scanner interface{ Scan(dest ...any) error }) (Alert, error) {
+	var a Alert
+	var (
+		externalID       *string
+		description      *string
+		rawPayload       []byte
+		mitreTechniques  []string
+		iocValues        []string
+		endpointID       *string
+		operationID      *string
+		assignedTo       *string
+		incidentTicketID *string
+		createdAt        time.Time
+		updatedAt        time.Time
+	)
+	err := scanner.Scan(
+		&a.ID, &externalID, &a.SourceSystem, &a.Severity, &a.Title, &description,
+		&rawPayload, &mitreTechniques, &iocValues, &endpointID, &operationID,
+		&a.Status, &assignedTo, &incidentTicketID, &a.Classification,
+		&createdAt, &updatedAt,
+	)
+	if err != nil {
+		return a, err
+	}
+	a.ExternalID = externalID
+	a.Description = description
+	a.RawPayload = parseJSONB(rawPayload)
+	a.MitreTechniques = mitreTechniques
+	if a.MitreTechniques == nil {
+		a.MitreTechniques = []string{}
+	}
+	a.IOCValues = iocValues
+	if a.IOCValues == nil {
+		a.IOCValues = []string{}
+	}
+	a.EndpointID = endpointID
+	a.OperationID = operationID
+	a.AssignedTo = assignedTo
+	a.IncidentTicketID = incidentTicketID
+	a.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	a.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return a, nil
+}
+
+const iocSelectCols = `id, ioc_type, value, description, source, threat_level,
+       mitre_techniques, tags, first_seen, last_seen, expiry,
+       is_active, classification, created_by, created_at, updated_at`
+
+func scanIOC(scanner interface{ Scan(dest ...any) error }) (IOCRecord, error) {
+	var ioc IOCRecord
+	var (
+		description     *string
+		mitreTechniques []string
+		tags            []string
+		firstSeen       time.Time
+		lastSeen        *time.Time
+		expiry          *time.Time
+		createdBy       *string
+		createdAt       time.Time
+		updatedAt       time.Time
+	)
+	err := scanner.Scan(
+		&ioc.ID, &ioc.IOCType, &ioc.Value, &description, &ioc.Source, &ioc.ThreatLevel,
+		&mitreTechniques, &tags, &firstSeen, &lastSeen, &expiry,
+		&ioc.IsActive, &ioc.Classification, &createdBy, &createdAt, &updatedAt,
+	)
+	if err != nil {
+		return ioc, err
+	}
+	ioc.Description = description
+	ioc.MitreTechniques = mitreTechniques
+	if ioc.MitreTechniques == nil {
+		ioc.MitreTechniques = []string{}
+	}
+	ioc.Tags = tags
+	if ioc.Tags == nil {
+		ioc.Tags = []string{}
+	}
+	ioc.FirstSeen = firstSeen.UTC().Format(time.RFC3339)
+	if lastSeen != nil {
+		ls := lastSeen.UTC().Format(time.RFC3339)
+		ioc.LastSeen = &ls
+	}
+	if expiry != nil {
+		ex := expiry.UTC().Format(time.RFC3339)
+		ioc.Expiry = &ex
+	}
+	ioc.CreatedBy = createdBy
+	ioc.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	ioc.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return ioc, nil
+}
+
+// ---------------------------------------------------------------------------
+// DCO/SOC Pagination Helper
+// ---------------------------------------------------------------------------
+
+func parseDCOPagination(r *http.Request) (page, pageSize, offset int) {
+	page = 1
+	pageSize = 50
+	if p := r.URL.Query().Get("page"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			page = v
+		}
+	}
+	if ps := r.URL.Query().Get("page_size"); ps != "" {
+		if v, err := strconv.Atoi(ps); err == nil && v > 0 {
+			if v > 200 {
+				v = 200
+			}
+			pageSize = v
+		}
+	}
+	offset = (page - 1) * pageSize
+	return
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — Alert Ingest
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleIngestAlert(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Classification", "UNCLASSIFIED")
+
+	// Auth check: require X-User-ID or Bearer token
+	if !requireIngestAuth(w, r) {
+		return
+	}
+
+	// Rate limit: 100 alerts/min per source IP
+	if !checkIngestRateLimit(w, r) {
+		return
+	}
+
+	// Enclave enforcement: alerts don't originate on high side
+	if enclave == "high" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION",
+			"Alert ingest not available on high-side enclave")
+		return
+	}
+
+	var req IngestAlertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	// Validate required fields
+	if req.SourceSystem == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "source_system is required")
+		return
+	}
+	if !validAlertSourceSystems[req.SourceSystem] {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"source_system must be one of: splunk, elastic, crowdstrike, generic")
+		return
+	}
+	if req.Severity == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "severity is required")
+		return
+	}
+	if !validAlertSeverities[req.Severity] {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"severity must be one of: critical, high, medium, low, info")
+		return
+	}
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "title is required")
+		return
+	}
+
+	classification := req.Classification
+	if classification == "" {
+		classification = "UNCLASSIFIED"
+	}
+
+	mitreTechniques := req.MitreTechniques
+	if mitreTechniques == nil {
+		mitreTechniques = []string{}
+	}
+	iocValues := req.IOCValues
+	if iocValues == nil {
+		iocValues = []string{}
+	}
+
+	rawPayloadBytes := marshalJSONB(req.RawPayload)
+
+	var alertID string
+	err := s.db.QueryRow(r.Context(),
+		`INSERT INTO alerts (external_id, source_system, severity, title, description,
+		 raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id, classification)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+		req.ExternalID, req.SourceSystem, req.Severity, req.Title, req.Description,
+		rawPayloadBytes, mitreTechniques, iocValues, req.EndpointID, req.OperationID,
+		classification).Scan(&alertID)
+	if err != nil {
+		s.logger.Error("alert ingest insert failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to ingest alert")
+		return
+	}
+
+	// Auto-create IOC records from ioc_values in payload
+	if len(iocValues) > 0 {
+		s.autoCreateIOCs(r.Context(), iocValues, req.SourceSystem, classification, alertID)
+	}
+
+	// Fetch the inserted alert
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf("SELECT %s FROM alerts WHERE id = $1", alertSelectCols), alertID)
+	alert, err := scanAlert(row)
+	if err != nil {
+		s.logger.Error("fetch ingested alert failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch ingested alert")
+		return
+	}
+
+	w.Header().Set("X-Classification", alert.Classification)
+	s.publishEvent("dco.alert_received", alert)
+	writeJSON(w, http.StatusCreated, alert)
+}
+
+func (s *Server) autoCreateIOCs(ctx context.Context, iocValues []string, source, classification, alertID string) {
+	for _, val := range iocValues {
+		iocType := inferIOCType(val)
+		_, err := s.db.Exec(ctx,
+			`INSERT INTO ioc_records (ioc_type, value, source, classification, created_by)
+			 VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT DO NOTHING`,
+			iocType, val, "siem", classification, "system")
+		if err != nil {
+			s.logger.Warn("auto-create IOC failed", "value", val, "error", err)
+		}
+	}
+	s.publishEvent("dco.enrichment_completed", map[string]any{
+		"alert_id":  alertID,
+		"ioc_count": len(iocValues),
+	})
+}
+
+func inferIOCType(value string) string {
+	// Simple heuristic IOC type detection
+	if net.ParseIP(value) != nil {
+		return "ip"
+	}
+	if len(value) == 32 && isHex(value) {
+		return "hash_md5"
+	}
+	if len(value) == 40 && isHex(value) {
+		return "hash_sha1"
+	}
+	if len(value) == 64 && isHex(value) {
+		return "hash_sha256"
+	}
+	if strings.HasPrefix(value, "http://") || strings.HasPrefix(value, "https://") {
+		return "url"
+	}
+	if strings.Contains(value, "@") && strings.Contains(value, ".") {
+		return "email"
+	}
+	if strings.Contains(value, ".") && !strings.Contains(value, "/") && !strings.Contains(value, " ") && !strings.Contains(value, "\\") {
+		// Distinguish domains from filenames: common file extensions indicate file_name
+		lower := strings.ToLower(value)
+		fileExts := []string{".exe", ".dll", ".bat", ".cmd", ".ps1", ".sh", ".py", ".js",
+			".doc", ".docx", ".xls", ".xlsx", ".pdf", ".zip", ".rar", ".7z",
+			".iso", ".img", ".bin", ".dat", ".tmp", ".log", ".vbs", ".wsf",
+			".hta", ".scr", ".pif", ".msi", ".jar", ".war", ".class", ".so", ".dylib"}
+		isFile := false
+		for _, ext := range fileExts {
+			if strings.HasSuffix(lower, ext) {
+				isFile = true
+				break
+			}
+		}
+		if !isFile {
+			return "domain"
+		}
+	}
+	return "file_name"
+}
+
+func isHex(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — Alert Batch Ingest
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleIngestAlertBatch(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Classification", "UNCLASSIFIED")
+
+	// Auth check: require X-User-ID or Bearer token
+	if !requireIngestAuth(w, r) {
+		return
+	}
+
+	// Rate limit: 100 alerts/min per source IP
+	if !checkIngestRateLimit(w, r) {
+		return
+	}
+
+	// Enclave enforcement: alerts don't originate on high side
+	if enclave == "high" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION",
+			"Alert ingest not available on high-side enclave")
+		return
+	}
+
+	var reqs []IngestAlertRequest
+	if err := json.NewDecoder(r.Body).Decode(&reqs); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body — expected array of alerts")
+		return
+	}
+	if len(reqs) == 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "At least one alert is required")
+		return
+	}
+	if len(reqs) > 100 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "Batch size exceeds maximum of 100")
+		return
+	}
+
+	var ingested []Alert
+	var errors []map[string]any
+
+	for i, req := range reqs {
+		if req.SourceSystem == "" || !validAlertSourceSystems[req.SourceSystem] {
+			errors = append(errors, map[string]any{"index": i, "error": "invalid or missing source_system"})
+			continue
+		}
+		if req.Severity == "" || !validAlertSeverities[req.Severity] {
+			errors = append(errors, map[string]any{"index": i, "error": "invalid or missing severity"})
+			continue
+		}
+		if req.Title == "" {
+			errors = append(errors, map[string]any{"index": i, "error": "title is required"})
+			continue
+		}
+
+		classification := req.Classification
+		if classification == "" {
+			classification = "UNCLASSIFIED"
+		}
+		mitreTechniques := req.MitreTechniques
+		if mitreTechniques == nil {
+			mitreTechniques = []string{}
+		}
+		iocValues := req.IOCValues
+		if iocValues == nil {
+			iocValues = []string{}
+		}
+
+		rawPayloadBytes := marshalJSONB(req.RawPayload)
+
+		var alertID string
+		err := s.db.QueryRow(r.Context(),
+			`INSERT INTO alerts (external_id, source_system, severity, title, description,
+			 raw_payload, mitre_techniques, ioc_values, endpoint_id, operation_id, classification)
+			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING id`,
+			req.ExternalID, req.SourceSystem, req.Severity, req.Title, req.Description,
+			rawPayloadBytes, mitreTechniques, iocValues, req.EndpointID, req.OperationID,
+			classification).Scan(&alertID)
+		if err != nil {
+			s.logger.Warn("batch alert ingest failed", "index", i, "error", err)
+			errors = append(errors, map[string]any{"index": i, "error": "insert failed"})
+			continue
+		}
+
+		if len(iocValues) > 0 {
+			s.autoCreateIOCs(r.Context(), iocValues, req.SourceSystem, classification, alertID)
+		}
+
+		row := s.db.QueryRow(r.Context(),
+			fmt.Sprintf("SELECT %s FROM alerts WHERE id = $1", alertSelectCols), alertID)
+		alert, err := scanAlert(row)
+		if err != nil {
+			s.logger.Warn("batch alert fetch failed", "index", i, "error", err)
+			continue
+		}
+
+		s.publishEvent("dco.alert_received", alert)
+		ingested = append(ingested, alert)
+	}
+
+	if ingested == nil {
+		ingested = []Alert{}
+	}
+	if errors == nil {
+		errors = []map[string]any{}
+	}
+
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ingested": ingested,
+		"errors":   errors,
+		"total":    len(reqs),
+		"success":  len(ingested),
+		"failed":   len(errors),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — Alert List / Get / Update / Escalate
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleListAlerts(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Classification", "UNCLASSIFIED")
+
+	page, pageSize, offset := parseDCOPagination(r)
+
+	where := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if sev := r.URL.Query().Get("severity"); sev != "" {
+		where = append(where, fmt.Sprintf("severity = $%d", argIdx))
+		args = append(args, sev)
+		argIdx++
+	}
+	if src := r.URL.Query().Get("source_system"); src != "" {
+		where = append(where, fmt.Sprintf("source_system = $%d", argIdx))
+		args = append(args, src)
+		argIdx++
+	}
+	if st := r.URL.Query().Get("status"); st != "" {
+		where = append(where, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, st)
+		argIdx++
+	}
+	if mt := r.URL.Query().Get("mitre_technique"); mt != "" {
+		where = append(where, fmt.Sprintf("$%d = ANY(mitre_techniques)", argIdx))
+		args = append(args, mt)
+		argIdx++
+	}
+	if sd := r.URL.Query().Get("start_date"); sd != "" {
+		where = append(where, fmt.Sprintf("created_at >= $%d", argIdx))
+		args = append(args, sd)
+		argIdx++
+	}
+	if ed := r.URL.Query().Get("end_date"); ed != "" {
+		where = append(where, fmt.Sprintf("created_at <= $%d", argIdx))
+		args = append(args, ed)
+		argIdx++
+	}
+
+	// Enclave enforcement: filter out SECRET alerts on low side
+	if os.Getenv("ENCLAVE") == "low" {
+		where = append(where, "classification != 'SECRET'")
+	}
+
+	whereClause := ""
+	if len(where) > 0 {
+		whereClause = "WHERE " + strings.Join(where, " AND ")
+	}
+
+	args = append(args, pageSize, offset)
+	query := fmt.Sprintf("SELECT %s FROM alerts %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d",
+		alertSelectCols, whereClause, argIdx, argIdx+1)
+
+	rows, err := s.db.Query(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("list alerts query failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to query alerts")
+		return
+	}
+	defer rows.Close()
+
+	var alerts []Alert
+	for rows.Next() {
+		a, err := scanAlert(rows)
+		if err != nil {
+			s.logger.Error("scan alert failed", "error", err)
+			continue
+		}
+		alerts = append(alerts, a)
+	}
+	if alerts == nil {
+		alerts = []Alert{}
+	}
+
+	// Count query
+	countArgs := args[:len(args)-2] // strip LIMIT/OFFSET args
+	var total int
+	countQuery := fmt.Sprintf("SELECT count(*) FROM alerts %s", whereClause)
+	if err := s.db.QueryRow(r.Context(), countQuery, countArgs...).Scan(&total); err != nil {
+		s.logger.Error("count alerts failed", "error", err)
+		total = len(alerts)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": alerts,
+		"pagination": map[string]int{
+			"page":      page,
+			"page_size": pageSize,
+			"total":     total,
+		},
+	})
+}
+
+func (s *Server) handleGetAlert(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf("SELECT %s FROM alerts WHERE id = $1", alertSelectCols), id)
+	alert, err := scanAlert(row)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Alert not found")
+			return
+		}
+		s.logger.Error("get alert failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get alert")
+		return
+	}
+
+	// Enclave enforcement: SECRET alerts not visible on low side
+	if os.Getenv("ENCLAVE") == "low" && alert.Classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION",
+			"SECRET alerts are not available on the low-side enclave")
+		return
+	}
+
+	w.Header().Set("X-Classification", alert.Classification)
+	writeJSON(w, http.StatusOK, alert)
+}
+
+func (s *Server) handleUpdateAlert(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	var req UpdateAlertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	setClauses := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Status != nil {
+		if !validAlertStatuses[*req.Status] {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+				"status must be one of: new, acknowledged, investigating, resolved, false_positive")
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, *req.Status)
+		argIdx++
+	}
+	if req.AssignedTo != nil {
+		setClauses = append(setClauses, fmt.Sprintf("assigned_to = $%d", argIdx))
+		args = append(args, *req.AssignedTo)
+		argIdx++
+	}
+	if req.Classification != nil {
+		// Classification upgrade-only enforcement
+		var currentClassification string
+		if err := s.db.QueryRow(r.Context(),
+			"SELECT classification FROM alerts WHERE id = $1", id).Scan(&currentClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Alert not found")
+			return
+		}
+		if classificationRank(*req.Classification) < classificationRank(currentClassification) {
+			writeError(w, http.StatusForbidden, "CLASSIFICATION_DOWNGRADE",
+				"Cannot downgrade classification from "+currentClassification+" to "+*req.Classification)
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, *req.Classification)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "No fields to update")
+		return
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+	query := fmt.Sprintf("UPDATE alerts SET %s WHERE id = $%d",
+		strings.Join(setClauses, ", "), argIdx)
+	args = append(args, id)
+
+	result, err := s.db.Exec(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("update alert failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to update alert")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Alert not found")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf("SELECT %s FROM alerts WHERE id = $1", alertSelectCols), id)
+	alert, err := scanAlert(row)
+	if err != nil {
+		s.logger.Error("fetch updated alert failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch updated alert")
+		return
+	}
+
+	w.Header().Set("X-Classification", alert.Classification)
+	writeJSON(w, http.StatusOK, alert)
+}
+
+func (s *Server) handleEscalateAlert(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	var req EscalateAlertRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.Title == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "title is required")
+		return
+	}
+	if req.Severity == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "severity is required")
+		return
+	}
+
+	// Verify alert exists
+	var alertClassification string
+	err := s.db.QueryRow(r.Context(),
+		"SELECT classification FROM alerts WHERE id = $1", id).Scan(&alertClassification)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Alert not found")
+		return
+	}
+
+	// Create incident ticket linked to the alert
+	userID := getUserID(r)
+	if userID == "" {
+		userID = "system"
+	}
+
+	var ticketID string
+	err = s.db.QueryRow(r.Context(),
+		`INSERT INTO tickets (title, description, type, priority, status, classification,
+		 alert_source, alert_ids, incident_severity, created_by, assigned_to)
+		 VALUES ($1, $2, 'incident', $3, 'open', $4, 'alert_escalation', ARRAY[$5]::uuid[], $6, $7, $8)
+		 RETURNING id`,
+		req.Title,
+		fmt.Sprintf("Escalated from alert %s", id),
+		req.Severity,
+		alertClassification,
+		id,
+		req.Severity,
+		userID,
+		req.AssignedTo).Scan(&ticketID)
+	if err != nil {
+		s.logger.Error("create incident ticket failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create incident ticket")
+		return
+	}
+
+	// Update alert with incident ticket ID
+	_, err = s.db.Exec(r.Context(),
+		"UPDATE alerts SET incident_ticket_id = $1, status = 'investigating', updated_at = NOW() WHERE id = $2",
+		ticketID, id)
+	if err != nil {
+		s.logger.Warn("failed to link alert to ticket", "alert_id", id, "ticket_id", ticketID, "error", err)
+	}
+
+	s.publishEvent("dco.incident_created", map[string]any{
+		"alert_id":  id,
+		"ticket_id": ticketID,
+		"title":     req.Title,
+		"severity":  req.Severity,
+	})
+
+	w.Header().Set("X-Classification", alertClassification)
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"ticket_id":      ticketID,
+		"alert_id":       id,
+		"title":          req.Title,
+		"severity":       req.Severity,
+		"classification": alertClassification,
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Handlers — IOC CRUD
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleListIOCs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Classification", "UNCLASSIFIED")
+
+	page, pageSize, offset := parseDCOPagination(r)
+
+	where := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if it := r.URL.Query().Get("ioc_type"); it != "" {
+		where = append(where, fmt.Sprintf("ioc_type = $%d", argIdx))
+		args = append(args, it)
+		argIdx++
+	}
+	if tl := r.URL.Query().Get("threat_level"); tl != "" {
+		where = append(where, fmt.Sprintf("threat_level = $%d", argIdx))
+		args = append(args, tl)
+		argIdx++
+	}
+	if ia := r.URL.Query().Get("is_active"); ia != "" {
+		where = append(where, fmt.Sprintf("is_active = $%d", argIdx))
+		args = append(args, ia == "true")
+		argIdx++
+	}
+	if tags := r.URL.Query().Get("tags"); tags != "" {
+		where = append(where, fmt.Sprintf("tags && $%d", argIdx))
+		args = append(args, strings.Split(tags, ","))
+		argIdx++
+	}
+	if val := r.URL.Query().Get("value"); val != "" {
+		where = append(where, fmt.Sprintf("value ILIKE $%d", argIdx))
+		args = append(args, "%"+val+"%")
+		argIdx++
+	}
+
+	// Enclave enforcement: filter out SECRET IOCs on low side
+	if os.Getenv("ENCLAVE") == "low" {
+		where = append(where, "classification != 'SECRET'")
+	}
+
+	whereClause := ""
+	if len(where) > 0 {
+		whereClause = "WHERE " + strings.Join(where, " AND ")
+	}
+
+	args = append(args, pageSize, offset)
+	query := fmt.Sprintf("SELECT %s FROM ioc_records %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d",
+		iocSelectCols, whereClause, argIdx, argIdx+1)
+
+	rows, err := s.db.Query(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("list IOCs query failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to query IOCs")
+		return
+	}
+	defer rows.Close()
+
+	var iocs []IOCRecord
+	for rows.Next() {
+		ioc, err := scanIOC(rows)
+		if err != nil {
+			s.logger.Error("scan IOC failed", "error", err)
+			continue
+		}
+		iocs = append(iocs, ioc)
+	}
+	if iocs == nil {
+		iocs = []IOCRecord{}
+	}
+
+	countArgs := args[:len(args)-2]
+	var total int
+	countQuery := fmt.Sprintf("SELECT count(*) FROM ioc_records %s", whereClause)
+	if err := s.db.QueryRow(r.Context(), countQuery, countArgs...).Scan(&total); err != nil {
+		s.logger.Error("count IOCs failed", "error", err)
+		total = len(iocs)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": iocs,
+		"pagination": map[string]int{
+			"page":      page,
+			"page_size": pageSize,
+			"total":     total,
+		},
+	})
+}
+
+func (s *Server) handleCreateIOC(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Classification", "UNCLASSIFIED")
+
+	var req CreateIOCRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	if req.IOCType == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "ioc_type is required")
+		return
+	}
+	if !validIOCTypes[req.IOCType] {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"ioc_type must be one of: ip, domain, hash_md5, hash_sha1, hash_sha256, url, email, file_name, registry_key, mutex")
+		return
+	}
+	if req.Value == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "value is required")
+		return
+	}
+
+	source := req.Source
+	if source == "" {
+		source = "manual"
+	}
+	if !validIOCSources[source] {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"source must be one of: manual, siem, threat_feed, investigation")
+		return
+	}
+
+	threatLevel := req.ThreatLevel
+	if threatLevel == "" {
+		threatLevel = "unknown"
+	}
+	if !validIOCThreatLevels[threatLevel] {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"threat_level must be one of: critical, high, medium, low, unknown")
+		return
+	}
+
+	classification := req.Classification
+	if classification == "" {
+		classification = "UNCLASSIFIED"
+	}
+
+	mitreTechniques := req.MitreTechniques
+	if mitreTechniques == nil {
+		mitreTechniques = []string{}
+	}
+	tags := req.Tags
+	if tags == nil {
+		tags = []string{}
+	}
+
+	userID := getUserID(r)
+
+	var iocID string
+	err := s.db.QueryRow(r.Context(),
+		`INSERT INTO ioc_records (ioc_type, value, description, source, threat_level,
+		 mitre_techniques, tags, expiry, classification, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+		req.IOCType, req.Value, req.Description, source, threatLevel,
+		mitreTechniques, tags, req.Expiry, classification, userID).Scan(&iocID)
+	if err != nil {
+		s.logger.Error("create IOC failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create IOC")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf("SELECT %s FROM ioc_records WHERE id = $1", iocSelectCols), iocID)
+	ioc, err := scanIOC(row)
+	if err != nil {
+		s.logger.Error("fetch created IOC failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch created IOC")
+		return
+	}
+
+	w.Header().Set("X-Classification", ioc.Classification)
+	s.publishEvent("dco.ioc_created", ioc)
+	writeJSON(w, http.StatusCreated, ioc)
+}
+
+func (s *Server) handleUpdateIOC(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	var req UpdateIOCRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	setClauses := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Description != nil {
+		setClauses = append(setClauses, fmt.Sprintf("description = $%d", argIdx))
+		args = append(args, *req.Description)
+		argIdx++
+	}
+	if req.ThreatLevel != nil {
+		if !validIOCThreatLevels[*req.ThreatLevel] {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+				"threat_level must be one of: critical, high, medium, low, unknown")
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("threat_level = $%d", argIdx))
+		args = append(args, *req.ThreatLevel)
+		argIdx++
+	}
+	if req.MitreTechniques != nil {
+		setClauses = append(setClauses, fmt.Sprintf("mitre_techniques = $%d", argIdx))
+		args = append(args, *req.MitreTechniques)
+		argIdx++
+	}
+	if req.Tags != nil {
+		setClauses = append(setClauses, fmt.Sprintf("tags = $%d", argIdx))
+		args = append(args, *req.Tags)
+		argIdx++
+	}
+	if req.Expiry != nil {
+		setClauses = append(setClauses, fmt.Sprintf("expiry = $%d", argIdx))
+		args = append(args, *req.Expiry)
+		argIdx++
+	}
+	if req.IsActive != nil {
+		setClauses = append(setClauses, fmt.Sprintf("is_active = $%d", argIdx))
+		args = append(args, *req.IsActive)
+		argIdx++
+	}
+	if req.Classification != nil {
+		// Classification upgrade-only enforcement
+		var currentClassification string
+		if err := s.db.QueryRow(r.Context(),
+			"SELECT classification FROM ioc_records WHERE id = $1", id).Scan(&currentClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "IOC not found")
+			return
+		}
+		if classificationRank(*req.Classification) < classificationRank(currentClassification) {
+			writeError(w, http.StatusForbidden, "CLASSIFICATION_DOWNGRADE",
+				"Cannot downgrade classification")
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, *req.Classification)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "No fields to update")
+		return
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+	query := fmt.Sprintf("UPDATE ioc_records SET %s WHERE id = $%d",
+		strings.Join(setClauses, ", "), argIdx)
+	args = append(args, id)
+
+	result, err := s.db.Exec(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("update IOC failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to update IOC")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "IOC not found")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		fmt.Sprintf("SELECT %s FROM ioc_records WHERE id = $1", iocSelectCols), id)
+	ioc, err := scanIOC(row)
+	if err != nil {
+		s.logger.Error("fetch updated IOC failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch updated IOC")
+		return
+	}
+
+	w.Header().Set("X-Classification", ioc.Classification)
+	writeJSON(w, http.StatusOK, ioc)
+}
+
+func (s *Server) handleDeactivateIOC(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	result, err := s.db.Exec(r.Context(),
+		"UPDATE ioc_records SET is_active = false, updated_at = NOW() WHERE id = $1", id)
+	if err != nil {
+		s.logger.Error("deactivate IOC failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to deactivate IOC")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "IOC not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"id":        id,
+		"is_active": false,
+		"message":   "IOC deactivated",
+	})
+}
+
+func (s *Server) handleSearchIOCs(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("X-Classification", "UNCLASSIFIED")
+
+	var req SearchIOCRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.Value == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "value is required")
+		return
+	}
+
+	where := []string{"(value = $1 OR value ILIKE $2)"}
+	args := []any{req.Value, "%" + req.Value + "%"}
+	argIdx := 3
+
+	if req.IOCType != nil && *req.IOCType != "" {
+		where = append(where, fmt.Sprintf("ioc_type = $%d", argIdx))
+		args = append(args, *req.IOCType)
+		argIdx++
+	}
+
+	// Enclave enforcement: filter out SECRET IOCs on low side
+	if os.Getenv("ENCLAVE") == "low" {
+		where = append(where, "classification != 'SECRET'")
+	}
+
+	query := fmt.Sprintf("SELECT %s FROM ioc_records WHERE %s ORDER BY created_at DESC LIMIT 100",
+		iocSelectCols, strings.Join(where, " AND "))
+
+	rows, err := s.db.Query(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("search IOCs query failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to search IOCs")
+		return
+	}
+	defer rows.Close()
+
+	var iocs []IOCRecord
+	for rows.Next() {
+		ioc, err := scanIOC(rows)
+		if err != nil {
+			s.logger.Error("scan IOC failed", "error", err)
+			continue
+		}
+		iocs = append(iocs, ioc)
+	}
+	if iocs == nil {
+		iocs = []IOCRecord{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"data": iocs})
+}
+
+// ---------------------------------------------------------------------------
 
 func (s *Server) Start() {
 	mux := http.NewServeMux()
@@ -4484,6 +5751,21 @@ func (s *Server) Start() {
 	mux.HandleFunc("PATCH /api/v1/import-parsers/{id}", s.handleUpdateImportParser)
 	mux.HandleFunc("DELETE /api/v1/import-parsers/{id}", s.handleDeleteImportParser)
 	mux.HandleFunc("POST /api/v1/import-parsers/{id}/test", s.handleTestImportParser)
+
+	// DCO/SOC — Alerts
+	mux.HandleFunc("POST /api/v1/endpoints/alerts/ingest", s.handleIngestAlert)
+	mux.HandleFunc("POST /api/v1/endpoints/alerts/ingest/batch", s.handleIngestAlertBatch)
+	mux.HandleFunc("GET /api/v1/endpoints/alerts", s.handleListAlerts)
+	mux.HandleFunc("GET /api/v1/endpoints/alerts/{id}", s.handleGetAlert)
+	mux.HandleFunc("PATCH /api/v1/endpoints/alerts/{id}", s.handleUpdateAlert)
+	mux.HandleFunc("POST /api/v1/endpoints/alerts/{id}/escalate", s.handleEscalateAlert)
+
+	// DCO/SOC — IOCs
+	mux.HandleFunc("GET /api/v1/endpoints/iocs", s.handleListIOCs)
+	mux.HandleFunc("POST /api/v1/endpoints/iocs", s.handleCreateIOC)
+	mux.HandleFunc("PATCH /api/v1/endpoints/iocs/{id}", s.handleUpdateIOC)
+	mux.HandleFunc("DELETE /api/v1/endpoints/iocs/{id}", s.handleDeactivateIOC)
+	mux.HandleFunc("POST /api/v1/endpoints/iocs/search", s.handleSearchIOCs)
 
 	handler := maxBodyMiddleware(1<<20, mux) // 1 MB
 

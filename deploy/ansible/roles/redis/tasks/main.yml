@@ -1,0 +1,54 @@
+---
+# Redis role — deploy Redis 7 with AOF + RDB persistence
+
+- name: Create Redis data directory
+  ansible.builtin.file:
+    path: "{{ ems_home }}/data/redis"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0700"
+
+- name: Pull Redis image
+  community.docker.docker_image:
+    name: "redis:{{ redis_version }}-alpine"
+    source: pull
+
+- name: Deploy Redis container
+  community.docker.docker_container:
+    name: "ems-redis-{{ enclave }}"
+    image: "redis:{{ redis_version }}-alpine"
+    state: started
+    restart_policy: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --requirepass {{ redis_password }}
+      --maxmemory {{ redis_maxmemory }}
+      --maxmemory-policy {{ redis_maxmemory_policy }}
+      --save 900 1
+      --save 300 10
+      --save 60 10000
+    volumes:
+      - "{{ ems_home }}/data/redis:/data"
+    ports:
+      - "{{ redis_port }}:6379"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "{{ redis_password }}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+- name: Wait for Redis to be healthy
+  ansible.builtin.command:
+    cmd: >
+      docker exec ems-redis-{{ enclave }}
+      redis-cli -a {{ redis_password }} ping
+  register: redis_ready
+  retries: 15
+  delay: 2
+  until: redis_ready.stdout is search("PONG")
+  changed_when: false
+  no_log: true

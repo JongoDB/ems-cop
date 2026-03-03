@@ -1,0 +1,142 @@
+# EMS-COP Release Pipeline
+# Runs on: push tags v*
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/ems-cop
+
+jobs:
+  # ════════════════════════════════════════════
+  #  Build + Push Docker Images
+  # ════════════════════════════════════════════
+  build-and-push:
+    name: "Build / ${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth
+          - workflow-engine
+          - ticket
+          - dashboard
+          - c2-gateway
+          - audit
+          - notification
+          - endpoint
+          - ws-relay
+          - frontend
+        include:
+          - service: auth
+            context: ./services/auth
+          - service: workflow-engine
+            context: ./services/workflow-engine
+          - service: ticket
+            context: ./services/ticket
+          - service: dashboard
+            context: ./services/dashboard
+          - service: c2-gateway
+            context: ./services/c2-gateway
+          - service: audit
+            context: ./services/audit
+          - service: notification
+            context: ./services/notification
+          - service: endpoint
+            context: ./services/endpoint
+          - service: ws-relay
+            context: ./services/ws-relay
+          - service: frontend
+            context: ./frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:${{ github.ref_name }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}/${{ matrix.service }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+  # ════════════════════════════════════════════
+  #  Package Helm Chart
+  # ════════════════════════════════════════════
+  helm-package:
+    name: Helm Package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: "v3.14.0"
+
+      - name: Lint chart
+        run: helm lint charts/ems-cop/
+
+      - name: Package chart
+        run: helm package charts/ems-cop/ --destination .helm-packages/
+
+      - name: Upload chart artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: helm-chart
+          path: .helm-packages/*.tgz
+
+  # ════════════════════════════════════════════
+  #  Create GitHub Release
+  # ════════════════════════════════════════════
+  github-release:
+    name: GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-and-push, helm-package]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Helm chart artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: helm-chart
+          path: .helm-packages/
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          generate_release_notes: true
+          files: .helm-packages/*.tgz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

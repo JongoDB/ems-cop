@@ -1,0 +1,43 @@
+---
+# Sliver role — deploy Sliver C2 server (low-side only)
+# Bridges ems-net and endpoint-net
+
+- name: Verify low-side only deployment
+  ansible.builtin.assert:
+    that: enclave == "low"
+    fail_msg: "Sliver C2 must only be deployed on the low-side enclave"
+
+- name: Create Sliver directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0700"
+  loop:
+    - "{{ ems_home }}/data/sliver/config"
+    - "{{ ems_home }}/data/sliver/builds"
+
+- name: Build Sliver image from repo
+  community.docker.docker_image:
+    name: ems-sliver
+    build:
+      path: "{{ playbook_dir }}/../../sliver"
+      dockerfile: Dockerfile
+    source: build
+
+- name: Deploy Sliver container
+  community.docker.docker_container:
+    name: "ems-sliver-{{ enclave }}"
+    image: ems-sliver
+    state: started
+    restart_policy: unless-stopped
+    volumes:
+      - "{{ ems_home }}/data/sliver/config:/home/sliver/.sliver"
+      - "{{ ems_home }}/data/sliver/builds:/home/sliver/builds"
+    ports:
+      - "{{ sliver_grpc_port }}:31337"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+      - name: "endpoint-net-{{ enclave }}"
+  when: sliver_enabled | default(false)

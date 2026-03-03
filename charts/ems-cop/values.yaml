@@ -204,6 +204,49 @@ enclave:
   mode: ""            # "", "low", or "high" — empty = single-enclave dev mode
   ctiRelayUrl: ""     # URL to CTI relay service (e.g., "http://cti-relay:3010")
 
+# ════════════════════════════════════════════
+#  Network Policy
+# ════════════════════════════════════════════
+networkPolicy:
+  enabled: false  # Enable per-service network policies for enclave isolation
+
+# ════════════════════════════════════════════
+#  Horizontal Pod Autoscaler
+# ════════════════════════════════════════════
+hpa:
+  enabled: false  # Enable HPA for stateless services
+  minReplicas: 1  # 2 for staging/prod
+  maxReplicas: 5
+  targetCPUUtilization: 70
+  targetMemoryUtilization: 80
+
+# ════════════════════════════════════════════
+#  Pod Disruption Budget
+# ════════════════════════════════════════════
+pdb:
+  enabled: false  # Enable PDB for all services
+  minAvailable: 1
+
+# ════════════════════════════════════════════
+#  Service Accounts
+# ════════════════════════════════════════════
+serviceAccount:
+  create: false  # Create per-service ServiceAccounts with RBAC
+  annotations: {}
+
+# ════════════════════════════════════════════
+#  DCO / SOC Configuration (M13)
+# ════════════════════════════════════════════
+dco:
+  alertIngestion:
+    enabled: false
+  iocManagement:
+    enabled: false
+    defaultSeverity: medium
+  playbookAutomation:
+    enabled: false
+    maxConcurrentExecutions: 10
+
 # Ingress configuration
 ingress:
   traefik:

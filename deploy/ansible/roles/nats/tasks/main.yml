@@ -1,0 +1,48 @@
+---
+# NATS role — deploy NATS with JetStream enabled
+
+- name: Create NATS data directory
+  ansible.builtin.file:
+    path: "{{ ems_home }}/data/nats"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0700"
+
+- name: Pull NATS image
+  community.docker.docker_image:
+    name: "nats:{{ nats_version }}-alpine"
+    source: pull
+
+- name: Deploy NATS container
+  community.docker.docker_container:
+    name: "ems-nats-{{ enclave }}"
+    image: "nats:{{ nats_version }}-alpine"
+    state: started
+    restart_policy: unless-stopped
+    command: >
+      --jetstream
+      --store_dir /data
+      --http_port {{ nats_monitor_port }}
+    volumes:
+      - "{{ ems_home }}/data/nats:/data"
+    ports:
+      - "{{ nats_client_port }}:4222"
+      - "{{ nats_monitor_port }}:{{ nats_monitor_port }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:{{ nats_monitor_port }}/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+- name: Wait for NATS to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ nats_monitor_port }}/healthz"
+    method: GET
+  register: nats_health
+  retries: 15
+  delay: 2
+  until: nats_health.status == 200
+  changed_when: false

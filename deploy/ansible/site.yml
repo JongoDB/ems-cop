@@ -1,0 +1,66 @@
+---
+# EMS-COP Full Stack Deployment
+# Usage:
+#   ansible-playbook site.yml                          # Full deploy (dev)
+#   ansible-playbook site.yml -i inventory/staging.yml # Staging deploy
+#   ansible-playbook site.yml --tags infra             # Infrastructure only
+#   ansible-playbook site.yml --tags services          # Services only
+#   ansible-playbook site.yml --limit low_enclave      # Low enclave only
+
+- name: Common setup for all hosts
+  hosts: all
+  tags: [common]
+  roles:
+    - common
+
+- name: Deploy infrastructure — Low Enclave
+  hosts: low_enclave
+  tags: [infra, low]
+  roles:
+    - postgres
+    - clickhouse
+    - redis
+    - nats
+    - minio
+    - traefik
+
+- name: Deploy infrastructure — High Enclave
+  hosts: high_enclave
+  tags: [infra, high]
+  roles:
+    - postgres
+    - clickhouse
+    - redis
+    - nats
+    - minio
+    - traefik
+
+- name: Deploy EMS services — Low Enclave
+  hosts: low_enclave
+  tags: [services, low]
+  roles:
+    - ems-services
+
+- name: Deploy EMS services — High Enclave
+  hosts: high_enclave
+  tags: [services, high]
+  roles:
+    - ems-services
+
+- name: Deploy Sliver C2 — Low Enclave only
+  hosts: low_enclave
+  tags: [sliver, low]
+  roles:
+    - sliver
+
+- name: Deploy NiFi CTI Bridge
+  hosts: cti_zone
+  tags: [cti, nifi]
+  roles:
+    - nifi
+
+- name: Deploy monitoring (optional)
+  hosts: all
+  tags: [monitoring, never]
+  roles:
+    - monitoring

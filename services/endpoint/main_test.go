@@ -2623,3 +2623,1180 @@ func TestFindingRoutesRegistered(t *testing.T) {
 		}
 	})
 }
+
+// ===========================================================================
+// DCO/SOC Tests — M13
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// Test: handleIngestAlert — validation
+// ---------------------------------------------------------------------------
+
+func TestHandleIngestAlert_ValidationErrors(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			"invalid JSON",
+			`{invalid`,
+			http.StatusBadRequest,
+			"INVALID_JSON",
+		},
+		{
+			"missing source_system",
+			`{"severity":"high","title":"test"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"invalid source_system",
+			`{"source_system":"unknown","severity":"high","title":"test"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"missing severity",
+			`{"source_system":"splunk","title":"test"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"invalid severity",
+			`{"source_system":"splunk","severity":"extreme","title":"test"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"missing title",
+			`{"source_system":"splunk","severity":"high"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-User-ID", "test-user")
+			w := httptest.NewRecorder()
+
+			s.handleIngestAlert(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+
+			var body map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode: %v", err)
+			}
+			errObj, ok := body["error"].(map[string]any)
+			if !ok {
+				t.Fatal("expected error object")
+			}
+			if errObj["code"] != tt.wantCode {
+				t.Errorf("error code = %q, want %q", errObj["code"], tt.wantCode)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleIngestAlert — enclave enforcement (high side blocked)
+// ---------------------------------------------------------------------------
+
+func TestHandleIngestAlert_HighSideBlocked(t *testing.T) {
+	old := enclave
+	enclave = "high"
+	defer func() { enclave = old }()
+
+	s := newTestServerWithLogger()
+	body := `{"source_system":"splunk","severity":"high","title":"test alert"}`
+	req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", "test-user")
+	w := httptest.NewRecorder()
+
+	s.handleIngestAlert(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+
+	var resp map[string]any
+	json.NewDecoder(w.Body).Decode(&resp)
+	errObj, ok := resp["error"].(map[string]any)
+	if !ok {
+		t.Fatal("expected error object")
+	}
+	if errObj["code"] != "ENCLAVE_RESTRICTION" {
+		t.Errorf("error code = %q, want ENCLAVE_RESTRICTION", errObj["code"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleIngestAlertBatch — validation
+// ---------------------------------------------------------------------------
+
+func TestHandleIngestAlertBatch_ValidationErrors(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			"invalid JSON",
+			`{invalid`,
+			http.StatusBadRequest,
+			"INVALID_JSON",
+		},
+		{
+			"empty array",
+			`[]`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest/batch", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-User-ID", "test-user")
+			w := httptest.NewRecorder()
+
+			s.handleIngestAlertBatch(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+
+			var body map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode: %v", err)
+			}
+			errObj, ok := body["error"].(map[string]any)
+			if !ok {
+				t.Fatal("expected error object")
+			}
+			if errObj["code"] != tt.wantCode {
+				t.Errorf("error code = %q, want %q", errObj["code"], tt.wantCode)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleIngestAlertBatch — batch size limit
+// ---------------------------------------------------------------------------
+
+func TestHandleIngestAlertBatch_MaxBatchSize(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	// Build a JSON array with 101 items
+	items := make([]string, 101)
+	for i := range items {
+		items[i] = `{"source_system":"splunk","severity":"low","title":"test"}`
+	}
+	body := "[" + strings.Join(items, ",") + "]"
+
+	req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest/batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", "test-user")
+	w := httptest.NewRecorder()
+
+	s.handleIngestAlertBatch(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleIngestAlertBatch — high side blocked
+// ---------------------------------------------------------------------------
+
+func TestHandleIngestAlertBatch_HighSideBlocked(t *testing.T) {
+	old := enclave
+	enclave = "high"
+	defer func() { enclave = old }()
+
+	s := newTestServerWithLogger()
+	body := `[{"source_system":"splunk","severity":"high","title":"test"}]`
+	req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest/batch", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", "test-user")
+	w := httptest.NewRecorder()
+
+	s.handleIngestAlertBatch(w, req)
+
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusForbidden)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleGetAlert — missing ID
+// ---------------------------------------------------------------------------
+
+func TestHandleGetAlert_MissingID(t *testing.T) {
+	s := newTestServerWithLogger()
+	req := httptest.NewRequest("GET", "/api/v1/endpoints/alerts/", nil)
+	req.SetPathValue("id", "")
+	w := httptest.NewRecorder()
+
+	s.handleGetAlert(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleUpdateAlert — validation
+// ---------------------------------------------------------------------------
+
+func TestHandleUpdateAlert_ValidationErrors(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	tests := []struct {
+		name       string
+		id         string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"missing id", "", `{"status":"resolved"}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"invalid JSON", "alert1", `{invalid`, http.StatusBadRequest, "INVALID_JSON"},
+		{"empty update", "alert1", `{}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"invalid status", "alert1", `{"status":"invalid_status"}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("PATCH", "/api/v1/endpoints/alerts/"+tt.id, strings.NewReader(tt.body))
+			req.SetPathValue("id", tt.id)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			s.handleUpdateAlert(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleEscalateAlert — validation
+// ---------------------------------------------------------------------------
+
+func TestHandleEscalateAlert_ValidationErrors(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	tests := []struct {
+		name       string
+		id         string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"missing id", "", `{"title":"test","severity":"high"}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"invalid JSON", "alert1", `{invalid`, http.StatusBadRequest, "INVALID_JSON"},
+		{"missing title", "alert1", `{"severity":"high"}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"missing severity", "alert1", `{"title":"test"}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/"+tt.id+"/escalate", strings.NewReader(tt.body))
+			req.SetPathValue("id", tt.id)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			s.handleEscalateAlert(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleCreateIOC — validation
+// ---------------------------------------------------------------------------
+
+func TestHandleCreateIOC_ValidationErrors(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			"invalid JSON",
+			`{invalid`,
+			http.StatusBadRequest,
+			"INVALID_JSON",
+		},
+		{
+			"missing ioc_type",
+			`{"value":"192.168.1.1"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"invalid ioc_type",
+			`{"ioc_type":"invalid","value":"test"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"missing value",
+			`{"ioc_type":"ip"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"invalid source",
+			`{"ioc_type":"ip","value":"1.2.3.4","source":"invalid"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+		{
+			"invalid threat_level",
+			`{"ioc_type":"ip","value":"1.2.3.4","threat_level":"extreme"}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/endpoints/iocs", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			s.handleCreateIOC(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+
+			var body map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode: %v", err)
+			}
+			errObj, ok := body["error"].(map[string]any)
+			if !ok {
+				t.Fatal("expected error object")
+			}
+			if errObj["code"] != tt.wantCode {
+				t.Errorf("error code = %q, want %q", errObj["code"], tt.wantCode)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleUpdateIOC — validation
+// ---------------------------------------------------------------------------
+
+func TestHandleUpdateIOC_ValidationErrors(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	tests := []struct {
+		name       string
+		id         string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{"missing id", "", `{"threat_level":"high"}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"invalid JSON", "ioc1", `{invalid`, http.StatusBadRequest, "INVALID_JSON"},
+		{"empty update", "ioc1", `{}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+		{"invalid threat_level", "ioc1", `{"threat_level":"extreme"}`, http.StatusBadRequest, "VALIDATION_ERROR"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("PATCH", "/api/v1/endpoints/iocs/"+tt.id, strings.NewReader(tt.body))
+			req.SetPathValue("id", tt.id)
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			s.handleUpdateIOC(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleDeactivateIOC — missing ID
+// ---------------------------------------------------------------------------
+
+func TestHandleDeactivateIOC_MissingID(t *testing.T) {
+	s := newTestServerWithLogger()
+	req := httptest.NewRequest("DELETE", "/api/v1/endpoints/iocs/", nil)
+	req.SetPathValue("id", "")
+	w := httptest.NewRecorder()
+
+	s.handleDeactivateIOC(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: handleSearchIOCs — validation
+// ---------------------------------------------------------------------------
+
+func TestHandleSearchIOCs_ValidationErrors(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+		wantCode   string
+	}{
+		{
+			"invalid JSON",
+			`{invalid`,
+			http.StatusBadRequest,
+			"INVALID_JSON",
+		},
+		{
+			"missing value",
+			`{}`,
+			http.StatusBadRequest,
+			"VALIDATION_ERROR",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/endpoints/iocs/search", strings.NewReader(tt.body))
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			s.handleSearchIOCs(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d", w.Code, tt.wantStatus)
+			}
+
+			var body map[string]any
+			if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+				t.Fatalf("failed to decode: %v", err)
+			}
+			errObj, ok := body["error"].(map[string]any)
+			if !ok {
+				t.Fatal("expected error object")
+			}
+			if errObj["code"] != tt.wantCode {
+				t.Errorf("error code = %q, want %q", errObj["code"], tt.wantCode)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: inferIOCType — heuristic type detection
+// ---------------------------------------------------------------------------
+
+func TestInferIOCType(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"IPv4 address", "192.168.1.1", "ip"},
+		{"IPv6 address", "::1", "ip"},
+		{"MD5 hash", "d41d8cd98f00b204e9800998ecf8427e", "hash_md5"},
+		{"SHA1 hash", "da39a3ee5e6b4b0d3255bfef95601890afd80709", "hash_sha1"},
+		{"SHA256 hash", "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "hash_sha256"},
+		{"HTTP URL", "http://evil.com/malware.exe", "url"},
+		{"HTTPS URL", "https://evil.com/phish", "url"},
+		{"email address", "attacker@evil.com", "email"},
+		{"domain name", "evil.com", "domain"},
+		{"subdomain", "c2.evil.com", "domain"},
+		{"file name", "malware.exe", "file_name"},
+		{"registry key", "HKLM\\Software\\Microsoft", "file_name"}, // contains backslash, no dot logic
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := inferIOCType(tt.value)
+			if got != tt.want {
+				t.Errorf("inferIOCType(%q) = %q, want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: isHex helper
+// ---------------------------------------------------------------------------
+
+func TestIsHex(t *testing.T) {
+	tests := []struct {
+		input string
+		want  bool
+	}{
+		{"abcdef0123456789", true},
+		{"ABCDEF0123456789", true},
+		{"abcDEF", true},
+		{"", true}, // empty string has no non-hex chars
+		{"xyz", false},
+		{"abcg", false},
+		{"abc 123", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := isHex(tt.input)
+			if got != tt.want {
+				t.Errorf("isHex(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: parseDCOPagination
+// ---------------------------------------------------------------------------
+
+func TestParseDCOPagination(t *testing.T) {
+	tests := []struct {
+		name         string
+		url          string
+		wantPage     int
+		wantPageSize int
+		wantOffset   int
+	}{
+		{"defaults", "/test", 1, 50, 0},
+		{"custom page", "/test?page=3", 3, 50, 100},
+		{"custom page_size", "/test?page_size=25", 1, 25, 0},
+		{"page 2 size 10", "/test?page=2&page_size=10", 2, 10, 10},
+		{"max page_size capped at 200", "/test?page_size=500", 1, 200, 0},
+		{"invalid page defaults to 1", "/test?page=-1", 1, 50, 0},
+		{"invalid page_size defaults to 50", "/test?page_size=abc", 1, 50, 0},
+		{"zero page defaults to 1", "/test?page=0", 1, 50, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", tt.url, nil)
+			page, pageSize, offset := parseDCOPagination(r)
+			if page != tt.wantPage {
+				t.Errorf("page = %d, want %d", page, tt.wantPage)
+			}
+			if pageSize != tt.wantPageSize {
+				t.Errorf("pageSize = %d, want %d", pageSize, tt.wantPageSize)
+			}
+			if offset != tt.wantOffset {
+				t.Errorf("offset = %d, want %d", offset, tt.wantOffset)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Alert struct JSON marshalling
+// ---------------------------------------------------------------------------
+
+func TestAlertStruct_JSONMarshalling(t *testing.T) {
+	desc := "Test description"
+	extID := "ext-123"
+	epID := "ep-456"
+	opID := "op-789"
+	assignedTo := "analyst1"
+	ticketID := "ticket-abc"
+
+	alert := Alert{
+		ID:               "alert-1",
+		ExternalID:       &extID,
+		SourceSystem:     "splunk",
+		Severity:         "high",
+		Title:            "Suspicious Login",
+		Description:      &desc,
+		RawPayload:       map[string]any{"key": "value"},
+		MitreTechniques:  []string{"T1110", "T1078"},
+		IOCValues:        []string{"192.168.1.1"},
+		EndpointID:       &epID,
+		OperationID:      &opID,
+		Status:           "new",
+		AssignedTo:       &assignedTo,
+		IncidentTicketID: &ticketID,
+		Classification:   "UNCLASSIFIED",
+		CreatedAt:        "2024-01-01T00:00:00Z",
+		UpdatedAt:        "2024-01-01T00:00:00Z",
+	}
+
+	data, err := json.Marshal(alert)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var unmarshalled map[string]any
+	if err := json.Unmarshal(data, &unmarshalled); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if unmarshalled["source_system"] != "splunk" {
+		t.Errorf("source_system = %v, want splunk", unmarshalled["source_system"])
+	}
+	if unmarshalled["severity"] != "high" {
+		t.Errorf("severity = %v, want high", unmarshalled["severity"])
+	}
+	if unmarshalled["status"] != "new" {
+		t.Errorf("status = %v, want new", unmarshalled["status"])
+	}
+
+	techniques, ok := unmarshalled["mitre_techniques"].([]any)
+	if !ok || len(techniques) != 2 {
+		t.Errorf("mitre_techniques = %v, want 2 elements", unmarshalled["mitre_techniques"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: IOCRecord struct JSON marshalling
+// ---------------------------------------------------------------------------
+
+func TestIOCRecordStruct_JSONMarshalling(t *testing.T) {
+	desc := "Malicious IP"
+	createdBy := "analyst1"
+	lastSeen := "2024-06-01T00:00:00Z"
+	expiry := "2024-12-31T23:59:59Z"
+
+	ioc := IOCRecord{
+		ID:              "ioc-1",
+		IOCType:         "ip",
+		Value:           "10.0.0.1",
+		Description:     &desc,
+		Source:          "manual",
+		ThreatLevel:     "high",
+		MitreTechniques: []string{"T1041"},
+		Tags:            []string{"c2", "exfil"},
+		FirstSeen:       "2024-01-01T00:00:00Z",
+		LastSeen:        &lastSeen,
+		Expiry:          &expiry,
+		IsActive:        true,
+		Classification:  "UNCLASSIFIED",
+		CreatedBy:       &createdBy,
+		CreatedAt:       "2024-01-01T00:00:00Z",
+		UpdatedAt:       "2024-01-01T00:00:00Z",
+	}
+
+	data, err := json.Marshal(ioc)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var unmarshalled map[string]any
+	if err := json.Unmarshal(data, &unmarshalled); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if unmarshalled["ioc_type"] != "ip" {
+		t.Errorf("ioc_type = %v, want ip", unmarshalled["ioc_type"])
+	}
+	if unmarshalled["value"] != "10.0.0.1" {
+		t.Errorf("value = %v, want 10.0.0.1", unmarshalled["value"])
+	}
+	if unmarshalled["is_active"] != true {
+		t.Errorf("is_active = %v, want true", unmarshalled["is_active"])
+	}
+
+	tags, ok := unmarshalled["tags"].([]any)
+	if !ok || len(tags) != 2 {
+		t.Errorf("tags = %v, want 2 elements", unmarshalled["tags"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: DCO valid enum maps
+// ---------------------------------------------------------------------------
+
+func TestValidAlertSourceSystems(t *testing.T) {
+	valid := []string{"splunk", "elastic", "crowdstrike", "generic"}
+	invalid := []string{"", "palo_alto", "SPLUNK", "Elastic"}
+
+	for _, v := range valid {
+		if !validAlertSourceSystems[v] {
+			t.Errorf("expected %q to be valid source_system", v)
+		}
+	}
+	for _, v := range invalid {
+		if validAlertSourceSystems[v] {
+			t.Errorf("expected %q to be invalid source_system", v)
+		}
+	}
+}
+
+func TestValidAlertSeverities(t *testing.T) {
+	valid := []string{"critical", "high", "medium", "low", "info"}
+	invalid := []string{"", "extreme", "CRITICAL", "High"}
+
+	for _, v := range valid {
+		if !validAlertSeverities[v] {
+			t.Errorf("expected %q to be valid severity", v)
+		}
+	}
+	for _, v := range invalid {
+		if validAlertSeverities[v] {
+			t.Errorf("expected %q to be invalid severity", v)
+		}
+	}
+}
+
+func TestValidAlertStatuses(t *testing.T) {
+	valid := []string{"new", "acknowledged", "investigating", "resolved", "false_positive"}
+	invalid := []string{"", "closed", "NEW", "open"}
+
+	for _, v := range valid {
+		if !validAlertStatuses[v] {
+			t.Errorf("expected %q to be valid status", v)
+		}
+	}
+	for _, v := range invalid {
+		if validAlertStatuses[v] {
+			t.Errorf("expected %q to be invalid status", v)
+		}
+	}
+}
+
+func TestValidIOCTypes(t *testing.T) {
+	valid := []string{"ip", "domain", "hash_md5", "hash_sha1", "hash_sha256", "url", "email", "file_name", "registry_key", "mutex"}
+	invalid := []string{"", "ipv4", "sha256", "IP"}
+
+	for _, v := range valid {
+		if !validIOCTypes[v] {
+			t.Errorf("expected %q to be valid ioc_type", v)
+		}
+	}
+	for _, v := range invalid {
+		if validIOCTypes[v] {
+			t.Errorf("expected %q to be invalid ioc_type", v)
+		}
+	}
+}
+
+func TestValidIOCSources(t *testing.T) {
+	valid := []string{"manual", "siem", "threat_feed", "investigation"}
+	invalid := []string{"", "auto", "MANUAL"}
+
+	for _, v := range valid {
+		if !validIOCSources[v] {
+			t.Errorf("expected %q to be valid source", v)
+		}
+	}
+	for _, v := range invalid {
+		if validIOCSources[v] {
+			t.Errorf("expected %q to be invalid source", v)
+		}
+	}
+}
+
+func TestValidIOCThreatLevels(t *testing.T) {
+	valid := []string{"critical", "high", "medium", "low", "unknown"}
+	invalid := []string{"", "extreme", "CRITICAL"}
+
+	for _, v := range valid {
+		if !validIOCThreatLevels[v] {
+			t.Errorf("expected %q to be valid threat_level", v)
+		}
+	}
+	for _, v := range invalid {
+		if validIOCThreatLevels[v] {
+			t.Errorf("expected %q to be invalid threat_level", v)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: DCO routes registered in Start()
+// ---------------------------------------------------------------------------
+
+func TestDCORoutesRegistered(t *testing.T) {
+	old := enclave
+	enclave = "high"
+	defer func() { enclave = old }()
+
+	srv := newTestServerWithLogger()
+
+	// Alert ingest (high side blocked)
+	t.Run("POST /alerts/ingest blocked on high", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+			strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+		req.Header.Set("X-User-ID", "test-user")
+		rec := httptest.NewRecorder()
+		srv.handleIngestAlert(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want 403", rec.Code)
+		}
+	})
+
+	// Batch ingest (high side blocked)
+	t.Run("POST /alerts/ingest/batch blocked on high", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest/batch",
+			strings.NewReader(`[{"source_system":"splunk","severity":"high","title":"test"}]`))
+		req.Header.Set("X-User-ID", "test-user")
+		rec := httptest.NewRecorder()
+		srv.handleIngestAlertBatch(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want 403", rec.Code)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Test: X-Classification header on responses
+// ---------------------------------------------------------------------------
+
+func TestDCOHandlers_XClassificationHeader(t *testing.T) {
+	old := enclave
+	enclave = "high"
+	defer func() { enclave = old }()
+
+	srv := newTestServerWithLogger()
+
+	// Ingest alert returns X-Classification header (even on 403)
+	req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+		strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+	req.Header.Set("X-User-ID", "test-user")
+	w := httptest.NewRecorder()
+	srv.handleIngestAlert(w, req)
+
+	classification := w.Header().Get("X-Classification")
+	if classification != "UNCLASSIFIED" {
+		t.Errorf("X-Classification = %q, want UNCLASSIFIED", classification)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: IngestAlertRequest struct defaults
+// ---------------------------------------------------------------------------
+
+func TestIngestAlertRequest_Defaults(t *testing.T) {
+	body := `{"source_system":"generic","severity":"info","title":"Basic alert"}`
+	var req IngestAlertRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+
+	if req.SourceSystem != "generic" {
+		t.Errorf("source_system = %q, want generic", req.SourceSystem)
+	}
+	if req.Classification != "" {
+		t.Errorf("classification should be empty (default applied in handler), got %q", req.Classification)
+	}
+	if req.MitreTechniques != nil {
+		t.Errorf("mitre_techniques should be nil when not provided, got %v", req.MitreTechniques)
+	}
+	if req.IOCValues != nil {
+		t.Errorf("ioc_values should be nil when not provided, got %v", req.IOCValues)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Security Test H-01: Alert ingest returns 401 without auth headers
+// ---------------------------------------------------------------------------
+
+func TestHandleIngestAlert_Unauthorized(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	// No auth headers at all
+	t.Run("no auth headers returns 401", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+			strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+
+		s.handleIngestAlert(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+		}
+
+		var body map[string]any
+		if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+			t.Fatalf("failed to decode: %v", err)
+		}
+		errObj, ok := body["error"].(map[string]any)
+		if !ok {
+			t.Fatal("expected error object")
+		}
+		if errObj["code"] != "UNAUTHORIZED" {
+			t.Errorf("error code = %q, want UNAUTHORIZED", errObj["code"])
+		}
+	})
+
+	// X-User-ID header passes auth (set enclave=high so it returns 403 before DB access)
+	t.Run("X-User-ID header passes auth", func(t *testing.T) {
+		old := enclave
+		enclave = "high"
+		defer func() { enclave = old }()
+
+		req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+			strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-User-ID", "siem-service")
+		w := httptest.NewRecorder()
+
+		s.handleIngestAlert(w, req)
+
+		// Should not be 401 — auth passed, gets 403 from enclave check instead
+		if w.Code == http.StatusUnauthorized {
+			t.Error("should not return 401 with X-User-ID header")
+		}
+		if w.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want %d (enclave restriction)", w.Code, http.StatusForbidden)
+		}
+	})
+
+	// Bearer token passes auth (set enclave=high so it returns 403 before DB access)
+	t.Run("Bearer token passes auth", func(t *testing.T) {
+		old := enclave
+		enclave = "high"
+		defer func() { enclave = old }()
+
+		req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+			strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer some-api-token")
+		w := httptest.NewRecorder()
+
+		s.handleIngestAlert(w, req)
+
+		// Should not be 401 — auth passed, gets 403 from enclave check instead
+		if w.Code == http.StatusUnauthorized {
+			t.Error("should not return 401 with Bearer token")
+		}
+		if w.Code != http.StatusForbidden {
+			t.Errorf("status = %d, want %d (enclave restriction)", w.Code, http.StatusForbidden)
+		}
+	})
+
+	// Empty Bearer token still fails
+	t.Run("empty Bearer token returns 401", func(t *testing.T) {
+		req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+			strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer ")
+		w := httptest.NewRecorder()
+
+		s.handleIngestAlert(w, req)
+
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+		}
+	})
+}
+
+func TestHandleIngestAlertBatch_Unauthorized(t *testing.T) {
+	s := newTestServerWithLogger()
+
+	req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest/batch",
+		strings.NewReader(`[{"source_system":"splunk","severity":"high","title":"test"}]`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	s.handleIngestAlertBatch(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+
+	var body map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode: %v", err)
+	}
+	errObj, ok := body["error"].(map[string]any)
+	if !ok {
+		t.Fatal("expected error object")
+	}
+	if errObj["code"] != "UNAUTHORIZED" {
+		t.Errorf("error code = %q, want UNAUTHORIZED", errObj["code"])
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Security Test H-01: Rate limiter returns 429 when limit exceeded
+// ---------------------------------------------------------------------------
+
+func TestIngestRateLimit(t *testing.T) {
+	// Use high-side enclave so handler returns 403 after auth+rate-limit, before DB
+	old := enclave
+	enclave = "high"
+	defer func() { enclave = old }()
+
+	s := newTestServerWithLogger()
+
+	// Reset rate limiter state
+	ingestRateLimiter.mu.Lock()
+	ingestRateLimiter.counts = make(map[string]int)
+	ingestRateLimiter.mu.Unlock()
+
+	// First 100 requests should pass rate limit (returns 403 from enclave check, not 429)
+	for i := 0; i < 100; i++ {
+		req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+			strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+		req.Header.Set("X-User-ID", "test-user")
+		req.RemoteAddr = "10.0.0.1:12345"
+		w := httptest.NewRecorder()
+		s.handleIngestAlert(w, req)
+		if w.Code == http.StatusTooManyRequests {
+			t.Errorf("request %d should not be rate limited", i+1)
+		}
+		if w.Code != http.StatusForbidden {
+			t.Errorf("request %d: status = %d, want %d (enclave restriction)", i+1, w.Code, http.StatusForbidden)
+		}
+	}
+
+	// 101st request should be rate limited (429 returned before enclave check)
+	req := httptest.NewRequest("POST", "/api/v1/endpoints/alerts/ingest",
+		strings.NewReader(`{"source_system":"splunk","severity":"high","title":"test"}`))
+	req.Header.Set("X-User-ID", "test-user")
+	req.RemoteAddr = "10.0.0.1:12345"
+	w := httptest.NewRecorder()
+	s.handleIngestAlert(w, req)
+
+	if w.Code != http.StatusTooManyRequests {
+		t.Errorf("status = %d, want %d", w.Code, http.StatusTooManyRequests)
+	}
+
+	// Reset for other tests
+	ingestRateLimiter.mu.Lock()
+	ingestRateLimiter.counts = make(map[string]int)
+	ingestRateLimiter.mu.Unlock()
+}
+
+// ---------------------------------------------------------------------------
+// Security Test H-02: IOC update rejects classification downgrade
+// ---------------------------------------------------------------------------
+
+func TestClassificationDowngradeBlocked(t *testing.T) {
+	// Test classificationRank ordering
+	if classificationRank("UNCLASS") >= classificationRank("CUI") {
+		t.Error("UNCLASS should rank lower than CUI")
+	}
+	if classificationRank("CUI") >= classificationRank("SECRET") {
+		t.Error("CUI should rank lower than SECRET")
+	}
+	if classificationRank("SECRET") <= classificationRank("CUI") {
+		t.Error("SECRET should rank higher than CUI")
+	}
+
+	// Test that downgrade would be detected
+	tests := []struct {
+		name     string
+		current  string
+		proposed string
+		allowed  bool
+	}{
+		{"UNCLASS to CUI = upgrade", "UNCLASS", "CUI", true},
+		{"UNCLASS to SECRET = upgrade", "UNCLASS", "SECRET", true},
+		{"CUI to SECRET = upgrade", "CUI", "SECRET", true},
+		{"SECRET to CUI = downgrade", "SECRET", "CUI", false},
+		{"SECRET to UNCLASS = downgrade", "SECRET", "UNCLASS", false},
+		{"CUI to UNCLASS = downgrade", "CUI", "UNCLASS", false},
+		{"same classification = allowed", "CUI", "CUI", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isAllowed := classificationRank(tt.proposed) >= classificationRank(tt.current)
+			if isAllowed != tt.allowed {
+				t.Errorf("classificationRank(%q) >= classificationRank(%q) = %v, want %v",
+					tt.proposed, tt.current, isAllowed, tt.allowed)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Security Test H-03: requireIngestAuth helper
+// ---------------------------------------------------------------------------
+
+func TestRequireIngestAuth(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    bool
+	}{
+		{"no headers", map[string]string{}, false},
+		{"X-User-ID present", map[string]string{"X-User-ID": "user1"}, true},
+		{"Bearer token present", map[string]string{"Authorization": "Bearer tok123"}, true},
+		{"empty Bearer", map[string]string{"Authorization": "Bearer "}, false},
+		{"Basic auth (not Bearer)", map[string]string{"Authorization": "Basic abc"}, false},
+		{"both headers", map[string]string{"X-User-ID": "u", "Authorization": "Bearer t"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/test", nil)
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			got := requireIngestAuth(w, req)
+			if got != tt.want {
+				t.Errorf("requireIngestAuth() = %v, want %v", got, tt.want)
+			}
+			if !got && w.Code != http.StatusUnauthorized {
+				t.Errorf("on failure, status = %d, want %d", w.Code, http.StatusUnauthorized)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Security Test H-03: extractClientIP helper
+// ---------------------------------------------------------------------------
+
+func TestExtractClientIP(t *testing.T) {
+	tests := []struct {
+		name       string
+		remoteAddr string
+		headers    map[string]string
+		want       string
+	}{
+		{"remote addr only", "192.168.1.1:1234", nil, "192.168.1.1"},
+		{"X-Forwarded-For single", "10.0.0.1:1234", map[string]string{"X-Forwarded-For": "203.0.113.1"}, "203.0.113.1"},
+		{"X-Forwarded-For chain takes rightmost", "10.0.0.1:1234", map[string]string{"X-Forwarded-For": "203.0.113.1, 198.51.100.1"}, "198.51.100.1"},
+		{"X-Real-Ip", "10.0.0.1:1234", map[string]string{"X-Real-Ip": "203.0.113.5"}, "203.0.113.5"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "/test", nil)
+			req.RemoteAddr = tt.remoteAddr
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			got := extractClientIP(req)
+			if got != tt.want {
+				t.Errorf("extractClientIP() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -1,0 +1,86 @@
+---
+# EMS-COP Teardown Playbook
+# Stops and removes all containers and optionally data volumes
+# Usage:
+#   ansible-playbook playbooks/teardown.yml                      # Containers only
+#   ansible-playbook playbooks/teardown.yml -e purge_data=true   # Containers + data
+
+- name: Teardown EMS-COP
+  hosts: low_enclave:high_enclave:cti_zone
+  tags: [teardown]
+  vars:
+    purge_data: false
+  vars_prompt:
+    - name: confirm_teardown
+      prompt: "WARNING: This will stop and remove all EMS-COP containers. Continue? (yes/no)"
+      private: false
+  pre_tasks:
+    - name: Abort if not confirmed
+      ansible.builtin.fail:
+        msg: "Teardown cancelled by user"
+      when: confirm_teardown != "yes"
+
+  tasks:
+    - name: Stop and remove EMS service containers
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - "ems-auth-{{ enclave }}"
+        - "ems-workflow-{{ enclave }}"
+        - "ems-ticket-{{ enclave }}"
+        - "ems-dashboard-{{ enclave }}"
+        - "ems-c2-gateway-{{ enclave }}"
+        - "ems-audit-{{ enclave }}"
+        - "ems-notification-{{ enclave }}"
+        - "ems-endpoint-{{ enclave }}"
+        - "ems-ws-relay-{{ enclave }}"
+        - "ems-frontend-{{ enclave }}"
+        - "ems-cti-relay-{{ enclave }}"
+      ignore_errors: true
+
+    - name: Stop and remove infrastructure containers
+      community.docker.docker_container:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - "ems-traefik-{{ enclave }}"
+        - "ems-postgres-{{ enclave }}"
+        - "ems-clickhouse-{{ enclave }}"
+        - "ems-redis-{{ enclave }}"
+        - "ems-nats-{{ enclave }}"
+        - "ems-minio-{{ enclave }}"
+        - "ems-sliver-{{ enclave }}"
+        - "ems-prometheus-{{ enclave }}"
+        - "ems-grafana-{{ enclave }}"
+      ignore_errors: true
+
+    - name: Stop NiFi (CTI zone)
+      community.docker.docker_container:
+        name: ems-nifi
+        state: absent
+      when: enclave == "cti"
+      ignore_errors: true
+
+    - name: Remove Docker networks
+      community.docker.docker_network:
+        name: "{{ item }}"
+        state: absent
+      loop:
+        - "ems-net-{{ enclave }}"
+        - "endpoint-net-{{ enclave }}"
+        - cti-net
+      ignore_errors: true
+
+    - name: Purge data volumes
+      ansible.builtin.file:
+        path: "{{ ems_home }}/data"
+        state: absent
+      when: purge_data | bool
+
+    - name: Report teardown complete
+      ansible.builtin.debug:
+        msg: >
+          Teardown complete for {{ enclave }} enclave.
+          Data purged: {{ purge_data | bool }}.
+          Backups preserved in {{ ems_home }}/backups/.

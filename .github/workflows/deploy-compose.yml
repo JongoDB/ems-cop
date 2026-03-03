@@ -1,0 +1,120 @@
+# EMS-COP Docker Compose Deployment
+# Manual trigger for deploying to a target host via SSH
+name: Deploy (Compose)
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_host:
+        description: "Target host (SSH destination, e.g., user@host)"
+        required: true
+        type: string
+      compose_file:
+        description: "Compose file to use"
+        required: true
+        type: choice
+        options:
+          - docker-compose.yml
+          - docker-compose.low.yml
+          - docker-compose.high.yml
+        default: docker-compose.yml
+      image_tag:
+        description: "Image tag to deploy (default: latest)"
+        required: false
+        type: string
+        default: latest
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository_owner }}/ems-cop
+
+jobs:
+  deploy:
+    name: Deploy to ${{ inputs.target_host }}
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$(echo '${{ inputs.target_host }}' | cut -d@ -f2)" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Copy compose files to target
+        run: |
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ inputs.compose_file }} \
+            env.template \
+            ${{ inputs.target_host }}:/opt/ems-cop/
+
+      - name: Copy Traefik config
+        run: |
+          scp -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no -r \
+            infra/traefik/ \
+            ${{ inputs.target_host }}:/opt/ems-cop/infra/traefik/
+
+      - name: Pull images and deploy
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ inputs.target_host }} << 'DEPLOY_SCRIPT'
+          set -euo pipefail
+          cd /opt/ems-cop
+
+          # Log in to GHCR
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+          # Pull latest images
+          export IMAGE_TAG="${{ inputs.image_tag }}"
+          docker compose -f ${{ inputs.compose_file }} pull
+
+          # Deploy with zero-downtime rolling update
+          docker compose -f ${{ inputs.compose_file }} up -d --remove-orphans
+
+          echo "Deployment initiated. Waiting for health checks..."
+          DEPLOY_SCRIPT
+
+      - name: Health check
+        run: |
+          ssh -i ~/.ssh/deploy_key -o StrictHostKeyChecking=no \
+            ${{ inputs.target_host }} << 'HEALTH_SCRIPT'
+          set -euo pipefail
+
+          # Wait up to 90 seconds for services to become healthy
+          MAX_WAIT=90
+          ELAPSED=0
+          while [ $ELAPSED -lt $MAX_WAIT ]; do
+            if curl -sf http://localhost/api/v1/auth/health > /dev/null 2>&1; then
+              echo "Auth service healthy after ${ELAPSED}s"
+              break
+            fi
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
+          done
+
+          if [ $ELAPSED -ge $MAX_WAIT ]; then
+            echo "::error::Health check timed out after ${MAX_WAIT}s"
+            docker compose ps
+            docker compose logs --tail=30
+            exit 1
+          fi
+
+          # Verify all critical services
+          services=("auth" "workflow-engine" "ticket" "dashboard" "audit" "notification" "endpoint")
+          for svc in "${services[@]}"; do
+            port=$(docker compose ps --format json "$svc" 2>/dev/null | jq -r '.Ports' || echo "unknown")
+            echo "Service $svc: running (ports: $port)"
+          done
+
+          echo "All health checks passed."
+          HEALTH_SCRIPT
+
+      - name: Cleanup SSH key
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

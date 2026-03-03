@@ -1,0 +1,118 @@
+---
+# EMS-COP Global Variables — shared across all enclaves
+# Override per-enclave values in low_enclave.yml / high_enclave.yml
+
+# ════════════════════════════════════════════
+#  Version & Registry
+# ════════════════════════════════════════════
+ems_version: "0.17.0"
+docker_registry: "ghcr.io/your-org/ems-cop"
+image_pull_policy: "IfNotPresent"
+
+# ════════════════════════════════════════════
+#  System User
+# ════════════════════════════════════════════
+ems_user: ems-cop
+ems_group: ems-cop
+ems_home: /opt/ems-cop
+
+# ════════════════════════════════════════════
+#  Docker
+# ════════════════════════════════════════════
+docker_version: "24.0"
+docker_compose_version: "2.24"
+
+# ════════════════════════════════════════════
+#  Network CIDRs
+# ════════════════════════════════════════════
+ems_net_cidr: "10.100.0.0/16"
+endpoint_net_cidr: "10.101.0.0/16"
+
+# ════════════════════════════════════════════
+#  PostgreSQL
+# ════════════════════════════════════════════
+postgres_version: "16"
+postgres_port: 5432
+postgres_db: ems
+postgres_user: ems_admin
+# postgres_password: set in vault or per-enclave vars (never plaintext here)
+
+# ════════════════════════════════════════════
+#  ClickHouse
+# ════════════════════════════════════════════
+clickhouse_version: "24"
+clickhouse_http_port: 8123
+clickhouse_native_port: 9000
+clickhouse_db: ems_audit
+clickhouse_user: ems_audit
+
+# ════════════════════════════════════════════
+#  Redis
+# ════════════════════════════════════════════
+redis_version: "7"
+redis_port: 6379
+redis_maxmemory: "256mb"
+redis_maxmemory_policy: "allkeys-lru"
+
+# ════════════════════════════════════════════
+#  NATS
+# ════════════════════════════════════════════
+nats_version: "2"
+nats_client_port: 4222
+nats_monitor_port: 8222
+nats_jetstream_store_dir: /data/nats
+
+# ════════════════════════════════════════════
+#  MinIO
+# ════════════════════════════════════════════
+minio_port: 9000
+minio_console_port: 9001
+minio_buckets:
+  - evidence
+  - attachments
+
+# ════════════════════════════════════════════
+#  Traefik
+# ════════════════════════════════════════════
+traefik_version: "v3.3"
+traefik_http_port: 80
+traefik_https_port: 443
+traefik_dashboard_enabled: false  # Disable in production
+
+# ════════════════════════════════════════════
+#  Service Ports
+# ════════════════════════════════════════════
+service_ports:
+  auth: 3001
+  workflow_engine: 3002
+  ticket: 3003
+  dashboard: 3004
+  c2_gateway: 3005
+  audit: 3006
+  notification: 3007
+  endpoint: 3008
+  ws_relay: 3009
+  cti_relay: 3010
+  frontend: 80
+
+# ════════════════════════════════════════════
+#  TLS
+# ════════════════════════════════════════════
+tls_enabled: true
+tls_cert_path: /etc/ems-cop/certs
+# tls_cert_file and tls_key_file: set per environment
+
+# ════════════════════════════════════════════
+#  Firewall
+# ════════════════════════════════════════════
+firewall_allowed_ports:
+  - { port: 22, proto: tcp, comment: "SSH" }
+  - { port: 80, proto: tcp, comment: "HTTP" }
+  - { port: 443, proto: tcp, comment: "HTTPS" }
+
+# ════════════════════════════════════════════
+#  Monitoring (optional)
+# ════════════════════════════════════════════
+monitoring_enabled: false
+prometheus_port: 9090
+grafana_port: 3000

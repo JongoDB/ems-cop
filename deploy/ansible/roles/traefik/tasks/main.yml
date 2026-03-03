@@ -1,0 +1,74 @@
+---
+# Traefik role — deploy Traefik reverse proxy with file-based routing
+
+- name: Create Traefik config directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0755"
+  loop:
+    - "{{ ems_home }}/config/traefik"
+    - "{{ ems_home }}/certs"
+
+- name: Copy Traefik static config
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../infra/traefik/traefik.yml"
+    dest: "{{ ems_home }}/config/traefik/traefik.yml"
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0644"
+
+- name: Copy Traefik dynamic config (enclave-specific)
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../infra/traefik/{{ traefik_dynamic_config }}"
+    dest: "{{ ems_home }}/config/traefik/dynamic.yml"
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0644"
+
+- name: Copy TLS certificates
+  ansible.builtin.copy:
+    src: "{{ item }}"
+    dest: "{{ ems_home }}/certs/"
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0600"
+  loop:
+    - "{{ tls_cert_file | default('') }}"
+    - "{{ tls_key_file | default('') }}"
+  when: tls_enabled and tls_cert_file is defined and tls_key_file is defined
+
+- name: Pull Traefik image
+  community.docker.docker_image:
+    name: "traefik:{{ traefik_version }}"
+    source: pull
+
+- name: Deploy Traefik container
+  community.docker.docker_container:
+    name: "ems-traefik-{{ enclave }}"
+    image: "traefik:{{ traefik_version }}"
+    state: started
+    restart_policy: unless-stopped
+    ports:
+      - "{{ traefik_http_port }}:80"
+      - "{{ traefik_https_port }}:443"
+    volumes:
+      - "{{ ems_home }}/config/traefik/traefik.yml:/etc/traefik/traefik.yml:ro"
+      - "{{ ems_home }}/config/traefik/dynamic.yml:/etc/traefik/dynamic.yml:ro"
+      - "{{ ems_home }}/certs:/certs:ro"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+
+- name: Wait for Traefik to be ready
+  ansible.builtin.uri:
+    url: "http://localhost:{{ traefik_http_port }}/api/v1/auth/health"
+    method: GET
+    status_code: [200, 502]
+  register: traefik_health
+  retries: 10
+  delay: 3
+  until: traefik_health.status is defined
+  changed_when: false
+  ignore_errors: true

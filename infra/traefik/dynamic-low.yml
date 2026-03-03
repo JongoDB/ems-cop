@@ -199,6 +199,49 @@ http:
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
 
+    # ── M13 DCO/SOC Routes ──
+    endpoint-alerts:
+      rule: "PathPrefix(`/api/v1/endpoints/alerts`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+
+    endpoint-iocs:
+      rule: "PathPrefix(`/api/v1/endpoints/iocs`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+
+    c2-containment:
+      rule: "PathPrefix(`/api/v1/c2/containment`)"
+      entryPoints: [web]
+      service: c2
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+
+    workflow-playbooks:
+      rule: "PathPrefix(`/api/v1/workflows/playbooks`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+
+    workflow-playbook-executions:
+      rule: "PathPrefix(`/api/v1/workflows/playbook-executions`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+
+    ticket-incidents:
+      rule: "PathPrefix(`/api/v1/tickets/incidents`)"
+      entryPoints: [web]
+      service: ticket
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 55
+
     cti-relay:
       rule: "PathPrefix(`/api/v1/cti`)"
       entryPoints: [web]

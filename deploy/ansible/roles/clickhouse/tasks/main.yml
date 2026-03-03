@@ -1,0 +1,70 @@
+---
+# ClickHouse role — deploy ClickHouse for audit log storage
+# Creates database, runs schemas from infra/db/clickhouse/
+
+- name: Create ClickHouse data directory
+  ansible.builtin.file:
+    path: "{{ ems_home }}/data/clickhouse"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0700"
+
+- name: Create ClickHouse init directory
+  ansible.builtin.file:
+    path: "{{ ems_home }}/config/clickhouse/init"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0755"
+
+- name: Copy ClickHouse schema files
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../infra/db/clickhouse/"
+    dest: "{{ ems_home }}/config/clickhouse/init/"
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0644"
+
+- name: Pull ClickHouse image
+  community.docker.docker_image:
+    name: "clickhouse/clickhouse-server:{{ clickhouse_version }}-alpine"
+    source: pull
+
+- name: Deploy ClickHouse container
+  community.docker.docker_container:
+    name: "ems-clickhouse-{{ enclave }}"
+    image: "clickhouse/clickhouse-server:{{ clickhouse_version }}-alpine"
+    state: started
+    restart_policy: unless-stopped
+    env:
+      CLICKHOUSE_DB: "{{ clickhouse_db }}"
+      CLICKHOUSE_USER: "{{ clickhouse_user }}"
+      CLICKHOUSE_PASSWORD: "{{ clickhouse_password }}"
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - "{{ ems_home }}/data/clickhouse:/var/lib/clickhouse"
+      - "{{ ems_home }}/config/clickhouse/init/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro"
+      - "{{ ems_home }}/config/clickhouse/init/002_classification.sql:/docker-entrypoint-initdb.d/002_classification.sql:ro"
+      - "{{ ems_home }}/config/clickhouse/init/003_cti_provenance.sql:/docker-entrypoint-initdb.d/003_cti_provenance.sql:ro"
+      - "{{ ems_home }}/config/clickhouse/init/004_consolidated_audit.sql:/docker-entrypoint-initdb.d/004_consolidated_audit.sql:ro"
+    ports:
+      - "{{ clickhouse_http_port }}:8123"
+      - "{{ clickhouse_native_port }}:9000"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -nv -O- 'http://127.0.0.1:8123/ping' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+- name: Wait for ClickHouse to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ clickhouse_http_port }}/ping"
+    method: GET
+  register: ch_health
+  retries: 30
+  delay: 2
+  until: ch_health.status == 200
+  changed_when: false

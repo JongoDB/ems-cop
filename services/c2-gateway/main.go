@@ -569,6 +569,12 @@ func (s *C2GatewayServer) Start() error {
 	mux.HandleFunc("GET /api/v1/c2/cross-domain/commands/{id}", s.handleGetCrossDomainCommand)
 	mux.HandleFunc("POST /api/v1/c2/cross-domain/commands/{id}/approve", s.handleApproveCrossDomainCommand)
 
+	// Containment actions (DCO/SOC M13)
+	mux.HandleFunc("POST /api/v1/c2/containment/execute", s.handleExecuteContainment)
+	mux.HandleFunc("GET /api/v1/c2/containment/actions", s.handleListContainmentActions)
+	mux.HandleFunc("GET /api/v1/c2/containment/actions/{id}", s.handleGetContainmentAction)
+	mux.HandleFunc("POST /api/v1/c2/containment/actions/{id}/rollback", s.handleRollbackContainmentAction)
+
 	// Health check
 	mux.HandleFunc("GET /health/live", s.handleHealthLive)
 	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
@@ -1670,6 +1676,13 @@ func (s *C2GatewayServer) handleVNCProxy(w http.ResponseWriter, r *http.Request)
 	host := r.PathValue("host")
 	vncPort := r.PathValue("port")
 
+	// Validate VNC port range (5900-5999 only)
+	portNum, err := strconv.Atoi(vncPort)
+	if err != nil || portNum < 5900 || portNum > 5999 {
+		writeError(w, http.StatusBadRequest, "INVALID_PORT", "VNC port must be between 5900 and 5999")
+		return
+	}
+
 	// Auth: X-User-ID header or JWT query param (WebSocket can't use ForwardAuth)
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
@@ -2517,6 +2530,431 @@ func (p *SliverProvider) OpenSession(ctx context.Context, sessionID string) (Ses
 func (p *SliverProvider) SubscribeTelemetry(ctx context.Context, filter *TelemetryFilter) (<-chan TelemetryEvent, error) {
 	ch := make(chan TelemetryEvent)
 	return ch, nil
+}
+
+// ════════════════════════════════════════════
+//  CONTAINMENT ACTIONS (DCO/SOC M13)
+// ════════════════════════════════════════════
+
+type ContainmentAction struct {
+	ID                   string  `json:"id"`
+	ActionType           string  `json:"action_type"`
+	Target               map[string]any `json:"target"`
+	IncidentTicketID     string  `json:"incident_ticket_id"`
+	PlaybookExecutionID  *string `json:"playbook_execution_id"`
+	Status               string  `json:"status"`
+	Result               map[string]any `json:"result"`
+	ExecutedBy           string  `json:"executed_by"`
+	CreatedAt            string  `json:"created_at"`
+	UpdatedAt            string  `json:"updated_at"`
+}
+
+type ExecuteContainmentRequest struct {
+	ActionType          string         `json:"action_type"`
+	Target              map[string]any `json:"target"`
+	IncidentTicketID    string         `json:"incident_ticket_id"`
+	PlaybookExecutionID string         `json:"playbook_execution_id"`
+}
+
+var validContainmentActions = map[string]bool{
+	"isolate_host":     true,
+	"kill_process":     true,
+	"block_ip":         true,
+	"disable_account":  true,
+	"quarantine_file":  true,
+}
+
+func (s *C2GatewayServer) handleExecuteContainment(w http.ResponseWriter, r *http.Request) {
+	// RBAC: Only authorized roles may execute containment actions
+	roles := r.Header.Get("X-User-Roles")
+	if !hasRole(roles, "operator", "analyst", "admin", "e3_tactical", "mission_commander") {
+		writeError(w, http.StatusForbidden, "INSUFFICIENT_ROLE",
+			"Containment actions require operator, analyst, or admin role")
+		return
+	}
+
+	// Enclave check: C2 actions are low-side only
+	if enclave == "high" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION",
+			"Containment actions can only be executed on the low-side enclave")
+		return
+	}
+
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for containment actions")
+		return
+	}
+
+	var req ExecuteContainmentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	if !validContainmentActions[req.ActionType] {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"action_type must be one of: isolate_host, kill_process, block_ip, disable_account, quarantine_file")
+		return
+	}
+
+	if req.Target == nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "target is required")
+		return
+	}
+
+	if req.IncidentTicketID == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "incident_ticket_id is required")
+		return
+	}
+
+	// Validate target has appropriate fields for action type
+	if err := validateContainmentTarget(req.ActionType, req.Target); err != nil {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+		return
+	}
+
+	userID := r.Header.Get("X-User-ID")
+
+	ctx := r.Context()
+	targetBytes, _ := json.Marshal(req.Target)
+
+	var playbookExecID *string
+	if req.PlaybookExecutionID != "" {
+		playbookExecID = &req.PlaybookExecutionID
+	}
+
+	// Insert with status 'executing'
+	var actionID string
+	var createdAt, updatedAt time.Time
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO containment_actions (action_type, target, incident_ticket_id, playbook_execution_id, status, executed_by)
+		 VALUES ($1, $2, $3, $4, 'executing', $5)
+		 RETURNING id, created_at, updated_at`,
+		req.ActionType, targetBytes, req.IncidentTicketID, playbookExecID, userID).
+		Scan(&actionID, &createdAt, &updatedAt)
+	if err != nil {
+		s.logger.Error("failed to insert containment action", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create containment action")
+		return
+	}
+
+	// Execute the containment action (mock implementation)
+	result, execErr := s.executeContainmentAction(req.ActionType, req.Target)
+
+	var finalStatus string
+	if execErr != nil {
+		finalStatus = "failed"
+		result["error"] = execErr.Error()
+	} else {
+		finalStatus = "completed"
+	}
+
+	resultBytes, _ := json.Marshal(result)
+
+	// Update status and result
+	_, _ = s.db.Exec(ctx,
+		`UPDATE containment_actions SET status = $1, result = $2, updated_at = NOW() WHERE id = $3`,
+		finalStatus, resultBytes, actionID)
+
+	// Publish event
+	s.publishCrossDomainEvent("dco.containment_executed", map[string]any{
+		"action_id":           actionID,
+		"action_type":         req.ActionType,
+		"target":              req.Target,
+		"incident_ticket_id":  req.IncidentTicketID,
+		"status":              finalStatus,
+		"executed_by":         userID,
+	})
+
+	action := ContainmentAction{
+		ID:                  actionID,
+		ActionType:          req.ActionType,
+		Target:              req.Target,
+		IncidentTicketID:    req.IncidentTicketID,
+		PlaybookExecutionID: playbookExecID,
+		Status:              finalStatus,
+		Result:              result,
+		ExecutedBy:          userID,
+		CreatedAt:           createdAt.UTC().Format(time.RFC3339),
+		UpdatedAt:           time.Now().UTC().Format(time.RFC3339),
+	}
+
+	status := http.StatusOK
+	if finalStatus == "failed" {
+		status = http.StatusInternalServerError
+	}
+
+	w.Header().Set("X-Classification", "UNCLASS")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(action)
+}
+
+func validateContainmentTarget(actionType string, target map[string]any) error {
+	hostname, _ := target["hostname"].(string)
+
+	switch actionType {
+	case "isolate_host":
+		if hostname == "" {
+			return fmt.Errorf("target.hostname is required for isolate_host")
+		}
+	case "kill_process":
+		process, _ := target["process"].(string)
+		if hostname == "" || process == "" {
+			return fmt.Errorf("target.hostname and target.process are required for kill_process")
+		}
+	case "block_ip":
+		ip, _ := target["ip"].(string)
+		if ip == "" {
+			return fmt.Errorf("target.ip is required for block_ip")
+		}
+	case "disable_account":
+		username, _ := target["username"].(string)
+		if username == "" {
+			return fmt.Errorf("target.username is required for disable_account")
+		}
+	case "quarantine_file":
+		if hostname == "" {
+			return fmt.Errorf("target.hostname is required for quarantine_file")
+		}
+	}
+	return nil
+}
+
+func (s *C2GatewayServer) executeContainmentAction(actionType string, target map[string]any) (map[string]any, error) {
+	hostname, _ := target["hostname"].(string)
+	sessionID, _ := target["session_id"].(string)
+	process, _ := target["process"].(string)
+	ip, _ := target["ip"].(string)
+	username, _ := target["username"].(string)
+
+	result := map[string]any{"action_type": actionType}
+
+	switch actionType {
+	case "isolate_host":
+		s.logger.Info("Executing host isolation", "hostname", hostname, "session_id", sessionID)
+		result["message"] = fmt.Sprintf("Host isolation executed on %s via session %s", hostname, sessionID)
+	case "kill_process":
+		s.logger.Info("Killing process", "process", process, "hostname", hostname)
+		result["message"] = fmt.Sprintf("Process %s killed on %s", process, hostname)
+	case "block_ip":
+		s.logger.Info("Blocking IP", "ip", ip, "hostname", hostname)
+		result["message"] = fmt.Sprintf("IP %s blocked on %s", ip, hostname)
+	case "disable_account":
+		s.logger.Info("Disabling account", "username", username, "hostname", hostname)
+		result["message"] = fmt.Sprintf("Account %s disabled on %s", username, hostname)
+	case "quarantine_file":
+		s.logger.Info("Quarantining file", "hostname", hostname)
+		result["message"] = fmt.Sprintf("File quarantined on %s", hostname)
+	}
+
+	return result, nil
+}
+
+func (s *C2GatewayServer) handleListContainmentActions(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for containment actions")
+		return
+	}
+
+	ctx := r.Context()
+	incidentFilter := r.URL.Query().Get("incident_ticket_id")
+	actionTypeFilter := r.URL.Query().Get("action_type")
+	statusFilter := r.URL.Query().Get("status")
+
+	page := 1
+	limit := 20
+	if p := r.URL.Query().Get("page"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			page = v
+		}
+	}
+	if l := r.URL.Query().Get("page_size"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	offset := (page - 1) * limit
+
+	conditions := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if incidentFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("incident_ticket_id = $%d", argIdx))
+		args = append(args, incidentFilter)
+		argIdx++
+	}
+	if actionTypeFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("action_type = $%d", argIdx))
+		args = append(args, actionTypeFilter)
+		argIdx++
+	}
+	if statusFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, statusFilter)
+		argIdx++
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var total int
+	_ = s.db.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM containment_actions %s", where), args...).Scan(&total)
+
+	args = append(args, limit, offset)
+	q := fmt.Sprintf(
+		`SELECT id, action_type, target, incident_ticket_id, playbook_execution_id, status, result, executed_by, created_at, updated_at
+		 FROM containment_actions %s
+		 ORDER BY created_at DESC
+		 LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
+
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		s.logger.Error("failed to list containment actions", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list containment actions")
+		return
+	}
+	defer rows.Close()
+
+	var actions []ContainmentAction
+	for rows.Next() {
+		a, err := scanContainmentAction(rows)
+		if err != nil {
+			s.logger.Error("failed to scan containment action", "error", err)
+			continue
+		}
+		actions = append(actions, a)
+	}
+	if actions == nil {
+		actions = []ContainmentAction{}
+	}
+
+	w.Header().Set("X-Classification", "UNCLASS")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"data":       actions,
+		"pagination": map[string]int{"page": page, "limit": limit, "total": total},
+	})
+}
+
+func scanContainmentAction(scanner interface{ Scan(dest ...any) error }) (ContainmentAction, error) {
+	var a ContainmentAction
+	var targetBytes, resultBytes []byte
+	var createdAt, updatedAt time.Time
+
+	err := scanner.Scan(&a.ID, &a.ActionType, &targetBytes, &a.IncidentTicketID,
+		&a.PlaybookExecutionID, &a.Status, &resultBytes, &a.ExecutedBy, &createdAt, &updatedAt)
+	if err != nil {
+		return a, err
+	}
+
+	a.Target = map[string]any{}
+	if len(targetBytes) > 0 {
+		_ = json.Unmarshal(targetBytes, &a.Target)
+	}
+	a.Result = map[string]any{}
+	if len(resultBytes) > 0 {
+		_ = json.Unmarshal(resultBytes, &a.Result)
+	}
+	a.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	a.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return a, nil
+}
+
+func (s *C2GatewayServer) handleGetContainmentAction(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for containment actions")
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		`SELECT id, action_type, target, incident_ticket_id, playbook_execution_id, status, result, executed_by, created_at, updated_at
+		 FROM containment_actions WHERE id = $1`, id)
+
+	a, err := scanContainmentAction(row)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Containment action not found")
+		return
+	}
+
+	w.Header().Set("X-Classification", "UNCLASS")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(a)
+}
+
+func (s *C2GatewayServer) handleRollbackContainmentAction(w http.ResponseWriter, r *http.Request) {
+	// RBAC: Only authorized roles may rollback containment actions
+	roles := r.Header.Get("X-User-Roles")
+	if !hasRole(roles, "operator", "analyst", "admin", "e3_tactical", "mission_commander") {
+		writeError(w, http.StatusForbidden, "INSUFFICIENT_ROLE",
+			"Containment actions require operator, analyst, or admin role")
+		return
+	}
+
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for containment actions")
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Check current status
+	var currentStatus string
+	err := s.db.QueryRow(ctx,
+		`SELECT status FROM containment_actions WHERE id = $1`, id).Scan(&currentStatus)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Containment action not found")
+		return
+	}
+
+	if currentStatus != "completed" {
+		writeError(w, http.StatusConflict, "INVALID_STATE",
+			fmt.Sprintf("Only completed actions can be rolled back (current status: %s)", currentStatus))
+		return
+	}
+
+	// Update to rolled_back
+	_, err = s.db.Exec(ctx,
+		`UPDATE containment_actions SET status = 'rolled_back', updated_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		s.logger.Error("failed to rollback containment action", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to rollback action")
+		return
+	}
+
+	userID := r.Header.Get("X-User-ID")
+
+	// Publish event
+	s.publishCrossDomainEvent("dco.containment_rolled_back", map[string]any{
+		"action_id":   id,
+		"rolled_back_by": userID,
+	})
+
+	w.Header().Set("X-Classification", "UNCLASS")
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"id":     id,
+		"status": "rolled_back",
+	})
 }
 
 // ════════════════════════════════════════════

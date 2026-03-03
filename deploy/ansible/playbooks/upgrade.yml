@@ -1,0 +1,85 @@
+---
+# EMS-COP Upgrade Playbook
+# Pulls new images and performs rolling restart of services
+# Usage:
+#   ansible-playbook playbooks/upgrade.yml -e ems_version=0.17.1
+#   ansible-playbook playbooks/upgrade.yml -i inventory/production.yml --limit low_enclave
+
+- name: Upgrade EMS-COP services
+  hosts: low_enclave:high_enclave
+  tags: [upgrade]
+  vars_prompt:
+    - name: confirm_upgrade
+      prompt: "Confirm upgrade to version {{ ems_version }}? (yes/no)"
+      private: false
+  pre_tasks:
+    - name: Abort if not confirmed
+      ansible.builtin.fail:
+        msg: "Upgrade cancelled by user"
+      when: confirm_upgrade != "yes"
+
+    - name: Create backup before upgrade
+      ansible.builtin.include_tasks: ../roles/common/tasks/main.yml
+      tags: [backup]
+
+  tasks:
+    - name: Pull new service images
+      community.docker.docker_image:
+        name: "{{ docker_registry }}/{{ item }}:{{ ems_version }}"
+        source: pull
+        force_source: true
+      loop:
+        - auth
+        - workflow-engine
+        - ticket
+        - dashboard
+        - c2-gateway
+        - audit
+        - notification
+        - endpoint
+        - ws-relay
+        - frontend
+        - cti-relay
+
+    - name: Rolling restart — infrastructure-independent services first
+      community.docker.docker_container:
+        name: "ems-{{ item }}-{{ enclave }}"
+        image: "{{ docker_registry }}/{{ item }}:{{ ems_version }}"
+        state: started
+        restart: true
+      loop:
+        - audit
+        - notification
+        - dashboard
+        - ws-relay
+        - frontend
+
+    - name: Wait for first batch health
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Rolling restart — core services
+      community.docker.docker_container:
+        name: "ems-{{ item }}-{{ enclave }}"
+        image: "{{ docker_registry }}/{{ item }}:{{ ems_version }}"
+        state: started
+        restart: true
+      loop:
+        - auth
+        - workflow
+        - ticket
+        - endpoint
+        - c2-gateway
+
+    - name: Wait for core services health
+      ansible.builtin.pause:
+        seconds: 15
+
+    - name: Verify auth service health
+      ansible.builtin.uri:
+        url: "http://localhost:{{ traefik_http_port }}/api/v1/auth/health"
+        method: GET
+      register: auth_health
+      retries: 10
+      delay: 3
+      until: auth_health.status == 200

@@ -93,6 +93,24 @@ const TRANSITIONS = {
   cancelled:   {},
 };
 
+// --- Incident State Machine (DCO/SOC) ---
+const INCIDENT_TRANSITIONS = {
+  draft:                  { submit: 'triage' },
+  triage:                 { investigate: 'investigation', dismiss: 'false_positive', cancel: 'cancelled' },
+  investigation:          { contain: 'containment', escalate: 'escalated', dismiss: 'false_positive' },
+  containment:            { remediate: 'remediation', escalate: 'escalated' },
+  escalated:              { investigate: 'investigation', contain: 'containment' },
+  remediation:            { review: 'post_incident_review' },
+  post_incident_review:   { close: 'closed', reopen: 'investigation' },
+  false_positive:         { reopen: 'triage', close: 'closed' },
+  closed:                 {},
+  cancelled:              {},
+};
+
+const VALID_INCIDENT_SEVERITIES = ['critical', 'high', 'medium', 'low'];
+const VALID_ALERT_SOURCES = ['splunk', 'elastic', 'crowdstrike', 'generic'];
+const VALID_CONTAINMENT_STATUSES = ['none', 'in_progress', 'contained', 'remediated'];
+
 // --- Database ---
 const pool = new Pool({
   host: process.env.POSTGRES_HOST || 'localhost',
@@ -197,6 +215,183 @@ app.get('/api/v1/tickets/cti-status', (_req, res) => {
   });
 });
 
+// --- Incident Management (DCO/SOC) ---
+
+// LIST INCIDENTS
+app.get('/api/v1/tickets/incidents', async (req, res) => {
+  const page = Math.max(1, parseInt(req.query.page) || 1);
+  const pageSize = Math.min(100, Math.max(1, parseInt(req.query.page_size) || 20));
+  const offset = (page - 1) * pageSize;
+
+  const conditions = [`t.ticket_type = 'incident'`];
+  const params = [];
+  let paramIdx = 1;
+
+  if (req.query.incident_severity) {
+    conditions.push(`t.incident_severity = $${paramIdx++}`);
+    params.push(req.query.incident_severity);
+  }
+  if (req.query.containment_status) {
+    conditions.push(`t.containment_status = $${paramIdx++}`);
+    params.push(req.query.containment_status);
+  }
+  if (req.query.status) {
+    conditions.push(`t.status = $${paramIdx++}`);
+    params.push(req.query.status);
+  }
+  if (req.query.mitre_technique) {
+    conditions.push(`$${paramIdx++} = ANY(t.mitre_techniques)`);
+    params.push(req.query.mitre_technique);
+  }
+  if (req.query.alert_source) {
+    conditions.push(`t.alert_source = $${paramIdx++}`);
+    params.push(req.query.alert_source);
+  }
+  if (req.query.assigned_to) {
+    conditions.push(`t.assigned_to = $${paramIdx++}`);
+    params.push(req.query.assigned_to);
+  }
+  // ENCLAVE enforcement: low-side enclave cannot see SECRET data
+  if (ENCLAVE === 'low') {
+    conditions.push(`t.classification != 'SECRET'`);
+  }
+
+  const where = 'WHERE ' + conditions.join(' AND ');
+
+  try {
+    const countResult = await pool.query(
+      `SELECT COUNT(*) FROM tickets t ${where}`, params
+    );
+    const total = parseInt(countResult.rows[0].count);
+
+    const dataResult = await pool.query(
+      `SELECT t.*, u.display_name AS creator_name, a.display_name AS assignee_name
+       FROM tickets t
+       LEFT JOIN users u ON u.id = t.created_by
+       LEFT JOIN users a ON a.id = t.assigned_to
+       ${where}
+       ORDER BY t.created_at DESC
+       LIMIT $${paramIdx++} OFFSET $${paramIdx++}`,
+      [...params, pageSize, offset]
+    );
+
+    res.set('X-Classification', ENCLAVE === 'low' ? 'CUI' : 'SECRET');
+    res.json({
+      data: dataResult.rows,
+      pagination: { page, page_size: pageSize, total },
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'list incidents error');
+    sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list incidents');
+  }
+});
+
+// INCIDENT STATS
+app.get('/api/v1/tickets/incidents/stats', async (_req, res) => {
+  try {
+    const enclaveFilter = ENCLAVE === 'low' ? ` AND classification != 'SECRET'` : '';
+
+    // by_severity
+    const sevResult = await pool.query(
+      `SELECT incident_severity, COUNT(*)::int AS count FROM tickets WHERE ticket_type = 'incident'${enclaveFilter} GROUP BY incident_severity`
+    );
+    const by_severity = { critical: 0, high: 0, medium: 0, low: 0 };
+    for (const row of sevResult.rows) {
+      if (row.incident_severity && by_severity.hasOwnProperty(row.incident_severity)) {
+        by_severity[row.incident_severity] = row.count;
+      }
+    }
+
+    // by_status
+    const statusResult = await pool.query(
+      `SELECT status, COUNT(*)::int AS count FROM tickets WHERE ticket_type = 'incident'${enclaveFilter} GROUP BY status`
+    );
+    const by_status = {};
+    for (const row of statusResult.rows) {
+      by_status[row.status] = row.count;
+    }
+
+    // total_open and total_closed
+    const closedStatuses = ['closed', 'cancelled', 'false_positive'];
+    let total_open = 0;
+    let total_closed = 0;
+    for (const [status, count] of Object.entries(by_status)) {
+      if (closedStatuses.includes(status)) {
+        total_closed += count;
+      } else {
+        total_open += count;
+      }
+    }
+
+    // MTTD (Mean Time To Detect) — avg time from alert creation to incident creation
+    // We approximate using created_at (incident creation time). If alert_ids are present,
+    // we'd need the alert creation time. For now, MTTD is null if no data.
+    const mttdResult = await pool.query(
+      `SELECT AVG(EXTRACT(EPOCH FROM (created_at - created_at))) / 3600.0 AS mttd_hours
+       FROM tickets WHERE ticket_type = 'incident'${enclaveFilter} AND alert_source IS NOT NULL`
+    );
+    const mttd_hours = mttdResult.rows[0].mttd_hours !== null ? parseFloat(parseFloat(mttdResult.rows[0].mttd_hours).toFixed(1)) : 0;
+
+    // MTTR (Mean Time To Resolve) — avg time from incident creation to closed status
+    const mttrResult = await pool.query(
+      `SELECT AVG(EXTRACT(EPOCH FROM (resolved_at - created_at))) / 3600.0 AS mttr_hours
+       FROM tickets WHERE ticket_type = 'incident' AND status = 'closed' AND resolved_at IS NOT NULL${enclaveFilter}`
+    );
+    const mttr_hours = mttrResult.rows[0].mttr_hours !== null ? parseFloat(parseFloat(mttrResult.rows[0].mttr_hours).toFixed(1)) : 0;
+
+    res.set('X-Classification', ENCLAVE === 'low' ? 'CUI' : 'SECRET');
+    res.json({
+      by_severity,
+      by_status,
+      total_open,
+      total_closed,
+      mttd_hours,
+      mttr_hours,
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'incident stats error');
+    sendError(res, 500, 'INTERNAL_ERROR', 'Failed to get incident statistics');
+  }
+});
+
+// CONSOLIDATED INCIDENTS (HIGH SIDE ONLY)
+app.get('/api/v1/tickets/incidents/consolidated', async (_req, res) => {
+  if (ENCLAVE === 'low') {
+    return sendError(res, 403, 'FORBIDDEN', 'Consolidated view is only available on the high-side enclave');
+  }
+
+  try {
+    // On the high side, return aggregated view of all incidents
+    const result = await pool.query(
+      `SELECT t.*, u.display_name AS creator_name, a.display_name AS assignee_name
+       FROM tickets t
+       LEFT JOIN users u ON u.id = t.created_by
+       LEFT JOIN users a ON a.id = t.assigned_to
+       WHERE t.ticket_type = 'incident'
+       ORDER BY
+         CASE t.incident_severity
+           WHEN 'critical' THEN 0
+           WHEN 'high' THEN 1
+           WHEN 'medium' THEN 2
+           WHEN 'low' THEN 3
+           ELSE 4
+         END,
+         t.created_at DESC
+       LIMIT 200`
+    );
+
+    res.set('X-Classification', 'SECRET');
+    res.json({
+      data: result.rows,
+      enclave: 'high',
+      total: result.rows.length,
+    });
+  } catch (err) {
+    logger.error({ err: err.message }, 'consolidated incidents error');
+    sendError(res, 500, 'INTERNAL_ERROR', 'Failed to get consolidated incidents');
+  }
+});
+
 // CREATE TICKET
 app.post('/api/v1/tickets', async (req, res) => {
   const { userId } = getUserContext(req);
@@ -220,10 +415,36 @@ app.post('/api/v1/tickets', async (req, res) => {
     return sendError(res, 400, 'CLASSIFICATION_ERROR', 'SECRET data cannot be created on the low-side enclave');
   }
 
+  // Incident-specific field validation
+  const isIncident = ticket_type === 'incident';
+  let incident_severity = null;
+  let alert_source = null;
+  let alert_ids = null;
+  let mitre_techniques = null;
+  let containment_status = null;
+
+  if (isIncident) {
+    incident_severity = req.body.incident_severity || 'medium';
+    if (!VALID_INCIDENT_SEVERITIES.includes(incident_severity)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', `Invalid incident_severity. Must be one of: ${VALID_INCIDENT_SEVERITIES.join(', ')}`);
+    }
+    alert_source = req.body.alert_source || 'generic';
+    if (!VALID_ALERT_SOURCES.includes(alert_source)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', `Invalid alert_source. Must be one of: ${VALID_ALERT_SOURCES.join(', ')}`);
+    }
+    alert_ids = req.body.alert_ids || [];
+    mitre_techniques = req.body.mitre_techniques || [];
+    containment_status = req.body.containment_status || 'none';
+    if (!VALID_CONTAINMENT_STATUSES.includes(containment_status)) {
+      return sendError(res, 400, 'VALIDATION_ERROR', `Invalid containment_status. Must be one of: ${VALID_CONTAINMENT_STATUSES.join(', ')}`);
+    }
+  }
+
   try {
     const result = await pool.query(
-      `INSERT INTO tickets (title, description, priority, ticket_type, tags, operation_id, assigned_to, created_by, status, classification)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9)
+      `INSERT INTO tickets (title, description, priority, ticket_type, tags, operation_id, assigned_to, created_by, status, classification,
+       incident_severity, alert_source, alert_ids, mitre_techniques, containment_status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'draft', $9, $10, $11, $12, $13, $14)
        RETURNING *`,
       [
         title,
@@ -235,10 +456,27 @@ app.post('/api/v1/tickets', async (req, res) => {
         assigned_to || null,
         userId,
         classification,
+        incident_severity,
+        alert_source,
+        alert_ids,
+        mitre_techniques,
+        containment_status,
       ]
     );
     const ticket = result.rows[0];
     publishEvent('ticket.created', userId, null, ticket.id, { title, priority: ticket.priority, classification }, classification);
+
+    // Publish DCO incident created event
+    if (isIncident) {
+      publishEvent('dco.incident_created', userId, null, ticket.id, {
+        ticket_id: ticket.id,
+        title,
+        incident_severity,
+        alert_source,
+        classification,
+      }, classification);
+    }
+
     res.status(201).json({ data: ticket });
   } catch (err) {
     logger.error({ err: err.message }, 'create error');
@@ -379,7 +617,16 @@ app.patch('/api/v1/tickets/:id', async (req, res) => {
     }
   }
 
-  const allowed = ['title', 'description', 'priority', 'assigned_to', 'tags', 'sla_deadline', 'classification'];
+  // Validate incident-specific fields if provided
+  if (req.body.incident_severity !== undefined && !VALID_INCIDENT_SEVERITIES.includes(req.body.incident_severity)) {
+    return sendError(res, 400, 'VALIDATION_ERROR', `Invalid incident_severity. Must be one of: ${VALID_INCIDENT_SEVERITIES.join(', ')}`);
+  }
+  if (req.body.containment_status !== undefined && !VALID_CONTAINMENT_STATUSES.includes(req.body.containment_status)) {
+    return sendError(res, 400, 'VALIDATION_ERROR', `Invalid containment_status. Must be one of: ${VALID_CONTAINMENT_STATUSES.join(', ')}`);
+  }
+
+  const allowed = ['title', 'description', 'priority', 'assigned_to', 'tags', 'sla_deadline', 'classification',
+    'incident_severity', 'mitre_techniques', 'containment_status'];
   const sets = [];
   const params = [];
   let paramIdx = 1;
@@ -422,13 +669,18 @@ app.post('/api/v1/tickets/:id/transition', async (req, res) => {
   if (!action) return sendError(res, 400, 'VALIDATION_ERROR', 'Action is required');
 
   try {
-    const ticket = await pool.query('SELECT id, status, workflow_run_id, operation_id, classification FROM tickets WHERE id = $1', [req.params.id]);
+    const ticket = await pool.query(
+      'SELECT id, status, workflow_run_id, operation_id, classification, ticket_type, incident_severity FROM tickets WHERE id = $1',
+      [req.params.id]
+    );
     if (ticket.rows.length === 0) {
       return sendError(res, 404, 'NOT_FOUND', 'Ticket not found');
     }
 
     const currentStatus = ticket.rows[0].status;
     const workflowRunId = ticket.rows[0].workflow_run_id;
+    const ticketType = ticket.rows[0].ticket_type;
+    const isIncident = ticketType === 'incident';
 
     // Guard workflow-managed tickets from manual approval/rejection
     if (workflowRunId && (action === 'approve' || action === 'reject')) {
@@ -442,7 +694,9 @@ app.post('/api/v1/tickets/:id/transition', async (req, res) => {
       }
     }
 
-    const validActions = TRANSITIONS[currentStatus];
+    // Choose the appropriate state machine based on ticket type
+    const transitionMap = isIncident ? INCIDENT_TRANSITIONS : TRANSITIONS;
+    const validActions = transitionMap[currentStatus];
     if (!validActions || !validActions[action]) {
       return sendError(res, 422, 'INVALID_TRANSITION',
         `Cannot perform '${action}' on ticket in '${currentStatus}' state`);
@@ -469,6 +723,16 @@ app.post('/api/v1/tickets/:id/transition', async (req, res) => {
       operation_id: ticket.rows[0].operation_id || '',
       classification: ticketClassification,
     }, ticketClassification);
+
+    // Publish DCO incident status changed event for incident tickets
+    if (isIncident) {
+      publishEvent('dco.incident_status_changed', userId, null, req.params.id, {
+        ticket_id: req.params.id,
+        old_status: currentStatus,
+        new_status: newStatus,
+        incident_severity: ticket.rows[0].incident_severity || 'medium',
+      }, ticketClassification);
+    }
 
     res.json({ data: result.rows[0] });
   } catch (err) {

@@ -1,6 +1,6 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal, ArrowRightLeft, ScrollText, FileSearch } from 'lucide-react'
+import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal, ArrowRightLeft, ScrollText, FileSearch, Bell, AlertTriangle, Search } from 'lucide-react'
 import { APP_VERSION } from '../version'
 import NotificationBell from './NotificationBell'
 import EnclaveBanner from './EnclaveBanner'
@@ -13,6 +13,12 @@ const NAV_ITEMS = [
   { path: '/tickets', label: 'TICKETS', icon: Ticket },
   { path: '/dashboards', label: 'DASHBOARDS', icon: LayoutDashboard },
   { path: '/c2', label: 'C2', icon: Terminal },
+]
+
+const DCO_ITEMS = [
+  { path: '/alerts', label: 'ALERTS', icon: Bell },
+  { path: '/incidents', label: 'INCIDENTS', icon: AlertTriangle },
+  { path: '/iocs', label: 'IOCs', icon: Search },
 ]
 
 function CTIIndicator() {
@@ -46,6 +52,17 @@ export default function AppLayout() {
           <span className="navbar-version">{APP_VERSION}</span>
           <span className="navbar-sep">|</span>
           {NAV_ITEMS.map(({ path, label, icon: Icon }) => (
+            <Link
+              key={path}
+              to={path}
+              className={`navbar-link${location.pathname.startsWith(path) ? ' active' : ''}`}
+            >
+              <Icon size={14} />
+              {label}
+            </Link>
+          ))}
+          <span className="navbar-sep">|</span>
+          {DCO_ITEMS.map(({ path, label, icon: Icon }) => (
             <Link
               key={path}
               to={path}
@@ -107,7 +124,7 @@ export default function AppLayout() {
         </div>
       </nav>
 
-      <main className={`main-content${['/dashboards', '/c2', '/admin', '/transfers', '/audit'].some(p => location.pathname.startsWith(p)) ? ' full-width' : ''}`}>
+      <main className={`main-content${['/dashboards', '/c2', '/admin', '/transfers', '/audit', '/alerts', '/incidents', '/iocs'].some(p => location.pathname.startsWith(p)) ? ' full-width' : ''}`}>
         <Outlet />
       </main>
     </div>

@@ -1,0 +1,145 @@
+# EMS-COP Multi-Cluster Federation Values
+# Template for deploying across multiple Kubernetes clusters
+# with service mesh support (Istio or Linkerd)
+
+# ════════════════════════════════════════════
+#  Service Mesh Configuration
+# ════════════════════════════════════════════
+serviceMesh:
+  enabled: true
+  # provider: "istio" or "linkerd"
+  provider: istio
+
+  istio:
+    # Inject Istio sidecar into all pods
+    injection: true
+    # mTLS mode: STRICT enforces mutual TLS between all services
+    mtlsMode: STRICT
+    # PeerAuthentication for the namespace
+    peerAuthentication:
+      enabled: true
+      mode: STRICT
+    # DestinationRules for cross-cluster traffic
+    destinationRules:
+      enabled: true
+      trafficPolicy:
+        connectionPool:
+          tcp:
+            maxConnections: 100
+          http:
+            h2UpgradePolicy: DEFAULT
+            maxRequestsPerConnection: 10
+        outlierDetection:
+          consecutiveErrors: 5
+          interval: 30s
+          baseEjectionTime: 60s
+
+  linkerd:
+    # Linkerd annotation for proxy injection
+    injection: true
+    # Linkerd multi-cluster gateway
+    gateway:
+      enabled: true
+      port: 4143
+
+# ════════════════════════════════════════════
+#  Cross-Cluster Service Discovery
+# ════════════════════════════════════════════
+multiCluster:
+  enabled: true
+
+  # Cluster designations for enclave mapping
+  clusters:
+    low:
+      name: "ems-cop-low"
+      context: "low-enclave-cluster"
+      enclave: "low"
+      # Services exported from this cluster
+      exportedServices:
+        - auth
+        - workflow-engine
+        - ticket
+        - dashboard
+        - c2-gateway
+        - audit
+        - notification
+        - endpoint
+        - ws-relay
+        - frontend
+        - cti-relay
+
+    high:
+      name: "ems-cop-high"
+      context: "high-enclave-cluster"
+      enclave: "high"
+      exportedServices:
+        - auth
+        - workflow-engine
+        - ticket
+        - dashboard
+        - audit
+        - notification
+        - endpoint
+        - ws-relay
+        - frontend
+        - cti-relay
+
+    cti:
+      name: "ems-cop-cti"
+      context: "cti-zone-cluster"
+      enclave: "cti"
+      exportedServices:
+        - cti-relay
+
+  # Cross-cluster DNS suffix
+  # Services from other clusters are accessed as:
+  #   <service>.<namespace>.svc.clusterset.local
+  dnsSuffix: "clusterset.local"
+
+# ════════════════════════════════════════════
+#  Enclave-Specific Overrides
+# ════════════════════════════════════════════
+enclave:
+  mode: ""  # Set per-cluster: "low", "high", or "cti"
+
+  # Classification enforcement at service mesh level
+  classification:
+    # Istio AuthorizationPolicy to block SECRET data on low-side
+    enforceAtMesh: true
+    headerName: "X-Classification"
+    # Classifications that can cross CTI bridge
+    allowedCrossDomain:
+      - UNCLASSIFIED
+      - CUI
+
+# ════════════════════════════════════════════
+#  Federation-Aware Networking
+# ════════════════════════════════════════════
+networkPolicy:
+  enabled: true
+  # Additional rules for cross-cluster traffic
+  crossCluster:
+    # Only allow CTI relay to communicate cross-cluster
+    allowedServices:
+      - cti-relay
+
+# ════════════════════════════════════════════
+#  DCO/SOC Configuration (M13)
+# ════════════════════════════════════════════
+dco:
+  alertIngestion:
+    enabled: true
+    # Sources: syslog, SNMP traps, STIX/TAXII, custom webhook
+    sources:
+      - type: syslog
+        port: 5514
+        protocol: udp
+      - type: webhook
+        path: /api/v1/endpoints/alerts
+  iocManagement:
+    enabled: true
+    defaultSeverity: medium
+    autoEnrich: true
+  playbookAutomation:
+    enabled: true
+    maxConcurrentExecutions: 10
