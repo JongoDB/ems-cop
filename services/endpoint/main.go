@@ -5380,21 +5380,43 @@ func (s *Server) handleEscalateAlert(w http.ResponseWriter, r *http.Request) {
 
 	ticketNumber := fmt.Sprintf("INC-%d", time.Now().UnixMilli())
 
+	// Resolve created_by to a valid user UUID (required FK)
+	var creatorID string
+	uidErr := s.db.QueryRow(r.Context(),
+		"SELECT id FROM users WHERE id::text = $1 OR username = $1 LIMIT 1", userID).Scan(&creatorID)
+	if uidErr != nil {
+		// Fallback to first admin user
+		_ = s.db.QueryRow(r.Context(),
+			"SELECT id FROM users WHERE roles @> ARRAY['admin'] LIMIT 1").Scan(&creatorID)
+	}
+
+	// Resolve assigned_to — NULL if empty
+	var assignedTo any
+	if req.AssignedTo != nil && *req.AssignedTo != "" {
+		var assigneeID string
+		aErr := s.db.QueryRow(r.Context(),
+			"SELECT id FROM users WHERE id::text = $1 OR username = $1 LIMIT 1", *req.AssignedTo).Scan(&assigneeID)
+		if aErr == nil {
+			assignedTo = assigneeID
+		}
+	}
+
 	var ticketID string
 	err = s.db.QueryRow(r.Context(),
 		`INSERT INTO tickets (ticket_number, title, description, ticket_type, priority, status, classification,
 		 alert_source, alert_ids, incident_severity, created_by, assigned_to)
-		 VALUES ($1, $2, $3, 'incident', $4, 'open', $5, 'alert_escalation', ARRAY[$6]::uuid[], $7, $8, $9)
+		 VALUES ($1, $2, $3, 'incident', $4, 'draft', $5, $6, ARRAY[$7]::uuid[], $8, $9, $10)
 		 RETURNING id`,
 		ticketNumber,
 		req.Title,
 		fmt.Sprintf("Escalated from alert %s", id),
 		req.Severity,
 		alertClassification,
+		"generic",
 		id,
 		req.Severity,
-		userID,
-		req.AssignedTo).Scan(&ticketID)
+		creatorID,
+		assignedTo).Scan(&ticketID)
 	if err != nil {
 		s.logger.Error("create incident ticket failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create incident ticket")
