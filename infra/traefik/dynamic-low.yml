@@ -1,0 +1,263 @@
+# Traefik Dynamic Configuration — Low-Side Enclave Routes
+# Service names use -low suffix matching docker-compose.low.yml container DNS names
+
+http:
+  # ════════════════════════════════════════════
+  #  MIDDLEWARES
+  # ════════════════════════════════════════════
+  middlewares:
+    auth-verify:
+      forwardAuth:
+        address: "http://auth-service-low:3001/api/v1/auth/verify"
+        authResponseHeaders:
+          - "X-User-ID"
+          - "X-User-Roles"
+          - "X-Session-ID"
+
+    cors-headers:
+      headers:
+        accessControlAllowOriginList:
+          - "http://localhost:18080"
+        accessControlAllowMethods:
+          - "GET"
+          - "POST"
+          - "PUT"
+          - "PATCH"
+          - "DELETE"
+          - "OPTIONS"
+        accessControlAllowHeaders:
+          - "Authorization"
+          - "Content-Type"
+        accessControlMaxAge: 86400
+
+    security-headers:
+      headers:
+        customResponseHeaders:
+          X-Content-Type-Options: "nosniff"
+          X-Frame-Options: "DENY"
+          Referrer-Policy: "strict-origin-when-cross-origin"
+        contentSecurityPolicy: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws: wss:; font-src 'self' data:; frame-ancestors 'none'"
+
+  # ════════════════════════════════════════════
+  #  ROUTERS — PUBLIC (no auth required)
+  # ════════════════════════════════════════════
+  routers:
+    auth-public:
+      rule: "PathPrefix(`/api/v1/auth/login`) || PathPrefix(`/api/v1/auth/refresh`)"
+      entryPoints: [web]
+      service: auth
+      middlewares: [cors-headers, security-headers]
+      priority: 100
+
+    c2-shell:
+      rule: "PathRegexp(`/api/v1/c2/sessions/.+/shell`)"
+      entryPoints: [web]
+      service: c2
+      middlewares: [cors-headers, security-headers]
+      priority: 90
+
+    c2-vnc:
+      rule: "PathPrefix(`/api/v1/c2/vnc`)"
+      entryPoints: [web]
+      service: c2
+      middlewares: [cors-headers, security-headers]
+      priority: 90
+
+    jira-webhook:
+      rule: "Path(`/api/v1/notifications/jira/webhook`)"
+      entryPoints: [web]
+      service: notification
+      middlewares: [cors-headers, security-headers]
+      priority: 90
+
+    frontend:
+      rule: "PathPrefix(`/`)"
+      entryPoints: [web]
+      service: frontend
+      middlewares: [security-headers]
+      priority: 1
+
+  # ════════════════════════════════════════════
+  #  ROUTERS — PROTECTED (auth-verify middleware)
+  # ════════════════════════════════════════════
+    auth:
+      rule: "PathPrefix(`/api/v1/auth`)"
+      entryPoints: [web]
+      service: auth
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    workflow:
+      rule: "PathPrefix(`/api/v1/workflows`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    ticket:
+      rule: "PathPrefix(`/api/v1/tickets`)"
+      entryPoints: [web]
+      service: ticket
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    commands:
+      rule: "PathPrefix(`/api/v1/commands`)"
+      entryPoints: [web]
+      service: ticket
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    dashboard-api:
+      rule: "PathPrefix(`/api/v1/dashboards`)"
+      entryPoints: [web]
+      service: dashboard-api
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    c2:
+      rule: "PathPrefix(`/api/v1/c2`)"
+      entryPoints: [web]
+      service: c2
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    audit:
+      rule: "PathPrefix(`/api/v1/audit`)"
+      entryPoints: [web]
+      service: audit
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    notification:
+      rule: "PathPrefix(`/api/v1/notifications`)"
+      entryPoints: [web]
+      service: notification
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    workflow-runs:
+      rule: "PathPrefix(`/api/v1/workflow-runs`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    operations:
+      rule: "PathPrefix(`/api/v1/operations`)"
+      entryPoints: [web]
+      service: workflow
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    networks:
+      rule: "PathPrefix(`/api/v1/networks`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    nodes:
+      rule: "PathPrefix(`/api/v1/nodes`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    edges:
+      rule: "PathPrefix(`/api/v1/edges`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    display-schemas:
+      rule: "PathPrefix(`/api/v1/display-schemas`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    import-parsers:
+      rule: "PathPrefix(`/api/v1/import-parsers`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    findings:
+      rule: "PathPrefix(`/api/v1/findings`)"
+      entryPoints: [web]
+      service: ticket
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    endpoint:
+      rule: "PathPrefix(`/api/v1/endpoints`)"
+      entryPoints: [web]
+      service: endpoint
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    cti-relay:
+      rule: "PathPrefix(`/api/v1/cti`)"
+      entryPoints: [web]
+      service: cti-relay
+      middlewares: [auth-verify, cors-headers, security-headers]
+      priority: 50
+
+    ws:
+      rule: "PathPrefix(`/ws`)"
+      entryPoints: [web]
+      service: ws
+      middlewares: [cors-headers, security-headers]
+      priority: 80
+
+  # ════════════════════════════════════════════
+  #  SERVICES (backend targets — low-side)
+  # ════════════════════════════════════════════
+  services:
+    auth:
+      loadBalancer:
+        servers:
+          - url: "http://auth-service-low:3001"
+    workflow:
+      loadBalancer:
+        servers:
+          - url: "http://workflow-engine-low:3002"
+    ticket:
+      loadBalancer:
+        servers:
+          - url: "http://ticket-service-low:3003"
+    dashboard-api:
+      loadBalancer:
+        servers:
+          - url: "http://dashboard-service-low:3004"
+    c2:
+      loadBalancer:
+        servers:
+          - url: "http://c2-gateway-low:3005"
+    audit:
+      loadBalancer:
+        servers:
+          - url: "http://audit-service-low:3006"
+    notification:
+      loadBalancer:
+        servers:
+          - url: "http://notification-service-low:3007"
+    endpoint:
+      loadBalancer:
+        servers:
+          - url: "http://endpoint-service-low:3008"
+    ws:
+      loadBalancer:
+        servers:
+          - url: "http://ws-relay-low:3009"
+    cti-relay:
+      loadBalancer:
+        servers:
+          - url: "http://cti-relay:3010"
+    frontend:
+      loadBalancer:
+        servers:
+          - url: "http://frontend-low:80"

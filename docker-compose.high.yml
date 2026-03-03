@@ -1,0 +1,481 @@
+# EMS-COP Docker Compose — High-Side Enclave
+# Protected, strategic enclave for SECRET-level data. No direct C2/endpoint access.
+#
+# Usage:
+#   # High side only
+#   docker compose -f docker-compose.high.yml up -d
+#
+#   # Dual enclave (low + high + CTI bridge)
+#   docker compose -f docker-compose.low.yml -f docker-compose.cti.yml -f docker-compose.high.yml up -d
+#
+# Env file: copy env.high.template to .env.high, then:
+#   docker compose -f docker-compose.high.yml --env-file .env.high up -d
+
+x-common-env-high: &common-env-high
+  NODE_ENV: production
+  TZ: UTC
+  ENCLAVE: high
+  POSTGRES_HOST: postgres-high
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ems
+  POSTGRES_USER: ems_admin
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ems_dev_password_change_me}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-ems_redis_password}@redis-high:6379
+  NATS_URL: nats://nats-high:4222
+  CLICKHOUSE_HOST: clickhouse-high
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DB: ems_audit
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ems_audit_password}
+  MINIO_ENDPOINT: minio-high:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-ems_minio_admin}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-ems_minio_secret_change_me}
+  JWT_SECRET: ${JWT_SECRET:-ems_jwt_secret_change_me_in_production}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:28080}
+  CTI_RELAY_URL: http://cti-relay:3010
+
+networks:
+  high-ems-net:
+    name: high-ems-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.200.0.0/16
+  cti-net:
+    external: true
+
+volumes:
+  postgres-high-data:
+  clickhouse-high-data:
+  redis-high-data:
+  minio-high-data:
+  nats-high-data:
+
+services:
+
+  # ════════════════════════════════════════════
+  #  INFRASTRUCTURE — HIGH SIDE
+  # ════════════════════════════════════════════
+
+  traefik-high:
+    image: traefik:v3.3
+    container_name: ems-traefik-high
+    ports:
+      - "${EMS_HTTP_PORT:-28080}:80"
+      - "${EMS_HTTPS_PORT:-28443}:443"
+      - "${TRAEFIK_DASHBOARD_PORT:-28081}:8080"
+    volumes:
+      - ./infra/traefik/traefik-high.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic-high.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  postgres-high:
+    image: postgres:16-alpine
+    container_name: ems-postgres-high
+    environment:
+      POSTGRES_DB: ems
+      POSTGRES_USER: ems_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ems_dev_password_change_me}
+    volumes:
+      - postgres-high-data:/var/lib/postgresql/data
+      - ./infra/db/postgres/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${PG_HOST_PORT:-25432}:5432"
+    networks:
+      - high-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ems_admin -d ems"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  clickhouse-high:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: ems-clickhouse-high
+    environment:
+      CLICKHOUSE_DB: ems_audit
+      CLICKHOUSE_USER: ems_audit
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ems_audit_password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-high-data:/var/lib/clickhouse
+      - ./infra/db/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${CH_HTTP_PORT:-28123}:8123"
+      - "${CH_NATIVE_PORT:-29000}:9000"
+    networks:
+      - high-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -nv -O- 'http://127.0.0.1:8123/ping' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis-high:
+    image: redis:7-alpine
+    container_name: ems-redis-high
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-ems_redis_password}
+    volumes:
+      - redis-high-data:/data
+    ports:
+      - "${REDIS_HOST_PORT:-26379}:6379"
+    networks:
+      - high-ems-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-ems_redis_password}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  nats-high:
+    image: nats:2-alpine
+    container_name: ems-nats-high
+    command: >
+      --jetstream
+      --store_dir /data
+      --http_port 8222
+    volumes:
+      - nats-high-data:/data
+    ports:
+      - "${NATS_HOST_PORT:-24222}:4222"
+      - "${NATS_MON_PORT:-28222}:8222"
+    networks:
+      - high-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio-high:
+    image: minio/minio:latest
+    container_name: ems-minio-high
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-ems_minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-ems_minio_secret_change_me}
+    volumes:
+      - minio-high-data:/data
+    ports:
+      - "${MINIO_API_PORT:-29090}:9000"
+      - "${MINIO_CONSOLE_PORT:-29001}:9001"
+    networks:
+      - high-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  EMS CORE SERVICES — HIGH SIDE
+  # ════════════════════════════════════════════
+
+  auth-service-high:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    container_name: ems-auth-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: auth-service
+      SERVICE_PORT: "3001"
+    depends_on:
+      postgres-high:
+        condition: service_healthy
+      redis-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  workflow-engine-high:
+    build:
+      context: ./services/workflow-engine
+      dockerfile: Dockerfile
+    container_name: ems-workflow-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: workflow-engine
+      SERVICE_PORT: "3002"
+    depends_on:
+      postgres-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  ticket-service-high:
+    build:
+      context: ./services/ticket
+      dockerfile: Dockerfile
+    container_name: ems-ticket-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: ticket-service
+      SERVICE_PORT: "3003"
+    depends_on:
+      postgres-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  dashboard-service-high:
+    build:
+      context: ./services/dashboard
+      dockerfile: Dockerfile
+    container_name: ems-dashboard-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: dashboard-service
+      SERVICE_PORT: "3004"
+    depends_on:
+      postgres-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  c2-gateway-high:
+    build:
+      context: ./services/c2-gateway
+      dockerfile: Dockerfile
+    container_name: ems-c2-gateway-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: c2-gateway
+      SERVICE_PORT: "3005"
+      # No SLIVER_GRPC_HOST — high side does not connect to Sliver directly.
+      # C2 planning/decisions only; tactical comms are low-side.
+    depends_on:
+      nats-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net  # NO endpoint-net — high side has no direct C2 access
+    restart: unless-stopped
+
+  audit-service-high:
+    build:
+      context: ./services/audit
+      dockerfile: Dockerfile
+    container_name: ems-audit-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: audit-service
+      SERVICE_PORT: "3006"
+    depends_on:
+      clickhouse-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3006/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  notification-service-high:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    container_name: ems-notification-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: notification-service
+      SERVICE_PORT: "3007"
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@ems-cop.local}
+      TICKET_SERVICE_URL: http://ticket-service-high:3003
+      JIRA_DEFAULT_URL: ${JIRA_DEFAULT_URL:-}
+      JIRA_DEFAULT_EMAIL: ${JIRA_DEFAULT_EMAIL:-}
+      JIRA_DEFAULT_TOKEN: ${JIRA_DEFAULT_TOKEN:-}
+    depends_on:
+      postgres-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+      redis-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3007/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  endpoint-service-high:
+    build:
+      context: ./services/endpoint
+      dockerfile: Dockerfile
+    container_name: ems-endpoint-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: endpoint-service
+      SERVICE_PORT: "3008"
+    depends_on:
+      postgres-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3008/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  ws-relay-high:
+    build:
+      context: ./services/ws-relay
+      dockerfile: Dockerfile
+    container_name: ems-ws-relay-high
+    environment:
+      <<: *common-env-high
+      SERVICE_NAME: ws-relay
+      SERVICE_PORT: "3009"
+    depends_on:
+      redis-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3009/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  FRONTEND — HIGH SIDE
+  # ════════════════════════════════════════════
+
+  frontend-high:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_ENCLAVE: high
+    container_name: ems-frontend-high
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - high-ems-net
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  MINIFI AGENT — HIGH SIDE
+  #  Lightweight data collection agent that subscribes to high-side
+  #  NATS topics (workflow.*, operation.*, cti.command_relay.*)
+  #  and forwards events to NiFi CTI Hub via Site-to-Site.
+  #  Also receives approved low-side telemetry from NiFi and
+  #  publishes to high-side NATS.
+  # ════════════════════════════════════════════
+
+  minifi-high:
+    image: apache/nifi-minifi-java:2.0.0
+    container_name: ems-minifi-high
+    volumes:
+      - ./nifi/minifi-high.yml:/opt/minifi/minifi-current/conf/config.yml:ro
+    environment:
+      NATS_URL: nats://nats-high:4222
+      NIFI_URL: http://nifi:8443
+    networks:
+      - high-ems-net
+      - cti-net
+    depends_on:
+      nats-high:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  CTI BRIDGE — HIGH SIDE
+  #  Lightweight socat proxy that exposes only PG and NATS from
+  #  high-ems-net to cti-net. The cti-relay connects to these
+  #  proxied ports instead of directly to high-side infrastructure.
+  # ════════════════════════════════════════════
+
+  cti-high-bridge:
+    image: alpine/socat:latest
+    container_name: ems-cti-high-bridge
+    command: >
+      sh -c "
+      socat TCP-LISTEN:5432,fork,reuseaddr TCP:postgres-high:5432 &
+      socat TCP-LISTEN:4222,fork,reuseaddr TCP:nats-high:4222 &
+      wait
+      "
+    depends_on:
+      postgres-high:
+        condition: service_healthy
+      nats-high:
+        condition: service_healthy
+    networks:
+      high-ems-net:
+      cti-net:
+        aliases:
+          - pg-high-proxy
+          - nats-high-proxy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 5432 && nc -z localhost 4222"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ════════════════════════════════════════════
+  #  NO SLIVER / NO MANAGED ENDPOINTS
+  #  High side handles C2 planning and decisions only.
+  #  Direct C2 comms and managed targets are low-side only.
+  # ════════════════════════════════════════════

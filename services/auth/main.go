@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,6 +30,90 @@ type Server struct {
 	nc        *nats.Conn
 	jwtSecret []byte
 	logger    *slog.Logger
+	cti       *ctiHealth
+}
+
+// ---------------------------------------------------------------------------
+// CTI Health Checker
+// ---------------------------------------------------------------------------
+
+type ctiHealth struct {
+	mu        sync.RWMutex
+	connected bool
+	lastCheck time.Time
+	relayURL  string
+	logger    *slog.Logger
+	client    *http.Client
+}
+
+func newCTIHealth(relayURL string, logger *slog.Logger) *ctiHealth {
+	return &ctiHealth{
+		relayURL:  relayURL,
+		logger:    logger,
+		connected: true, // assume connected until first check
+		client:    &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func (c *ctiHealth) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
+
+func (c *ctiHealth) LastCheck() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastCheck
+}
+
+func (c *ctiHealth) Start(ctx context.Context) {
+	if c.relayURL == "" {
+		// Single-enclave mode — always "connected"
+		c.logger.Info("CTI relay URL not configured, single-enclave mode")
+		return
+	}
+	c.logger.Info("starting CTI health checker", "relay_url", c.relayURL)
+	// Do an initial check immediately
+	c.check()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.check()
+			}
+		}
+	}()
+}
+
+func (c *ctiHealth) check() {
+	resp, err := c.client.Get(c.relayURL + "/health")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastCheck = time.Now()
+	if err != nil {
+		if c.connected {
+			c.logger.Warn("CTI relay health check failed", "error", err)
+		}
+		c.connected = false
+		return
+	}
+	resp.Body.Close()
+	wasConnected := c.connected
+	c.connected = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if !wasConnected && c.connected {
+		c.logger.Info("CTI relay connection restored")
+	} else if wasConnected && !c.connected {
+		c.logger.Warn("CTI relay health check returned non-OK status", "status", resp.StatusCode)
+	}
+}
+
+func (s *Server) isDegraded() bool {
+	return enclave == "low" && s.cti != nil && !s.cti.IsConnected()
 }
 
 type User struct {
@@ -61,7 +146,8 @@ func main() {
 		port = "3001"
 	}
 
-	ctx := context.Background()
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
 
 	// PostgreSQL
 	pgURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=disable",
@@ -131,6 +217,13 @@ func main() {
 		logger:    logger,
 	}
 
+	// CTI health checker
+	ctiRelayURL := os.Getenv("CTI_RELAY_URL")
+	if ctiRelayURL != "" {
+		srv.cti = newCTIHealth(ctiRelayURL, logger)
+		srv.cti.Start(ctx)
+	}
+
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health/live", srv.handleHealthLive)
 	mux.HandleFunc("GET /health/ready", srv.handleHealthReady)
@@ -140,6 +233,7 @@ func main() {
 	mux.HandleFunc("POST /api/v1/auth/logout", srv.handleLogout)
 	mux.HandleFunc("GET /api/v1/auth/verify", srv.handleVerify)
 	mux.HandleFunc("GET /api/v1/auth/me", srv.handleMe)
+	mux.HandleFunc("GET /api/v1/auth/cti-status", srv.handleCTIStatus)
 
 	handler := maxBodyMiddleware(1<<20, mux) // 1 MB
 
@@ -156,9 +250,10 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info("shutting down")
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		httpServer.Shutdown(ctx)
+		ctxCancel() // stop CTI health checker
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer shutdownCancel()
+		httpServer.Shutdown(shutdownCtx)
 		nc.Close()
 		rdb.Close()
 		db.Close()
@@ -204,7 +299,26 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 		checks["nats"] = "ok"
 	}
 
-	writeJSON(w, status, map[string]any{"status": overall, "service": "auth", "checks": checks})
+	resp := map[string]any{"status": overall, "service": "auth", "checks": checks}
+	if s.cti != nil {
+		resp["cti_connected"] = s.cti.IsConnected()
+		resp["degraded"] = s.isDegraded()
+	}
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleCTIStatus(w http.ResponseWriter, r *http.Request) {
+	ctiConnected := true
+	degraded := false
+	if s.cti != nil {
+		ctiConnected = s.cti.IsConnected()
+		degraded = s.isDegraded()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cti_connected": ctiConnected,
+		"enclave":       enclave,
+		"degraded":      degraded,
+	})
 }
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
@@ -553,6 +667,7 @@ func (s *Server) publishEvent(eventType, actorID, actorUsername, actorIP, sessio
 		"action":         strings.Split(eventType, ".")[1],
 		"details":        string(detailsJSON),
 		"timestamp":      time.Now().UTC().Format(time.RFC3339Nano),
+		"classification": "UNCLASS",
 	}
 	data, _ := json.Marshal(event)
 	if err := s.nc.Publish(eventType, data); err != nil {
@@ -629,4 +744,27 @@ func generateRefreshToken() string {
 	b := make([]byte, 32)
 	rand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+// ---------------------------------------------------------------------------
+// Classification helpers
+// ---------------------------------------------------------------------------
+
+var enclave = envOr("ENCLAVE", "")
+
+func isValidClassification(c string) bool {
+	return c == "UNCLASS" || c == "CUI" || c == "SECRET"
+}
+
+func classificationRank(c string) int {
+	switch c {
+	case "UNCLASS":
+		return 0
+	case "CUI":
+		return 1
+	case "SECRET":
+		return 2
+	default:
+		return -1
+	}
 }

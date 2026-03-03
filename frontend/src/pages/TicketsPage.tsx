@@ -10,6 +10,10 @@ import {
   Plus, Search, ChevronLeft, ChevronRight,
   X, MessageSquare, ArrowRight, ExternalLink, RefreshCw,
 } from 'lucide-react'
+import ClassificationBadge from '../components/ClassificationBadge'
+import ClassificationFilter from '../components/ClassificationFilter'
+import ClassificationSelect from '../components/ClassificationSelect'
+import type { Classification } from '../components/ClassificationBadge'
 
 interface TicketRecord {
   id: string
@@ -23,6 +27,7 @@ interface TicketRecord {
   assignee_name: string | null
   created_by: string
   assigned_to: string | null
+  classification?: string
   tags: string[]
   workflow_run_id: string | null
   current_stage_id: string | null
@@ -86,6 +91,7 @@ export default function TicketsPage() {
   const [page, setPage] = useState(1)
   const [statusFilter, setStatusFilter] = useState(searchParams.get('status') || '')
   const [priorityFilter, setPriorityFilter] = useState('')
+  const [classificationFilter, setClassificationFilter] = useState<Classification | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [loading, setLoading] = useState(true)
 
@@ -108,6 +114,7 @@ export default function TicketsPage() {
   const [createTitle, setCreateTitle] = useState('')
   const [createDesc, setCreateDesc] = useState('')
   const [createPriority, setCreatePriority] = useState('medium')
+  const [createClassification, setCreateClassification] = useState<Classification>('UNCLASS')
 
   const limit = 20
 
@@ -121,6 +128,7 @@ export default function TicketsPage() {
       params.set('order', 'desc')
       if (statusFilter) params.set('status', statusFilter)
       if (priorityFilter) params.set('priority', priorityFilter)
+      if (classificationFilter) params.set('classification', classificationFilter)
       if (searchQuery) params.set('search', searchQuery)
 
       const data = await apiFetch<{ data: TicketRecord[]; pagination: { total: number } }>(
@@ -134,7 +142,7 @@ export default function TicketsPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, statusFilter, priorityFilter, searchQuery])
+  }, [page, statusFilter, priorityFilter, classificationFilter, searchQuery])
 
   useEffect(() => {
     fetchTickets()
@@ -245,11 +253,13 @@ export default function TicketsPage() {
         title: createTitle,
         description: createDesc,
         priority: createPriority,
+        classification: createClassification,
       }),
     })
     setCreateTitle('')
     setCreateDesc('')
     setCreatePriority('medium')
+    setCreateClassification('UNCLASS')
     setShowCreate(false)
     fetchTickets()
   }
@@ -268,6 +278,10 @@ export default function TicketsPage() {
             </div>
             <div className="toolbar-right">
               <div className="filter-group">
+                <ClassificationFilter
+                  value={classificationFilter}
+                  onChange={(v) => { setClassificationFilter(v); setPage(1); }}
+                />
                 <select
                   value={statusFilter}
                   onChange={(e) => { setStatusFilter(e.target.value); setPage(1); setSearchParams(e.target.value ? { status: e.target.value } : {}); }}
@@ -313,6 +327,7 @@ export default function TicketsPage() {
                 <tr>
                   <th>NUMBER</th>
                   <th>TITLE</th>
+                  <th>CLASS</th>
                   <th>STATUS</th>
                   <th>PRIORITY</th>
                   <th>CREATOR</th>
@@ -322,14 +337,17 @@ export default function TicketsPage() {
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={7} className="table-empty">Loading...</td></tr>
+                  <tr><td colSpan={8} className="table-empty">Loading...</td></tr>
                 ) : tickets.length === 0 ? (
-                  <tr><td colSpan={7} className="table-empty">No tickets found</td></tr>
+                  <tr><td colSpan={8} className="table-empty">No tickets found</td></tr>
                 ) : (
                   tickets.map((t) => (
                     <tr key={t.id} onClick={() => openDetail(t)} className="ticket-row">
                       <td className="mono-cell">{t.ticket_number}</td>
                       <td className="title-cell">{t.title}</td>
+                      <td>
+                        <ClassificationBadge classification={t.classification} size="sm" />
+                      </td>
                       <td>
                         <span className="status-badge" style={{ borderColor: STATUS_COLORS[t.status] || '#6b7280', color: STATUS_COLORS[t.status] || '#6b7280' }}>
                           {t.status.replace('_', ' ').toUpperCase()}
@@ -404,12 +422,22 @@ export default function TicketsPage() {
                       <option value="critical">CRITICAL</option>
                     </select>
                   </div>
+                  <div className="form-group">
+                    <label className="form-label">CLASSIFICATION</label>
+                    <ClassificationSelect
+                      value={createClassification}
+                      onChange={setCreateClassification}
+                    />
+                  </div>
                   <button type="submit" className="submit-btn">CREATE TICKET</button>
                 </form>
               </div>
             ) : selectedTicket ? (
               <div className="panel-content">
-                <span className="mono-cell panel-ticket-number">{selectedTicket.ticket_number}</span>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+                  <span className="mono-cell panel-ticket-number" style={{ marginBottom: 0 }}>{selectedTicket.ticket_number}</span>
+                  <ClassificationBadge classification={selectedTicket.classification} size="sm" />
+                </div>
                 <h2 className="panel-title">{selectedTicket.title}</h2>
 
                 {/* Workflow Progress Bar */}

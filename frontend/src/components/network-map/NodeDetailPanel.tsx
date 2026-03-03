@@ -22,6 +22,7 @@ import { InlineText, InlineSelect } from './InlineEditor'
 import { DEVICE_TYPES } from './DeviceIcons'
 import { apiFetch } from '../../lib/api'
 import VulnDrillDown from './VulnDrillDown'
+import ClassificationBadge from '../ClassificationBadge'
 
 interface NodeDetailPanelProps {
   node: NetworkNodeRecord
@@ -469,6 +470,15 @@ function renderOverviewTab(
             />
           </span>
         </div>
+      </div>
+
+      {/* Classification */}
+      <div>
+        <span style={detailLabelStyle}>CLASSIFICATION</span>
+        <ClassificationBadge
+          classification={(node.metadata as Record<string, unknown>)?.classification as string}
+          size="sm"
+        />
       </div>
 
       {/* OS info */}

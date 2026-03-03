@@ -23,12 +23,15 @@ import (
 	"syscall"
 	"time"
 
+	"strconv"
+
 	"github.com/bishopfox/sliver/protobuf/clientpb"
 	jwtv5 "github.com/golang-jwt/jwt/v5"
 	"github.com/bishopfox/sliver/protobuf/commonpb"
 	"github.com/bishopfox/sliver/protobuf/rpcpb"
 	"github.com/bishopfox/sliver/protobuf/sliverpb"
 	"github.com/gorilla/websocket"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nats-io/nats.go"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -139,17 +142,19 @@ type SessionStream interface {
 }
 
 type C2Task struct {
-	Command   string                 `json:"command"`
-	Arguments map[string]interface{} `json:"args"`
+	Command        string                 `json:"command"`
+	Arguments      map[string]interface{} `json:"args"`
+	Classification string                 `json:"classification"`
 }
 
 type TaskResult struct {
-	TaskID    string    `json:"task_id"`
-	Command   string    `json:"command"`
-	Output    string    `json:"output"`
-	Error     string    `json:"error,omitempty"`
-	StartedAt time.Time `json:"started_at"`
-	EndedAt   time.Time `json:"ended_at"`
+	TaskID         string    `json:"task_id"`
+	Command        string    `json:"command"`
+	Output         string    `json:"output"`
+	Error          string    `json:"error,omitempty"`
+	Classification string    `json:"classification"`
+	StartedAt      time.Time `json:"started_at"`
+	EndedAt        time.Time `json:"ended_at"`
 }
 
 type Listener struct {
@@ -280,16 +285,17 @@ func (c *OperatorConfig) TLSConfig() (*tls.Config, error) {
 // ════════════════════════════════════════════
 
 type AuditEvent struct {
-	EventType    string `json:"event_type"`
-	ActorID      string `json:"actor_id"`
-	ActorUsername string `json:"actor_username"`
-	ActorIP      string `json:"actor_ip"`
-	SessionID    string `json:"session_id"`
-	ResourceType string `json:"resource_type"`
-	ResourceID   string `json:"resource_id"`
-	Action       string `json:"action"`
-	Details      string `json:"details"`
-	Timestamp    string `json:"timestamp"`
+	EventType      string `json:"event_type"`
+	ActorID        string `json:"actor_id"`
+	ActorUsername   string `json:"actor_username"`
+	ActorIP        string `json:"actor_ip"`
+	SessionID      string `json:"session_id"`
+	ResourceType   string `json:"resource_type"`
+	ResourceID     string `json:"resource_id"`
+	Action         string `json:"action"`
+	Details        string `json:"details"`
+	Classification string `json:"classification"`
+	Timestamp      string `json:"timestamp"`
 }
 
 func (s *C2GatewayServer) validateJWT(tokenStr string) (string, error) {
@@ -309,20 +315,24 @@ func (s *C2GatewayServer) validateJWT(tokenStr string) (string, error) {
 	return sub, nil
 }
 
-func (s *C2GatewayServer) publishAudit(eventType string, r *http.Request, resourceID, action, details string) {
+func (s *C2GatewayServer) publishAuditWithClassification(eventType string, r *http.Request, resourceID, action, details, classification string) {
 	if s.nc == nil {
 		return
 	}
+	if classification == "" {
+		classification = "UNCLASS"
+	}
 	event := AuditEvent{
-		EventType:    eventType,
-		ActorID:      r.Header.Get("X-User-ID"),
-		ActorUsername: r.Header.Get("X-User-Roles"),
-		ActorIP:      r.RemoteAddr,
-		ResourceType: "c2_session",
-		ResourceID:   resourceID,
-		Action:       action,
-		Details:      details,
-		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
+		EventType:      eventType,
+		ActorID:        r.Header.Get("X-User-ID"),
+		ActorUsername:   r.Header.Get("X-User-ID"),
+		ActorIP:        r.RemoteAddr,
+		ResourceType:   "c2_session",
+		ResourceID:     resourceID,
+		Action:         action,
+		Details:        details,
+		Classification: classification,
+		Timestamp:      time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	data, _ := json.Marshal(event)
 	if err := s.nc.Publish(eventType, data); err != nil {
@@ -330,21 +340,194 @@ func (s *C2GatewayServer) publishAudit(eventType string, r *http.Request, resour
 	}
 }
 
+// publishAudit is a backward-compatible wrapper that defaults classification to "UNCLASS".
+func (s *C2GatewayServer) publishAudit(eventType string, r *http.Request, resourceID, action, details string) {
+	s.publishAuditWithClassification(eventType, r, resourceID, action, details, "UNCLASS")
+}
+
+// hasRole checks if a comma-separated roles header contains an exact match
+// for any of the allowed roles (prevents substring matching vulnerabilities).
+func hasRole(rolesHeader string, allowed ...string) bool {
+	for _, r := range strings.Split(rolesHeader, ",") {
+		trimmed := strings.TrimSpace(r)
+		for _, a := range allowed {
+			if trimmed == a {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Classification helpers
+
+var enclave = func() string {
+	if v := os.Getenv("ENCLAVE"); v != "" {
+		return v
+	}
+	return ""
+}()
+
+func isValidClassification(c string) bool {
+	return c == "UNCLASS" || c == "CUI" || c == "SECRET"
+}
+
+func classificationRank(c string) int {
+	switch c {
+	case "UNCLASS":
+		return 0
+	case "CUI":
+		return 1
+	case "SECRET":
+		return 2
+	default:
+		return -1
+	}
+}
+
 // ════════════════════════════════════════════
 //  HTTP HANDLERS (REST API wrapping the C2 Provider)
 // ════════════════════════════════════════════
 
+// CrossDomainCommand represents a command queued for cross-domain execution.
+type CrossDomainCommand struct {
+	ID              string  `json:"id"`
+	OperationID     string  `json:"operation_id"`
+	Command         string  `json:"command"`
+	TargetSessionID string  `json:"target_session_id"`
+	RiskLevel       int     `json:"risk_level"`
+	Classification  string  `json:"classification"`
+	Status          string  `json:"status"`
+	RequestedBy     *string `json:"requested_by,omitempty"`
+	RequestedAt     string  `json:"requested_at"`
+	ApprovedBy      *string `json:"approved_by,omitempty"`
+	ApprovedAt      *string `json:"approved_at,omitempty"`
+	ExecutedAt      *string `json:"executed_at,omitempty"`
+	Result          any     `json:"result,omitempty"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
+}
+
+type CrossDomainExecuteRequest struct {
+	SessionID      string `json:"session_id"`
+	Command        string `json:"command"`
+	OperationID    string `json:"operation_id"`
+	Classification string `json:"classification"`
+}
+
 type C2GatewayServer struct {
 	provider   C2Provider
+	registry   *ProviderRegistry
 	port       string
 	nc         *nats.Conn
+	db         *pgxpool.Pool
 	logger     *slog.Logger
 	jwtSecret  []byte
 	httpServer *http.Server
+	cti        *ctiHealth
+}
+
+// ---------------------------------------------------------------------------
+// CTI Health Checker
+// ---------------------------------------------------------------------------
+
+type ctiHealth struct {
+	mu        sync.RWMutex
+	connected bool
+	lastCheck time.Time
+	relayURL  string
+	logger    *slog.Logger
+	client    *http.Client
+}
+
+func newCTIHealth(relayURL string, logger *slog.Logger) *ctiHealth {
+	return &ctiHealth{
+		relayURL:  relayURL,
+		logger:    logger,
+		connected: true,
+		client:    &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func (c *ctiHealth) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
+
+func (c *ctiHealth) LastCheck() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastCheck
+}
+
+func (c *ctiHealth) Start(ctx context.Context) {
+	if c.relayURL == "" {
+		c.logger.Info("CTI relay URL not configured, single-enclave mode")
+		return
+	}
+	c.logger.Info("starting CTI health checker", "relay_url", c.relayURL)
+	c.check()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.check()
+			}
+		}
+	}()
+}
+
+func (c *ctiHealth) check() {
+	resp, err := c.client.Get(c.relayURL + "/health")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastCheck = time.Now()
+	if err != nil {
+		if c.connected {
+			c.logger.Warn("CTI relay health check failed", "error", err)
+		}
+		c.connected = false
+		return
+	}
+	resp.Body.Close()
+	wasConnected := c.connected
+	c.connected = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if !wasConnected && c.connected {
+		c.logger.Info("CTI relay connection restored")
+	} else if wasConnected && !c.connected {
+		c.logger.Warn("CTI relay health check returned non-OK status", "status", resp.StatusCode)
+	}
+}
+
+func (s *C2GatewayServer) isDegraded() bool {
+	return enclave == "low" && s.cti != nil && !s.cti.IsConnected()
 }
 
 func NewC2GatewayServer(provider C2Provider, port string, nc *nats.Conn, logger *slog.Logger, jwtSecret string) *C2GatewayServer {
 	return &C2GatewayServer{provider: provider, port: port, nc: nc, logger: logger, jwtSecret: []byte(jwtSecret)}
+}
+
+// resolveProvider returns the provider for a request. If a ?provider=name query
+// param is set, the registry is consulted. Otherwise the default provider is
+// returned.
+func (s *C2GatewayServer) resolveProvider(r *http.Request) (C2Provider, error) {
+	name := r.URL.Query().Get("provider")
+	if name == "" {
+		return s.provider, nil
+	}
+	if s.registry == nil {
+		return nil, fmt.Errorf("provider registry not initialised")
+	}
+	p := s.registry.Get(name)
+	if p == nil {
+		return nil, fmt.Errorf("provider %q not found", name)
+	}
+	return p, nil
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
@@ -374,11 +557,24 @@ func (s *C2GatewayServer) Start() error {
 	// VNC WebSocket proxy for noVNC
 	mux.HandleFunc("GET /api/v1/c2/vnc/{host}/{port}", s.handleVNCProxy)
 
+	// Provider registry management
+	mux.HandleFunc("GET /api/v1/c2/providers", s.handleListProviders)
+	mux.HandleFunc("POST /api/v1/c2/providers", s.handleRegisterProvider)
+	mux.HandleFunc("DELETE /api/v1/c2/providers/{name}", s.handleRemoveProvider)
+	mux.HandleFunc("GET /api/v1/c2/providers/{name}/status", s.handleProviderStatus)
+
+	// Cross-domain command execution (M12)
+	mux.HandleFunc("POST /api/v1/c2/cross-domain/execute", s.handleCrossDomainExecute)
+	mux.HandleFunc("GET /api/v1/c2/cross-domain/commands", s.handleListCrossDomainCommands)
+	mux.HandleFunc("GET /api/v1/c2/cross-domain/commands/{id}", s.handleGetCrossDomainCommand)
+	mux.HandleFunc("POST /api/v1/c2/cross-domain/commands/{id}/approve", s.handleApproveCrossDomainCommand)
+
 	// Health check
 	mux.HandleFunc("GET /health/live", s.handleHealthLive)
 	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
 	mux.HandleFunc("GET /health", s.handleHealthReady)
 	mux.HandleFunc("GET /api/v1/c2/health", s.handleHealth)
+	mux.HandleFunc("GET /api/v1/c2/cti-status", s.handleCTIStatus)
 
 	handler := maxBodyMiddleware(10<<20, mux) // 10 MB (implant generation payloads)
 
@@ -395,7 +591,12 @@ func (s *C2GatewayServer) Start() error {
 }
 
 func (s *C2GatewayServer) handleListSessions(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.provider.ListSessions(r.Context(), nil)
+	p, err := s.resolveProvider(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	sessions, err := p.ListSessions(r.Context(), nil)
 	if err != nil {
 		s.logger.Error("handler failed", "handler", "handleListSessions", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
@@ -406,7 +607,12 @@ func (s *C2GatewayServer) handleListSessions(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *C2GatewayServer) handleListImplants(w http.ResponseWriter, r *http.Request) {
-	implants, err := s.provider.ListImplants(r.Context(), nil)
+	p, err := s.resolveProvider(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	implants, err := p.ListImplants(r.Context(), nil)
 	if err != nil {
 		s.logger.Error("handler failed", "handler", "handleListImplants", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
@@ -417,7 +623,12 @@ func (s *C2GatewayServer) handleListImplants(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *C2GatewayServer) handleListListeners(w http.ResponseWriter, r *http.Request) {
-	listeners, err := s.provider.ListListeners(r.Context())
+	p, err := s.resolveProvider(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	listeners, err := p.ListListeners(r.Context())
 	if err != nil {
 		s.logger.Error("handler failed", "handler", "handleListListeners", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
@@ -428,12 +639,17 @@ func (s *C2GatewayServer) handleListListeners(w http.ResponseWriter, r *http.Req
 }
 
 func (s *C2GatewayServer) handleCreateListener(w http.ResponseWriter, r *http.Request) {
+	p, err := s.resolveProvider(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
 	var spec ListenerSpec
 	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	listener, err := s.provider.CreateListener(r.Context(), spec)
+	listener, err := p.CreateListener(r.Context(), spec)
 	if err != nil {
 		s.logger.Error("handler failed", "handler", "handleCreateListener", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
@@ -445,12 +661,17 @@ func (s *C2GatewayServer) handleCreateListener(w http.ResponseWriter, r *http.Re
 }
 
 func (s *C2GatewayServer) handleGenerateImplant(w http.ResponseWriter, r *http.Request) {
+	p, err := s.resolveProvider(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
 	var spec ImplantSpec
 	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
-	binary, err := s.provider.GenerateImplant(r.Context(), spec)
+	binary, err := p.GenerateImplant(r.Context(), spec)
 	if err != nil {
 		s.logger.Error("handler failed", "handler", "handleGenerateImplant", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
@@ -464,7 +685,27 @@ func (s *C2GatewayServer) handleGenerateImplant(w http.ResponseWriter, r *http.R
 	w.Write(binary.Data)
 }
 
+func (s *C2GatewayServer) handleCTIStatus(w http.ResponseWriter, r *http.Request) {
+	ctiConnected := true
+	degraded := false
+	if s.cti != nil {
+		ctiConnected = s.cti.IsConnected()
+		degraded = s.isDegraded()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"cti_connected": ctiConnected,
+		"enclave":       enclave,
+		"degraded":      degraded,
+	})
+}
+
 func (s *C2GatewayServer) handleExecuteTask(w http.ResponseWriter, r *http.Request) {
+	p, err := s.resolveProvider(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
 	sessionID := r.PathValue("sessionID")
 
 	var task C2Task
@@ -473,24 +714,49 @@ func (s *C2GatewayServer) handleExecuteTask(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
+	// Default and validate classification
+	if task.Classification == "" {
+		task.Classification = "UNCLASS"
+	}
+	if !isValidClassification(task.Classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	// Enclave enforcement: block SECRET on low side
+	if enclave == "low" && task.Classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot execute SECRET tasks on low-side enclave")
+		return
+	}
+
 	// Check risk level and approval status
 	riskLevel := GetCommandRisk(task.Command, nil)
 
-	// TODO: Check against ticket service for approval if riskLevel > auto-approve threshold
-	s.logger.Info("executing task", "session", sessionID, "command", task.Command, "risk_level", riskLevel)
+	// Degraded mode: block risk 3+ commands on low side
+	if s.isDegraded() && riskLevel >= 3 {
+		writeError(w, http.StatusServiceUnavailable, "DEGRADED_MODE",
+			"CTI link unavailable — risk 3+ commands blocked on low side")
+		return
+	}
 
-	result, err := s.provider.ExecuteTask(r.Context(), sessionID, task)
+	// TODO: Check against ticket service for approval if riskLevel > auto-approve threshold
+	s.logger.Info("executing task", "session", sessionID, "command", task.Command, "risk_level", riskLevel, "classification", task.Classification)
+
+	result, err := p.ExecuteTask(r.Context(), sessionID, task)
 	if err != nil {
 		s.logger.Error("handler failed", "handler", "handleExecuteTask", "error", err)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Internal server error")
 		return
 	}
 
-	// Publish audit event
+	// Propagate classification to result
+	result.Classification = task.Classification
+
+	// Publish audit event with classification
 	detailsJSON, _ := json.Marshal(task)
-	s.publishAudit("c2.command_executed", r, sessionID, task.Command, string(detailsJSON))
+	s.publishAuditWithClassification("c2.command_executed", r, sessionID, task.Command, string(detailsJSON), task.Classification)
 
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Classification", task.Classification)
 	json.NewEncoder(w).Encode(result)
 }
 
@@ -542,8 +808,15 @@ func (s *C2GatewayServer) handleShellSession(w http.ResponseWriter, r *http.Requ
 	}
 	defer ws.Close()
 
-	// Open shell session on Sliver
-	stream, err := s.provider.OpenSession(r.Context(), sessionID)
+	// Resolve provider (shell also supports ?provider= query param)
+	p, pErr := s.resolveProvider(r)
+	if pErr != nil {
+		ws.WriteMessage(websocket.TextMessage, []byte("Error: "+pErr.Error()))
+		return
+	}
+
+	// Open shell session on C2 backend
+	stream, err := p.OpenSession(r.Context(), sessionID)
 	if err != nil {
 		s.logger.Error("failed to open shell session", "session", sessionID, "error", err)
 		ws.WriteMessage(websocket.TextMessage, []byte("Error: "+err.Error()))
@@ -609,9 +882,14 @@ func (s *C2GatewayServer) handleHealthReady(w http.ResponseWriter, r *http.Reque
 		checks["nats"] = "ok"
 	}
 
+	resp := map[string]any{"status": overall, "service": "c2-gateway", "checks": checks}
+	if s.cti != nil {
+		resp["cti_connected"] = s.cti.IsConnected()
+		resp["degraded"] = s.isDegraded()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{"status": overall, "service": "c2-gateway", "checks": checks})
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *C2GatewayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -640,6 +918,737 @@ func (s *C2GatewayServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"active_sessions":  activeSessions,
 		"time":             time.Now().UTC(),
 	})
+}
+
+// ════════════════════════════════════════════
+//  PROVIDER REGISTRY HANDLERS
+// ════════════════════════════════════════════
+
+// handleListProviders — GET /api/v1/c2/providers
+func (s *C2GatewayServer) handleListProviders(w http.ResponseWriter, r *http.Request) {
+	if s.registry == nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Provider registry not initialised")
+		return
+	}
+	providers := s.registry.List()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"providers": providers,
+	})
+}
+
+// handleRegisterProvider — POST /api/v1/c2/providers
+func (s *C2GatewayServer) handleRegisterProvider(w http.ResponseWriter, r *http.Request) {
+	// FINDING-03: Only admins may manage C2 providers
+	roles := r.Header.Get("X-User-Roles")
+	if !hasRole(roles, "admin") {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "Admin role required to manage C2 providers")
+		return
+	}
+
+	if s.registry == nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Provider registry not initialised")
+		return
+	}
+
+	// Use request-specific struct to accept auth_config from JSON input
+	// (RegistryProviderConfig has json:"-" on AuthConfig to prevent output leakage)
+	var req struct {
+		Name       string            `json:"name"`
+		Type       string            `json:"type"`
+		Host       string            `json:"host"`
+		Port       int               `json:"port"`
+		AuthConfig map[string]string `json:"auth_config"`
+		AuthType   string            `json:"auth_type"`
+		Mode       string            `json:"mode"`
+		Enabled    bool              `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "Invalid request body")
+		return
+	}
+	if req.Name == "" || req.Type == "" {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", "name and type are required")
+		return
+	}
+	cfg := RegistryProviderConfig{
+		Name:       req.Name,
+		Type:       req.Type,
+		Host:       req.Host,
+		Port:       req.Port,
+		AuthConfig: req.AuthConfig,
+		AuthType:   req.AuthType,
+		Mode:       req.Mode,
+		Enabled:    req.Enabled,
+	}
+
+	// FINDING-04: Block SSRF via provider host validation
+	host := cfg.Host
+	if cfg.Mode == "external" && host != "" {
+		blockedHosts := []string{"localhost", "127.0.0.1", "0.0.0.0", "169.254.169.254", "metadata.google.internal"}
+		hostLower := strings.ToLower(host)
+		for _, blocked := range blockedHosts {
+			if hostLower == blocked {
+				writeError(w, http.StatusBadRequest, "INVALID_HOST", "Host address not allowed")
+				return
+			}
+		}
+		// Block internal Docker service names
+		internalServices := []string{"auth-service", "workflow-engine", "ticket-service", "dashboard-service",
+			"audit-service", "notification-service", "endpoint-service", "ws-relay", "frontend",
+			"postgres", "redis", "nats", "clickhouse", "minio", "traefik"}
+		for _, svc := range internalServices {
+			if hostLower == svc {
+				writeError(w, http.StatusBadRequest, "INVALID_HOST", "Internal service addresses not allowed")
+				return
+			}
+		}
+		// Block ems-net (10.100.0.0/16) -- only endpoint-net (10.101.0.0/16) should be reachable
+		ip := net.ParseIP(host)
+		if ip != nil {
+			emsNet := net.IPNet{IP: net.ParseIP("10.100.0.0"), Mask: net.CIDRMask(16, 32)}
+			metadataNet := net.IPNet{IP: net.ParseIP("169.254.0.0"), Mask: net.CIDRMask(16, 32)}
+			loopbackNet := net.IPNet{IP: net.ParseIP("127.0.0.0"), Mask: net.CIDRMask(8, 32)}
+			if emsNet.Contains(ip) || metadataNet.Contains(ip) || loopbackNet.Contains(ip) {
+				writeError(w, http.StatusBadRequest, "INVALID_HOST", "Host address not allowed")
+				return
+			}
+		}
+	}
+
+	provider, err := CreateProviderByType(cfg.Type, s.logger)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+
+	s.registry.Register(cfg.Name, provider, cfg)
+
+	// Attempt to connect if enabled
+	if cfg.Enabled {
+		provCfg := ProviderConfig{
+			Host:    cfg.Host,
+			Port:    cfg.Port,
+			Options: cfg.AuthConfig,
+		}
+		if err := provider.Connect(r.Context(), provCfg); err != nil {
+			s.logger.Warn("provider registered but connection failed", "name", cfg.Name, "error", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			json.NewEncoder(w).Encode(map[string]any{
+				"name":      cfg.Name,
+				"type":      cfg.Type,
+				"connected": false,
+				"error":     err.Error(),
+			})
+			return
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(map[string]any{
+		"name":      cfg.Name,
+		"type":      cfg.Type,
+		"connected": provider.IsConnected(),
+	})
+}
+
+// handleRemoveProvider — DELETE /api/v1/c2/providers/{name}
+func (s *C2GatewayServer) handleRemoveProvider(w http.ResponseWriter, r *http.Request) {
+	// FINDING-03: Only admins may manage C2 providers
+	roles := r.Header.Get("X-User-Roles")
+	if !hasRole(roles, "admin") {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "Admin role required to manage C2 providers")
+		return
+	}
+
+	if s.registry == nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Provider registry not initialised")
+		return
+	}
+
+	name := r.PathValue("name")
+	if err := s.registry.Remove(name); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", err.Error())
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"removed": name,
+	})
+}
+
+// handleProviderStatus — GET /api/v1/c2/providers/{name}/status
+func (s *C2GatewayServer) handleProviderStatus(w http.ResponseWriter, r *http.Request) {
+	if s.registry == nil {
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Provider registry not initialised")
+		return
+	}
+
+	name := r.PathValue("name")
+	p := s.registry.Get(name)
+	if p == nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", fmt.Sprintf("provider %q not found", name))
+		return
+	}
+	cfg, _ := s.registry.GetConfig(name)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"name":      name,
+		"type":      cfg.Type,
+		"mode":      cfg.Mode,
+		"enabled":   cfg.Enabled,
+		"connected": p.IsConnected(),
+	})
+}
+
+// ════════════════════════════════════════════
+//  CROSS-DOMAIN COMMAND HANDLERS
+// ════════════════════════════════════════════
+
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func envOrInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+// handleCrossDomainExecute submits a command for cross-domain execution (high side only).
+func (s *C2GatewayServer) handleCrossDomainExecute(w http.ResponseWriter, r *http.Request) {
+	// Cross-domain execution is only available on the high side
+	if enclave != "high" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION",
+			"Cross-domain command execution is only available on the high-side enclave")
+		return
+	}
+
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for cross-domain commands")
+		return
+	}
+
+	var req CrossDomainExecuteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.SessionID == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "session_id is required")
+		return
+	}
+	if req.Command == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "command is required")
+		return
+	}
+	if req.OperationID == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "operation_id is required")
+		return
+	}
+
+	// Default and validate classification
+	if req.Classification == "" {
+		req.Classification = "UNCLASS"
+	}
+	if !isValidClassification(req.Classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+
+	userID := r.Header.Get("X-User-ID")
+	riskLevel := GetCommandRisk(req.Command, nil)
+
+	ctx := r.Context()
+
+	if riskLevel <= 2 {
+		// Risk 1-2: auto-approve, publish directly for CTI relay
+		var cmdID string
+		err := s.db.QueryRow(ctx,
+			`INSERT INTO cross_domain_commands
+				(operation_id, command, target_session_id, risk_level, status, requested_by)
+			 VALUES ($1, $2, $3, $4, 'queued_cti', $5)
+			 RETURNING id`,
+			req.OperationID, req.Command, req.SessionID, riskLevel, userID).Scan(&cmdID)
+		if err != nil {
+			s.logger.Error("failed to insert cross-domain command", "error", err)
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create command")
+			return
+		}
+
+		// Publish for CTI relay to forward to low side
+		s.publishCrossDomainEvent("cti.command.execute", map[string]any{
+			"command_id":        cmdID,
+			"operation_id":      req.OperationID,
+			"session_id":        req.SessionID,
+			"command":           req.Command,
+			"risk_level":        riskLevel,
+			"classification":    req.Classification,
+			"requested_by":      userID,
+		})
+
+		s.logger.Info("cross-domain command auto-approved",
+			"command_id", cmdID, "risk_level", riskLevel, "command", req.Command)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]any{
+			"command_id": cmdID,
+			"status":     "queued_cti",
+			"risk_level": riskLevel,
+			"message":    "Command auto-approved and queued for CTI relay",
+		})
+	} else {
+		// Risk 3+: requires approval
+		var cmdID string
+		err := s.db.QueryRow(ctx,
+			`INSERT INTO cross_domain_commands
+				(operation_id, command, target_session_id, risk_level, status, requested_by)
+			 VALUES ($1, $2, $3, $4, 'pending', $5)
+			 RETURNING id`,
+			req.OperationID, req.Command, req.SessionID, riskLevel, userID).Scan(&cmdID)
+		if err != nil {
+			s.logger.Error("failed to insert cross-domain command", "error", err)
+			writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create command")
+			return
+		}
+
+		// Publish pending event
+		s.publishCrossDomainEvent("cti.command.pending", map[string]any{
+			"command_id":     cmdID,
+			"operation_id":   req.OperationID,
+			"session_id":     req.SessionID,
+			"command":        req.Command,
+			"risk_level":     riskLevel,
+			"requested_by":   userID,
+		})
+
+		s.logger.Info("cross-domain command pending approval",
+			"command_id", cmdID, "risk_level", riskLevel, "command", req.Command)
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]any{
+			"command_id": cmdID,
+			"status":     "pending",
+			"risk_level": riskLevel,
+			"message":    "Command queued for supervisor approval",
+		})
+	}
+}
+
+// handleListCrossDomainCommands lists cross-domain commands with optional filters.
+func (s *C2GatewayServer) handleListCrossDomainCommands(w http.ResponseWriter, r *http.Request) {
+	// Cross-domain commands are only available on the high side
+	if enclave != "high" && enclave != "" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTED", "cross-domain commands only available on high side")
+		return
+	}
+
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for cross-domain commands")
+		return
+	}
+
+	ctx := r.Context()
+	statusFilter := r.URL.Query().Get("status")
+	operationFilter := r.URL.Query().Get("operation_id")
+
+	page := 1
+	limit := 20
+	if p := r.URL.Query().Get("page"); p != "" {
+		if v, err := strconv.Atoi(p); err == nil && v > 0 {
+			page = v
+		}
+	}
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if v, err := strconv.Atoi(l); err == nil && v > 0 && v <= 100 {
+			limit = v
+		}
+	}
+	offset := (page - 1) * limit
+
+	conditions := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if statusFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, statusFilter)
+		argIdx++
+	}
+	if operationFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("operation_id = $%d", argIdx))
+		args = append(args, operationFilter)
+		argIdx++
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var total int
+	_ = s.db.QueryRow(ctx, fmt.Sprintf("SELECT count(*) FROM cross_domain_commands %s", where), args...).Scan(&total)
+
+	args = append(args, limit, offset)
+	q := fmt.Sprintf(
+		`SELECT id, operation_id, command, target_session_id, risk_level, classification,
+				status, requested_by, requested_at, approved_by, approved_at, executed_at,
+				result, created_at, updated_at
+		 FROM cross_domain_commands %s
+		 ORDER BY created_at DESC
+		 LIMIT $%d OFFSET $%d`, where, argIdx, argIdx+1)
+
+	rows, err := s.db.Query(ctx, q, args...)
+	if err != nil {
+		s.logger.Error("failed to list cross-domain commands", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list commands")
+		return
+	}
+	defer rows.Close()
+
+	var commands []CrossDomainCommand
+	for rows.Next() {
+		cmd, err := scanCrossDomainCommand(rows)
+		if err != nil {
+			s.logger.Error("failed to scan cross-domain command", "error", err)
+			continue
+		}
+		commands = append(commands, cmd)
+	}
+	if commands == nil {
+		commands = []CrossDomainCommand{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"data":       commands,
+		"pagination": map[string]int{"page": page, "limit": limit, "total": total},
+	})
+}
+
+// handleGetCrossDomainCommand returns a single cross-domain command.
+func (s *C2GatewayServer) handleGetCrossDomainCommand(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for cross-domain commands")
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		`SELECT id, operation_id, command, target_session_id, risk_level, classification,
+				status, requested_by, requested_at, approved_by, approved_at, executed_at,
+				result, created_at, updated_at
+		 FROM cross_domain_commands WHERE id = $1`, id)
+
+	cmd, err := scanCrossDomainCommand(row)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Command not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(cmd)
+}
+
+// handleApproveCrossDomainCommand approves a pending cross-domain command.
+func (s *C2GatewayServer) handleApproveCrossDomainCommand(w http.ResponseWriter, r *http.Request) {
+	if s.db == nil {
+		writeError(w, http.StatusServiceUnavailable, "DB_UNAVAILABLE",
+			"Database not available for cross-domain commands")
+		return
+	}
+
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	// Check supervisor role
+	roles := r.Header.Get("X-User-Roles")
+	if !hasRole(roles, "admin", "supervisor", "e2", "e3") {
+		writeError(w, http.StatusForbidden, "FORBIDDEN",
+			"Supervisor or admin role required to approve cross-domain commands")
+		return
+	}
+
+	approverID := r.Header.Get("X-User-ID")
+	ctx := r.Context()
+
+	// Check current status and prevent self-approval
+	var currentStatus string
+	var requestedBy *string
+	err := s.db.QueryRow(ctx,
+		`SELECT status, requested_by FROM cross_domain_commands WHERE id = $1`, id).
+		Scan(&currentStatus, &requestedBy)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Command not found")
+		return
+	}
+	if currentStatus != "pending" {
+		writeError(w, http.StatusConflict, "INVALID_STATE",
+			fmt.Sprintf("Command is already %s", currentStatus))
+		return
+	}
+	if requestedBy != nil && *requestedBy == approverID {
+		writeError(w, http.StatusForbidden, "SELF_APPROVAL",
+			"Cannot approve own cross-domain command")
+		return
+	}
+
+	// Update to queued_cti
+	_, err = s.db.Exec(ctx,
+		`UPDATE cross_domain_commands
+		 SET status = 'queued_cti', approved_by = $2, approved_at = NOW()
+		 WHERE id = $1`,
+		id, approverID)
+	if err != nil {
+		s.logger.Error("failed to approve cross-domain command", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to approve command")
+		return
+	}
+
+	// Fetch the command details to publish
+	var cmd struct {
+		OperationID     string
+		Command         string
+		TargetSessionID string
+		RiskLevel       int
+		Classification  string
+	}
+	_ = s.db.QueryRow(ctx,
+		`SELECT operation_id, command, target_session_id, risk_level, classification
+		 FROM cross_domain_commands WHERE id = $1`, id).
+		Scan(&cmd.OperationID, &cmd.Command, &cmd.TargetSessionID, &cmd.RiskLevel, &cmd.Classification)
+
+	// Publish for CTI relay
+	s.publishCrossDomainEvent("cti.command.execute", map[string]any{
+		"command_id":     id,
+		"operation_id":   cmd.OperationID,
+		"session_id":     cmd.TargetSessionID,
+		"command":        cmd.Command,
+		"risk_level":     cmd.RiskLevel,
+		"classification": cmd.Classification,
+		"approved_by":    approverID,
+	})
+
+	s.logger.Info("cross-domain command approved",
+		"command_id", id, "approved_by", approverID)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"command_id": id,
+		"status":     "queued_cti",
+	})
+}
+
+// publishCrossDomainEvent publishes a cross-domain event to NATS.
+func (s *C2GatewayServer) publishCrossDomainEvent(subject string, data map[string]any) {
+	if s.nc == nil {
+		return
+	}
+	data["timestamp"] = time.Now().UTC().Format(time.RFC3339Nano)
+	payload, err := json.Marshal(data)
+	if err != nil {
+		s.logger.Error("failed to marshal cross-domain event", "subject", subject, "error", err)
+		return
+	}
+	if err := s.nc.Publish(subject, payload); err != nil {
+		s.logger.Error("failed to publish cross-domain event", "subject", subject, "error", err)
+	}
+}
+
+// startCommandRelay subscribes to relayed commands on the low side and executes them.
+func (s *C2GatewayServer) startCommandRelay(ctx context.Context) {
+	if enclave != "low" || s.nc == nil {
+		return // only low side listens for cross-domain commands
+	}
+
+	s.logger.Info("starting cross-domain command relay listener")
+
+	_, err := s.nc.Subscribe("cti.relayed.cti.command.execute", func(msg *nats.Msg) {
+		var cmdReq struct {
+			CommandID   string `json:"command_id"`
+			OperationID string `json:"operation_id"`
+			SessionID   string `json:"session_id"`
+			Command     string `json:"command"`
+			RiskLevel   int    `json:"risk_level"`
+			Classification string `json:"classification"`
+		}
+		if err := json.Unmarshal(msg.Data, &cmdReq); err != nil {
+			s.logger.Error("failed to parse relayed command", "error", err)
+			return
+		}
+
+		s.logger.Info("received cross-domain command for execution",
+			"command_id", cmdReq.CommandID,
+			"session_id", cmdReq.SessionID,
+			"command", cmdReq.Command,
+		)
+
+		// Execute via the C2 provider
+		task := C2Task{
+			Command:        cmdReq.Command,
+			Classification: cmdReq.Classification,
+		}
+
+		result, err := s.provider.ExecuteTask(ctx, cmdReq.SessionID, task)
+
+		// Build result payload
+		resultData := map[string]any{
+			"command_id":   cmdReq.CommandID,
+			"operation_id": cmdReq.OperationID,
+			"session_id":   cmdReq.SessionID,
+			"command":      cmdReq.Command,
+			"timestamp":    time.Now().UTC().Format(time.RFC3339Nano),
+		}
+
+		if err != nil {
+			resultData["status"] = "failed"
+			resultData["error"] = err.Error()
+			s.logger.Error("cross-domain command execution failed",
+				"command_id", cmdReq.CommandID, "error", err)
+		} else {
+			resultData["status"] = "completed"
+			resultData["output"] = result.Output
+			if result.Error != "" {
+				resultData["error"] = result.Error
+			}
+			resultData["started_at"] = result.StartedAt.Format(time.RFC3339)
+			resultData["ended_at"] = result.EndedAt.Format(time.RFC3339)
+			s.logger.Info("cross-domain command executed successfully",
+				"command_id", cmdReq.CommandID, "command", cmdReq.Command)
+		}
+
+		// Publish result back for CTI relay to forward to high side
+		payload, _ := json.Marshal(resultData)
+		if pubErr := s.nc.Publish("cti.command.result", payload); pubErr != nil {
+			s.logger.Error("failed to publish command result", "error", pubErr,
+				"command_id", cmdReq.CommandID)
+		}
+	})
+
+	if err != nil {
+		s.logger.Error("failed to subscribe to relayed commands", "error", err)
+	} else {
+		s.logger.Info("subscribed to cti.relayed.cti.command.execute")
+	}
+}
+
+// startResultListener subscribes to command results on the high side.
+func (s *C2GatewayServer) startResultListener(ctx context.Context) {
+	if enclave != "high" || s.nc == nil || s.db == nil {
+		return
+	}
+
+	s.logger.Info("starting cross-domain command result listener")
+
+	_, err := s.nc.Subscribe("cti.relayed.cti.command.result", func(msg *nats.Msg) {
+		var result struct {
+			CommandID string `json:"command_id"`
+			Status    string `json:"status"`
+			Output    string `json:"output"`
+			Error     string `json:"error"`
+		}
+		if err := json.Unmarshal(msg.Data, &result); err != nil {
+			s.logger.Error("failed to parse command result", "error", err)
+			return
+		}
+
+		if result.CommandID == "" {
+			return
+		}
+
+		// Update the cross_domain_commands table
+		dbStatus := "completed"
+		if result.Status == "failed" {
+			dbStatus = "failed"
+		}
+
+		resultJSON, _ := json.Marshal(map[string]string{
+			"output": result.Output,
+			"error":  result.Error,
+		})
+
+		_, err := s.db.Exec(context.Background(),
+			`UPDATE cross_domain_commands
+			 SET status = $2, executed_at = NOW(), result = $3
+			 WHERE id = $1`,
+			result.CommandID, dbStatus, resultJSON)
+		if err != nil {
+			s.logger.Error("failed to update command result", "error", err,
+				"command_id", result.CommandID)
+			return
+		}
+
+		s.logger.Info("cross-domain command result received",
+			"command_id", result.CommandID, "status", dbStatus)
+	})
+
+	if err != nil {
+		s.logger.Error("failed to subscribe to command results", "error", err)
+	} else {
+		s.logger.Info("subscribed to cti.relayed.cti.command.result")
+	}
+}
+
+// scanCrossDomainCommand scans a cross-domain command row from the database.
+func scanCrossDomainCommand(scanner interface{ Scan(dest ...any) error }) (CrossDomainCommand, error) {
+	var cmd CrossDomainCommand
+	var requestedAt, createdAt, updatedAt time.Time
+	var approvedAt, executedAt *time.Time
+	var resultBytes []byte
+
+	err := scanner.Scan(
+		&cmd.ID, &cmd.OperationID, &cmd.Command, &cmd.TargetSessionID,
+		&cmd.RiskLevel, &cmd.Classification, &cmd.Status,
+		&cmd.RequestedBy, &requestedAt,
+		&cmd.ApprovedBy, &approvedAt, &executedAt,
+		&resultBytes, &createdAt, &updatedAt,
+	)
+	if err != nil {
+		return cmd, err
+	}
+
+	cmd.RequestedAt = requestedAt.UTC().Format(time.RFC3339)
+	cmd.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	cmd.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	if approvedAt != nil {
+		s := approvedAt.UTC().Format(time.RFC3339)
+		cmd.ApprovedAt = &s
+	}
+	if executedAt != nil {
+		s := executedAt.UTC().Format(time.RFC3339)
+		cmd.ExecutedAt = &s
+	}
+	if len(resultBytes) > 0 {
+		var r any
+		if err := json.Unmarshal(resultBytes, &r); err == nil {
+			cmd.Result = r
+		}
+	}
+
+	return cmd, nil
 }
 
 // ════════════════════════════════════════════
@@ -1582,12 +2591,72 @@ func main() {
 		}()
 	}
 
+	// PostgreSQL connection (for cross-domain command queue)
+	pgURL := fmt.Sprintf("postgres://%s:%s@%s:%s/%s",
+		getEnv("POSTGRES_USER", "ems_user"),
+		getEnv("POSTGRES_PASSWORD", "ems_password"),
+		getEnv("POSTGRES_HOST", "localhost"),
+		getEnv("POSTGRES_PORT", "5432"),
+		getEnv("POSTGRES_DB", "ems_cop"))
+
+	pgConfig, pgErr := pgxpool.ParseConfig(pgURL)
+	var db *pgxpool.Pool
+	if pgErr != nil {
+		logger.Warn("failed to parse pg config, cross-domain commands disabled", "error", pgErr)
+	} else {
+		pgConfig.MaxConns = int32(envOrInt("PG_MAX_CONNS", 5))
+		pgConfig.MinConns = int32(envOrInt("PG_MIN_CONNS", 1))
+		pgConfig.MaxConnLifetime = time.Duration(envOrInt("PG_CONN_MAX_LIFETIME_MINS", 30)) * time.Minute
+		pgConfig.MaxConnIdleTime = 5 * time.Minute
+
+		pool, poolErr := pgxpool.NewWithConfig(context.Background(), pgConfig)
+		if poolErr != nil {
+			logger.Warn("pg connect failed, cross-domain commands disabled", "error", poolErr)
+		} else {
+			if err := pool.Ping(context.Background()); err != nil {
+				logger.Warn("pg ping failed, cross-domain commands disabled", "error", err)
+				pool.Close()
+			} else {
+				db = pool
+				logger.Info("connected to postgres for cross-domain commands")
+			}
+		}
+	}
+	if db != nil {
+		defer db.Close()
+	}
+
 	// Start HTTP server
 	jwtSecret := os.Getenv("JWT_SECRET")
 	if jwtSecret == "" {
 		jwtSecret = "ems_jwt_secret_change_me_in_production"
 	}
 	server := NewC2GatewayServer(provider, port, nc, logger, jwtSecret)
+	server.db = db
+
+	// CTI health checker
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	ctiRelayURL := os.Getenv("CTI_RELAY_URL")
+	if ctiRelayURL != "" {
+		server.cti = newCTIHealth(ctiRelayURL, logger)
+		server.cti.Start(ctx)
+	}
+
+	// Initialise provider registry and register the default Sliver provider
+	registry := NewProviderRegistry(logger)
+	registry.Register("sliver", provider, RegistryProviderConfig{
+		Name:    "sliver",
+		Type:    "sliver",
+		Host:    sliverHost,
+		Port:    sliverPort,
+		Mode:    "docker",
+		Enabled: true,
+	})
+	server.registry = registry
+
+	// Start cross-domain command relay (low side) or result listener (high side)
+	server.startCommandRelay(ctx)
+	server.startResultListener(ctx)
 
 	// Graceful shutdown
 	go func() {
@@ -1595,12 +2664,13 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info("shutting down")
+		ctxCancel() // stop CTI health checker
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		if server.httpServer != nil {
 			server.httpServer.Shutdown(shutdownCtx)
 		}
-		provider.Disconnect()
+		registry.DisconnectAll()
 		nc.Close()
 	}()
 

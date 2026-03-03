@@ -10,11 +10,73 @@ const NATS_URL = process.env.NATS_URL || 'nats://nats:4222';
 const AUTH_VERIFY_URL = 'http://auth-service:3001/api/v1/auth/verify';
 const C2_GATEWAY_URL = process.env.C2_GATEWAY_URL || 'http://c2-gateway:3005';
 const MAX_TERMINALS_PER_CLIENT = 3;
+const ENCLAVE = process.env.ENCLAVE || '';
+const CTI_RELAY_URL = process.env.CTI_RELAY_URL || '';
 
 const pino = require('pino');
 const logger = pino({ name: NAME });
 const log = (msg, ...args) => logger.info({ extra: args.length ? args : undefined }, msg);
 const logErr = (msg, ...args) => logger.error({ extra: args.length ? args : undefined }, msg);
+
+// --- CTI Health Checker ---
+class CTIHealth {
+  constructor(relayURL, log) {
+    this.relayURL = relayURL;
+    this.logger = log;
+    this.connected = true; // optimistic start
+    this.lastCheck = null;
+    this.interval = null;
+    this.onStatusChange = null; // callback for status changes
+  }
+
+  isConnected() {
+    if (!this.relayURL) return true; // single-enclave mode
+    return this.connected;
+  }
+
+  start() {
+    if (!this.relayURL) return; // no CTI = no checking
+    this.check(); // immediate first check
+    this.interval = setInterval(() => this.check(), 15000);
+  }
+
+  stop() {
+    if (this.interval) clearInterval(this.interval);
+  }
+
+  async check() {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${this.relayURL}/health/live`, { signal: controller.signal });
+      clearTimeout(timeout);
+      const wasConnected = this.connected;
+      this.connected = res.ok;
+      this.lastCheck = new Date().toISOString();
+      if (!this.connected && wasConnected) {
+        this.logger.warn({ url: this.relayURL }, 'CTI relay connection lost');
+        if (this.onStatusChange) this.onStatusChange();
+      } else if (this.connected && !wasConnected) {
+        this.logger.info({ url: this.relayURL }, 'CTI relay connection restored');
+        if (this.onStatusChange) this.onStatusChange();
+      }
+    } catch (err) {
+      const wasConnected = this.connected;
+      if (wasConnected) {
+        this.logger.warn({ err: err.message }, 'CTI relay health check failed');
+      }
+      this.connected = false;
+      this.lastCheck = new Date().toISOString();
+      if (wasConnected && this.onStatusChange) this.onStatusChange();
+    }
+  }
+}
+
+const ctiHealth = new CTIHealth(CTI_RELAY_URL, logger);
+
+function isDegraded() {
+  return ENCLAVE === 'low' && ctiHealth && !ctiHealth.isConnected();
+}
 
 // ---------------------------------------------------------------------------
 // Express + Socket.IO setup
@@ -81,16 +143,32 @@ function readyCheck(_req, res) {
   checks.nats = (nc && !nc.isClosed()) ? 'ok' : 'error';
   if (checks.nats === 'error') { overall = 'degraded'; httpStatus = 503; }
 
-  res.status(httpStatus).json({
+  const response = {
     status: overall,
     service: NAME,
     checks,
     clients: io.engine ? io.engine.clientsCount : 0,
-  });
+  };
+  if (ENCLAVE) response.enclave = ENCLAVE;
+  if (CTI_RELAY_URL) {
+    response.cti_connected = ctiHealth.isConnected();
+    response.degraded = isDegraded();
+  }
+  res.status(httpStatus).json(response);
 }
 
 app.get('/health/ready', readyCheck);
 app.get('/health', readyCheck);
+
+// CTI STATUS (REST, not WebSocket)
+app.get('/ws/cti-status', (_req, res) => {
+  res.json({
+    cti_connected: ctiHealth.isConnected(),
+    enclave: ENCLAVE || null,
+    degraded: isDegraded(),
+    last_check: ctiHealth.lastCheck,
+  });
+});
 
 // ---------------------------------------------------------------------------
 // Socket.IO auth middleware — validate JWT via auth-service
@@ -157,7 +235,25 @@ async function ensureNatsSub(topic) {
       try {
         for await (const msg of sub) {
           const data = parseNatsMessage(msg);
-          io.to(topic).emit('event', { topic: msg.subject, data });
+
+          // Filter SECRET-classified events on low-side enclave
+          if (ENCLAVE === 'low') {
+            try {
+              const parsed = (typeof data === 'object') ? data : JSON.parse(msg.data);
+              if (parsed.classification === 'SECRET') {
+                continue; // silently drop SECRET events on low-side
+              }
+            } catch (e) {
+              // non-JSON messages pass through (no classification)
+            }
+          }
+
+          const eventPayload = { topic: msg.subject, data };
+          // Include classification from the event if present
+          if (data && typeof data === 'object' && data.classification) {
+            eventPayload.classification = data.classification;
+          }
+          io.to(topic).emit('event', eventPayload);
         }
       } catch (err) {
         // Subscription closed or error — this is expected on shutdown
@@ -202,6 +298,15 @@ function parseNatsMessage(msg) {
 // ---------------------------------------------------------------------------
 io.on('connection', (socket) => {
   log(`client connected: ${socket.id} (user: ${socket.data.userId})`);
+
+  // Send current CTI status to newly connected client (if CTI is configured)
+  if (CTI_RELAY_URL) {
+    socket.emit('cti:status', {
+      connected: ctiHealth.isConnected(),
+      degraded: isDegraded(),
+      timestamp: new Date().toISOString(),
+    });
+  }
 
   // --- subscribe to a NATS topic ---
   socket.on('subscribe', async (payload) => {
@@ -367,6 +472,8 @@ io.on('connection', (socket) => {
 async function shutdown(signal) {
   log(`${signal} received, shutting down...`);
 
+  ctiHealth.stop();
+
   // Close Socket.IO (disconnects all clients)
   io.close(() => {
     log('Socket.IO server closed');
@@ -404,8 +511,20 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 async function main() {
   await connectNats();
 
+  // Wire up CTI status change broadcast to all Socket.IO clients
+  ctiHealth.onStatusChange = () => {
+    const status = {
+      connected: ctiHealth.isConnected(),
+      degraded: isDegraded(),
+      timestamp: new Date().toISOString(),
+    };
+    log(`CTI status changed: connected=${status.connected} degraded=${status.degraded}`);
+    io.emit('cti:status', status);
+  };
+  ctiHealth.start();
+
   server.listen(PORT, () => {
-    log(`listening on :${PORT}`);
+    log(`listening on :${PORT} (enclave: ${ENCLAVE || 'single'}, cti: ${CTI_RELAY_URL || 'none'})`);
   });
 }
 

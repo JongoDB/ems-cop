@@ -1,0 +1,41 @@
+# Low-side enclave overrides
+# Usage: helm install ems-cop-low . -f values.yaml -f values-low.yaml
+
+enclave:
+  mode: "low"
+  ctiRelayUrl: "http://cti-relay:3010"
+
+# Low side handles planning, ticketing, dashboards, and C2 (Sliver runs on low side)
+# Scale up user-facing services
+auth:
+  replicaCount: 2
+
+workflow-engine:
+  replicaCount: 1
+
+ticket:
+  replicaCount: 2
+
+dashboard:
+  replicaCount: 2
+
+c2-gateway:
+  replicaCount: 1   # C2 gateway for Sliver on low side
+
+audit:
+  replicaCount: 1
+
+notification:
+  replicaCount: 1
+
+endpoint:
+  replicaCount: 1
+
+ws-relay:
+  replicaCount: 2
+
+frontend:
+  replicaCount: 2
+  image:
+    buildArgs:
+      VITE_ENCLAVE: "low"

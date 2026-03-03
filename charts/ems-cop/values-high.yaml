@@ -1,0 +1,41 @@
+# High-side enclave overrides
+# Usage: helm install ems-cop-high . -f values.yaml -f values-high.yaml
+
+enclave:
+  mode: "high"
+  ctiRelayUrl: "http://cti-relay:3010"
+
+# High side runs the full stack including C2
+# Scale C2 and operational services appropriately
+auth:
+  replicaCount: 2
+
+workflow-engine:
+  replicaCount: 1
+
+ticket:
+  replicaCount: 2
+
+dashboard:
+  replicaCount: 1
+
+c2-gateway:
+  replicaCount: 2   # C2 active on high side
+
+audit:
+  replicaCount: 2   # More audit volume on high side
+
+notification:
+  replicaCount: 1
+
+endpoint:
+  replicaCount: 2   # More endpoints on high side
+
+ws-relay:
+  replicaCount: 2
+
+frontend:
+  replicaCount: 2
+  image:
+    buildArgs:
+      VITE_ENCLAVE: "high"

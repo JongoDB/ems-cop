@@ -13,7 +13,64 @@ const logger = pino({ name: 'notification-service' });
 const app = express();
 const port = process.env.SERVICE_PORT || 3007;
 const name = process.env.SERVICE_NAME || 'notification-service';
+const ENCLAVE = process.env.ENCLAVE || '';
+const CTI_RELAY_URL = process.env.CTI_RELAY_URL || '';
 app.use(express.json({ limit: '1mb' }));
+
+// --- CTI Health Checker ---
+class CTIHealth {
+  constructor(relayURL, log) {
+    this.relayURL = relayURL;
+    this.logger = log;
+    this.connected = true; // optimistic start
+    this.lastCheck = null;
+    this.interval = null;
+  }
+
+  isConnected() {
+    if (!this.relayURL) return true; // single-enclave mode
+    return this.connected;
+  }
+
+  start() {
+    if (!this.relayURL) return; // no CTI = no checking
+    this.check(); // immediate first check
+    this.interval = setInterval(() => this.check(), 15000);
+  }
+
+  stop() {
+    if (this.interval) clearInterval(this.interval);
+  }
+
+  async check() {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${this.relayURL}/health/live`, { signal: controller.signal });
+      clearTimeout(timeout);
+      const wasConnected = this.connected;
+      this.connected = res.ok;
+      this.lastCheck = new Date().toISOString();
+      if (!this.connected && wasConnected) {
+        this.logger.warn({ url: this.relayURL }, 'CTI relay connection lost');
+      } else if (this.connected && !wasConnected) {
+        this.logger.info({ url: this.relayURL }, 'CTI relay connection restored');
+      }
+    } catch (err) {
+      if (this.connected) {
+        this.logger.warn({ err: err.message }, 'CTI relay health check failed');
+      }
+      this.connected = false;
+      this.lastCheck = new Date().toISOString();
+    }
+  }
+}
+
+const ctiHealth = new CTIHealth(CTI_RELAY_URL, logger);
+
+function isDegraded() {
+  return ENCLAVE === 'low' && ctiHealth && !ctiHealth.isConnected();
+}
 
 // ════════════════════════════════════════════
 //  DATABASE & CONNECTIONS
@@ -119,16 +176,23 @@ async function handleEvent(subject, event) {
   // Normalize: some events have flat fields, others nest in data
   const data = event.data || event;
   const eventType = event.event_type || subject;
+  const classification = event.classification || data.classification || null;
+
+  // On low-side enclave, skip notifications about SECRET-classified entities
+  if (ENCLAVE === 'low' && classification === 'SECRET') {
+    logger.info({ subject, classification }, 'skipping SECRET event on low-side enclave');
+    return;
+  }
 
   // 1) Generate notifications
-  const notifications = await resolveNotifications(subject, data, eventType);
+  const notifications = await resolveNotifications(subject, data, eventType, classification);
   for (const notif of notifications) {
     await dispatchNotification(notif);
   }
 
   // 2) Jira outbound sync for ticket events
   if (subject.startsWith('ticket.')) {
-    await handleJiraOutbound(subject, data);
+    await handleJiraOutbound(subject, data, classification);
   }
 }
 
@@ -136,7 +200,7 @@ async function handleEvent(subject, event) {
 //  RECIPIENT RESOLUTION
 // ════════════════════════════════════════════
 
-async function resolveNotifications(subject, data, eventType) {
+async function resolveNotifications(subject, data, eventType, classification) {
   const notifications = [];
   const actorId = data.actor_id || data.user_id || null;
 
@@ -144,14 +208,19 @@ async function resolveNotifications(subject, data, eventType) {
     if (subject === 'ticket.created') {
       const ticket = await getTicketById(data.resource_id || data.ticket_id);
       if (!ticket) return notifications;
+      // On low-side enclave, skip notifications for SECRET tickets
+      if (ENCLAVE === 'low' && (ticket.classification === 'SECRET')) return notifications;
+      const sourceClassification = ticket.classification || classification || 'UNCLASS';
       if (ticket.assigned_to && ticket.assigned_to !== actorId) {
         notifications.push(makeNotif(ticket.assigned_to, 'ticket_assigned', 'Ticket Assigned',
           `You were assigned ticket ${ticket.ticket_number}: ${ticket.title}`,
-          'ticket', ticket.id));
+          'ticket', ticket.id, sourceClassification));
       }
     } else if (subject === 'ticket.updated' || subject === 'ticket.status_changed') {
       const ticket = await getTicketById(data.resource_id || data.ticket_id);
       if (!ticket) return notifications;
+      if (ENCLAVE === 'low' && (ticket.classification === 'SECRET')) return notifications;
+      const sourceClassification = ticket.classification || classification || 'UNCLASS';
       const recipients = new Set([
         ...(ticket.watchers || []),
         ticket.assigned_to,
@@ -162,11 +231,13 @@ async function resolveNotifications(subject, data, eventType) {
       for (const uid of recipients) {
         notifications.push(makeNotif(uid, 'ticket_update',
           `Ticket ${ticket.ticket_number} ${action}`,
-          `${ticket.title}`, 'ticket', ticket.id));
+          `${ticket.title}`, 'ticket', ticket.id, sourceClassification));
       }
     } else if (subject === 'ticket.commented') {
       const ticket = await getTicketById(data.resource_id || data.ticket_id);
       if (!ticket) return notifications;
+      if (ENCLAVE === 'low' && (ticket.classification === 'SECRET')) return notifications;
+      const sourceClassification = ticket.classification || classification || 'UNCLASS';
       const recipients = new Set([
         ...(ticket.watchers || []),
         ticket.assigned_to,
@@ -176,7 +247,7 @@ async function resolveNotifications(subject, data, eventType) {
       for (const uid of recipients) {
         notifications.push(makeNotif(uid, 'ticket_comment',
           `New comment on ${ticket.ticket_number}`,
-          ticket.title, 'ticket', ticket.id));
+          ticket.title, 'ticket', ticket.id, sourceClassification));
       }
     } else if (subject === 'workflow.stage_entered') {
       const roleName = data.required_role || data.data?.required_role;
@@ -243,15 +314,15 @@ async function resolveNotifications(subject, data, eventType) {
   return notifications;
 }
 
-function makeNotif(userId, type, title, body, refType, refId) {
-  return { user_id: userId, notification_type: type, title, body, reference_type: refType, reference_id: refId };
+function makeNotif(userId, type, title, body, refType, refId, classification) {
+  return { user_id: userId, notification_type: type, title, body, reference_type: refType, reference_id: refId, source_classification: classification || 'UNCLASS' };
 }
 
 async function getTicketById(ticketId) {
   if (!ticketId) return null;
   try {
     const { rows } = await pool.query(
-      'SELECT id, ticket_number, title, created_by, assigned_to, watchers FROM tickets WHERE id = $1',
+      'SELECT id, ticket_number, title, created_by, assigned_to, watchers, classification FROM tickets WHERE id = $1',
       [ticketId]
     );
     return rows[0] || null;
@@ -274,7 +345,7 @@ async function getUsersByRole(roleName) {
 // ════════════════════════════════════════════
 
 async function dispatchNotification(notif) {
-  const { user_id, notification_type, title, body, reference_type, reference_id } = notif;
+  const { user_id, notification_type, title, body, reference_type, reference_id, source_classification } = notif;
 
   try {
     // Check user preferences for opt-out
@@ -313,12 +384,15 @@ async function dispatchNotification(notif) {
         user_id, title, body, notification_type, reference_type, reference_id,
         is_read: false,
         created_at: notifRecord.created_at,
+        classification: source_classification || 'UNCLASS',
       };
       nc.publish(`notification.user.${user_id}`, sc.encode(JSON.stringify(payload)));
     }
 
-    // 2) Email channel
-    if (mailTransport) {
+    // 2) Email channel — skip cross-domain delivery in degraded mode
+    if (isDegraded()) {
+      logger.warn({ user_id, notification_type }, 'degraded mode: queuing email/webhook notifications (CTI link down)');
+    } else if (mailTransport) {
       try {
         const channelResult = await pool.query(
           `SELECT config FROM notification_channels WHERE user_id = $1 AND channel_type = 'email' AND enabled = TRUE LIMIT 1`,
@@ -340,25 +414,27 @@ async function dispatchNotification(notif) {
       }
     }
 
-    // 3) Webhook channels
-    try {
-      const webhookResult = await pool.query(
-        `SELECT config FROM notification_channels WHERE user_id = $1 AND channel_type = 'webhook' AND enabled = TRUE`,
-        [user_id]
-      );
-      for (const row of webhookResult.rows) {
-        const url = row.config?.url;
-        if (url) {
-          fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', ...(row.config?.headers || {}) },
-            body: JSON.stringify({ title, body, notification_type, reference_type, reference_id, timestamp: new Date().toISOString() }),
-            signal: AbortSignal.timeout(10000),
-          }).catch(() => {}); // fire-and-forget
+    // 3) Webhook channels — skip cross-domain delivery in degraded mode
+    if (!isDegraded()) {
+      try {
+        const webhookResult = await pool.query(
+          `SELECT config FROM notification_channels WHERE user_id = $1 AND channel_type = 'webhook' AND enabled = TRUE`,
+          [user_id]
+        );
+        for (const row of webhookResult.rows) {
+          const url = row.config?.url;
+          if (url) {
+            fetch(url, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', ...(row.config?.headers || {}) },
+              body: JSON.stringify({ title, body, notification_type, reference_type, reference_id, timestamp: new Date().toISOString() }),
+              signal: AbortSignal.timeout(10000),
+            }).catch(() => {}); // fire-and-forget
+          }
         }
+      } catch (err) {
+        logger.error({ err: err.message }, 'webhook dispatch error');
       }
-    } catch (err) {
-      logger.error({ err: err.message }, 'webhook dispatch error');
     }
 
     await publishEvent('notification.dispatched', { user_id, notification_type, reference_id });
@@ -371,9 +447,15 @@ async function dispatchNotification(notif) {
 //  JIRA SYNC — OUTBOUND
 // ════════════════════════════════════════════
 
-async function handleJiraOutbound(subject, data) {
+async function handleJiraOutbound(subject, data, classification) {
   const ticketId = data.resource_id || data.ticket_id;
   if (!ticketId) return;
+
+  // Degraded mode: block all Jira sync on low side when CTI is down
+  if (isDegraded()) {
+    logger.warn({ ticketId, subject }, 'degraded mode: blocking Jira outbound sync (CTI link down)');
+    return;
+  }
 
   try {
     // Check for sync lock (prevents outbound triggered by inbound)
@@ -384,6 +466,18 @@ async function handleJiraOutbound(subject, data) {
     // Find matching Jira config
     const ticket = await getTicketById(ticketId);
     if (!ticket) return;
+
+    // Block SECRET-classified tickets from syncing to Jira (Jira is external/low-side)
+    const ticketClassification = ticket.classification || classification || 'UNCLASS';
+    if (ticketClassification === 'SECRET') {
+      logger.info({ ticketId, classification: ticketClassification }, 'blocking SECRET ticket from Jira sync');
+      return;
+    }
+
+    if (ticketClassification === 'CUI') {
+      logger.info({ ticketId }, 'CUI ticket - Jira sync requires review, skipping auto-sync');
+      return; // CUI requires review before external sync
+    }
 
     // Look for operation-scoped or global config
     const configResult = await pool.query(
@@ -535,6 +629,12 @@ async function logJiraSync(configId, mappingId, direction, action, status, detai
 // ════════════════════════════════════════════
 
 app.post('/api/v1/notifications/jira/webhook', async (req, res) => {
+  // Degraded mode: block inbound Jira webhooks on low side when CTI is down
+  if (isDegraded()) {
+    logger.warn('degraded mode: rejecting inbound Jira webhook (CTI link down)');
+    return res.json({ ok: true, message: 'degraded mode - Jira sync disabled' });
+  }
+
   try {
     // Verify webhook signature (HMAC-SHA256)
     const signature = req.headers['x-hub-signature'] || req.headers['x-atlassian-webhook-signature'];
@@ -566,6 +666,13 @@ app.post('/api/v1/notifications/jira/webhook', async (req, res) => {
     );
     const mapping = mappingResult.rows[0];
     if (!mapping) return res.json({ ok: true, message: 'unmapped issue' });
+
+    // Block inbound updates for SECRET-classified tickets
+    const ticketCheck = await pool.query('SELECT classification FROM tickets WHERE id = $1', [mapping.ticket_id]);
+    if (ticketCheck.rows[0]?.classification === 'SECRET') {
+      logger.warn({ ticketId: mapping.ticket_id }, 'blocking Jira inbound update for SECRET ticket');
+      return res.json({ ok: true, message: 'skipped - SECRET classified' });
+    }
 
     // Check sync direction allows inbound
     if (mapping.sync_direction === 'outbound') return res.json({ ok: true, message: 'inbound disabled' });
@@ -674,11 +781,27 @@ async function readyCheck(_req, res) {
   checks.nats = (nc && !nc.isClosed()) ? 'ok' : 'error';
   if (checks.nats === 'error') { overall = 'degraded'; httpStatus = 503; }
 
-  res.status(httpStatus).json({ status: overall, service: name, checks });
+  const response = { status: overall, service: name, checks };
+  if (ENCLAVE) response.enclave = ENCLAVE;
+  if (CTI_RELAY_URL) {
+    response.cti_connected = ctiHealth.isConnected();
+    response.degraded = isDegraded();
+  }
+  res.status(httpStatus).json(response);
 }
 
 app.get('/health/ready', readyCheck);
 app.get('/health', readyCheck);
+
+// CTI STATUS
+app.get('/api/v1/notifications/cti-status', (_req, res) => {
+  res.json({
+    cti_connected: ctiHealth.isConnected(),
+    enclave: ENCLAVE || null,
+    degraded: isDegraded(),
+    last_check: ctiHealth.lastCheck,
+  });
+});
 
 // List notifications for current user
 app.get('/api/v1/notifications', async (req, res) => {
@@ -1040,10 +1163,22 @@ app.get('/api/v1/notifications/jira/mappings', async (req, res) => {
 
 // Force sync
 app.post('/api/v1/notifications/jira/sync/:ticketId', async (req, res) => {
+  // Degraded mode: block force sync on low side when CTI is down
+  if (isDegraded()) {
+    return res.status(503).json({
+      error: { code: 'DEGRADED_MODE', message: 'CTI link unavailable — Jira sync disabled on low side' }
+    });
+  }
+
   const ticketId = req.params.ticketId;
   try {
     const ticket = await getTicketById(ticketId);
     if (!ticket) return sendError(res, 404, 'NOT_FOUND', 'Ticket not found');
+
+    // Block SECRET-classified tickets from syncing to Jira
+    if (ticket.classification === 'SECRET') {
+      return sendError(res, 403, 'CLASSIFICATION_ERROR', 'SECRET-classified tickets cannot be synced to Jira');
+    }
 
     // Find config
     const configResult = await pool.query(
@@ -1112,11 +1247,13 @@ async function start() {
     setTimeout(startNatsConsumer, delay);
   }
 
-  server = app.listen(port, () => logger.info({ port }, 'listening'));
+  ctiHealth.start();
+  server = app.listen(port, () => logger.info({ port, enclave: ENCLAVE || 'single', cti: CTI_RELAY_URL || 'none' }, 'listening'));
 }
 
 async function shutdown(signal) {
   logger.info({ signal }, 'shutting down');
+  ctiHealth.stop();
   if (server) {
     server.close(() => logger.info('HTTP server closed'));
   }

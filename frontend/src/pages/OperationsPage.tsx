@@ -2,12 +2,18 @@ import { useState, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiFetch } from '../lib/api'
 import { Plus, Search, ChevronLeft, ChevronRight, X } from 'lucide-react'
+import ClassificationBadge from '../components/ClassificationBadge'
+import ClassificationFilter from '../components/ClassificationFilter'
+import ClassificationSelect from '../components/ClassificationSelect'
+import type { Classification } from '../components/ClassificationBadge'
 
 interface OperationRecord {
   id: string
   name: string
   status: string
   risk_level: number
+  classification?: string
+  routing_mode?: 'local' | 'cross-domain'
   objective: string
   network_count: number
   finding_count: number
@@ -32,6 +38,22 @@ const RISK_COLORS: Record<number, string> = {
   5: '#ef4444',
 }
 
+function RoutingBadge({ mode }: { mode?: 'local' | 'cross-domain' }) {
+  const isCrossDomain = mode === 'cross-domain'
+  return (
+    <span
+      className="status-badge"
+      style={{
+        borderColor: isCrossDomain ? '#3b82f6' : '#6b7280',
+        color: isCrossDomain ? '#3b82f6' : '#6b7280',
+        fontSize: 9,
+      }}
+    >
+      {isCrossDomain ? 'CROSS-DOMAIN' : 'LOCAL'}
+    </span>
+  )
+}
+
 export default function OperationsPage() {
   const navigate = useNavigate()
 
@@ -39,6 +61,7 @@ export default function OperationsPage() {
   const [total, setTotal] = useState(0)
   const [page, setPage] = useState(1)
   const [statusFilter, setStatusFilter] = useState('')
+  const [classificationFilter, setClassificationFilter] = useState<Classification | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [loading, setLoading] = useState(true)
 
@@ -47,6 +70,7 @@ export default function OperationsPage() {
   const [createName, setCreateName] = useState('')
   const [createObjective, setCreateObjective] = useState('')
   const [createRisk, setCreateRisk] = useState(3)
+  const [createClassification, setCreateClassification] = useState<Classification>('UNCLASS')
   const [createLoading, setCreateLoading] = useState(false)
 
   const limit = 20
@@ -58,6 +82,7 @@ export default function OperationsPage() {
       params.set('page', String(page))
       params.set('limit', String(limit))
       if (statusFilter) params.set('status', statusFilter)
+      if (classificationFilter) params.set('classification', classificationFilter)
       if (searchQuery) params.set('search', searchQuery)
 
       const data = await apiFetch<{ data: OperationRecord[]; pagination: { total: number } }>(
@@ -71,7 +96,7 @@ export default function OperationsPage() {
     } finally {
       setLoading(false)
     }
-  }, [page, statusFilter, searchQuery])
+  }, [page, statusFilter, classificationFilter, searchQuery])
 
   useEffect(() => {
     fetchOperations()
@@ -88,11 +113,13 @@ export default function OperationsPage() {
           name: createName,
           objective: createObjective,
           risk_level: createRisk,
+          classification: createClassification,
         }),
       })
       setCreateName('')
       setCreateObjective('')
       setCreateRisk(3)
+      setCreateClassification('UNCLASS')
       setShowCreate(false)
       fetchOperations()
     } finally {
@@ -112,6 +139,10 @@ export default function OperationsPage() {
         </div>
         <div className="toolbar-right">
           <div className="filter-group">
+            <ClassificationFilter
+              value={classificationFilter}
+              onChange={(v) => { setClassificationFilter(v); setPage(1) }}
+            />
             <select
               value={statusFilter}
               onChange={(e) => { setStatusFilter(e.target.value); setPage(1) }}
@@ -146,6 +177,8 @@ export default function OperationsPage() {
           <thead>
             <tr>
               <th>NAME</th>
+              <th>CLASS</th>
+              <th>ROUTING</th>
               <th>STATUS</th>
               <th>RISK</th>
               <th>NETWORKS</th>
@@ -155,9 +188,9 @@ export default function OperationsPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={6} className="table-empty">Loading...</td></tr>
+              <tr><td colSpan={8} className="table-empty">Loading...</td></tr>
             ) : operations.length === 0 ? (
-              <tr><td colSpan={6} className="table-empty">No operations found</td></tr>
+              <tr><td colSpan={8} className="table-empty">No operations found</td></tr>
             ) : (
               operations.map((op) => (
                 <tr
@@ -166,6 +199,12 @@ export default function OperationsPage() {
                   className="ticket-row"
                 >
                   <td className="title-cell">{op.name}</td>
+                  <td>
+                    <ClassificationBadge classification={op.classification} size="sm" />
+                  </td>
+                  <td>
+                    <RoutingBadge mode={op.routing_mode} />
+                  </td>
                   <td>
                     <span
                       className="status-badge"
@@ -258,6 +297,13 @@ export default function OperationsPage() {
                     <option value={4}>4 - HIGH</option>
                     <option value={5}>5 - CRITICAL</option>
                   </select>
+                </div>
+                <div className="form-group">
+                  <label className="form-label">CLASSIFICATION</label>
+                  <ClassificationSelect
+                    value={createClassification}
+                    onChange={setCreateClassification}
+                  />
                 </div>
               </div>
               <div className="modal-footer">

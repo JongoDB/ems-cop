@@ -1,0 +1,608 @@
+{
+  "encodingVersion": {
+    "majorVersion": 2,
+    "minorVersion": 0
+  },
+  "maxTimerDrivenThreadCount": 10,
+  "maxEventDrivenThreadCount": 1,
+  "registries": [],
+  "parameterContexts": [
+    {
+      "identifier": "ctx-cti-params",
+      "name": "CTI Parameters",
+      "description": "Configuration parameters for the CTI Transfer Hub flow",
+      "parameters": [
+        {
+          "name": "cti.relay.url",
+          "description": "URL of the CTI relay service for policy checks",
+          "sensitive": false,
+          "value": "http://cti-relay:3010"
+        },
+        {
+          "name": "clickhouse.url",
+          "description": "ClickHouse HTTP interface URL for provenance export",
+          "sensitive": false,
+          "value": "http://clickhouse-low:8123"
+        },
+        {
+          "name": "clickhouse.db",
+          "description": "ClickHouse database name",
+          "sensitive": false,
+          "value": "ems_audit"
+        },
+        {
+          "name": "max.transfer.size.bytes",
+          "description": "Maximum size of a single transfer payload in bytes",
+          "sensitive": false,
+          "value": "10485760"
+        },
+        {
+          "name": "cti.api.token",
+          "description": "Bearer token for authenticating with the CTI relay API",
+          "sensitive": true,
+          "value": null
+        }
+      ]
+    }
+  ],
+  "rootGroup": {
+    "identifier": "pg-cti-transfer-hub",
+    "instanceIdentifier": "pg-cti-transfer-hub-inst",
+    "name": "CTI Transfer Hub",
+    "comments": "Central data flow orchestration hub for cross-enclave transfers. Receives events from low-side and high-side MiNiFi agents via Site-to-Site, applies classification filtering, enforces transfer policies via CTI relay, and routes approved data to destination enclaves. All transfer provenance is exported to ClickHouse.",
+    "position": { "x": 0, "y": 0 },
+    "processGroups": [],
+    "remoteProcessGroups": [],
+    "processors": [
+      {
+        "identifier": "proc-classify-filter",
+        "instanceIdentifier": "proc-classify-filter-inst",
+        "name": "ClassificationFilter",
+        "comments": "Routes events based on classification attribute. SECRET events are auto-terminated (never cross enclave boundaries). CUI events go to manual review queue. UNCLASSIFIED events proceed to auto-approve.",
+        "type": "org.apache.nifi.processors.standard.RouteOnAttribute",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "Routing Strategy": "Route to Property name",
+          "secret": "${source.classification:equals('SECRET')}",
+          "cui": "${source.classification:equals('CUI')}",
+          "unclassified": "${source.classification:equals('UNCLASSIFIED')}"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["secret"],
+        "position": { "x": 400, "y": 200 }
+      },
+      {
+        "identifier": "proc-policy-check",
+        "instanceIdentifier": "proc-policy-check-inst",
+        "name": "PolicyCheck",
+        "comments": "Calls CTI relay POST /api/v1/cti/transfer to evaluate transfer policy. The relay checks classification levels, data types, time windows, and approval status. Returns 200 (approved), 202 (pending review), or 403 (denied).",
+        "type": "org.apache.nifi.processors.standard.InvokeHTTP",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "HTTP Method": "POST",
+          "Remote URL": "#{cti.relay.url}/api/v1/cti/transfer",
+          "Content-Type": "application/json",
+          "Authorization": "Bearer #{cti.api.token}",
+          "Response Body Attribute Name": "policy.response",
+          "Put Response Body In Attribute": "true",
+          "Penalize on \"No Retry\"": "true",
+          "Connection Timeout": "10 secs",
+          "Read Timeout": "30 secs",
+          "Include Date Header": "true",
+          "Follow Redirects": "true",
+          "Send Message Body": "true"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "10 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 2,
+        "autoTerminatedRelationships": [],
+        "position": { "x": 400, "y": 500 }
+      },
+      {
+        "identifier": "proc-route-policy-result",
+        "instanceIdentifier": "proc-route-policy-result-inst",
+        "name": "RoutePolicyResult",
+        "comments": "Routes based on the HTTP status code from the policy check. 200 = approved (forward to destination), 202 = pending (queue for manual review), 403 = denied (log and drop).",
+        "type": "org.apache.nifi.processors.standard.RouteOnAttribute",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "Routing Strategy": "Route to Property name",
+          "approved": "${invokehttp.status.code:equals('200')}",
+          "pending_review": "${invokehttp.status.code:equals('202')}",
+          "denied": "${invokehttp.status.code:equals('403')}"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["denied", "unmatched"],
+        "position": { "x": 400, "y": 800 }
+      },
+      {
+        "identifier": "proc-route-direction",
+        "instanceIdentifier": "proc-route-direction-inst",
+        "name": "RouteByDirection",
+        "comments": "Routes approved data based on source enclave. Low-side data goes to high-side output port. High-side commands go to low-side output port.",
+        "type": "org.apache.nifi.processors.standard.RouteOnAttribute",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "Routing Strategy": "Route to Property name",
+          "to_high": "${source.enclave:equals('low')}",
+          "to_low": "${source.enclave:equals('high')}"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["unmatched"],
+        "position": { "x": 400, "y": 1100 }
+      },
+      {
+        "identifier": "proc-provenance-export",
+        "instanceIdentifier": "proc-provenance-export-inst",
+        "name": "ProvenanceExport",
+        "comments": "Pushes transfer provenance records to ClickHouse via HTTP interface. Each successful or denied transfer generates a provenance record with source, destination, classification, timestamp, and policy decision.",
+        "type": "org.apache.nifi.processors.standard.InvokeHTTP",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "HTTP Method": "POST",
+          "Remote URL": "#{clickhouse.url}/?database=#{clickhouse.db}&query=INSERT%20INTO%20cti_provenance%20FORMAT%20JSONEachRow",
+          "Content-Type": "application/json",
+          "Authorization": "Bearer #{cti.api.token}",
+          "Connection Timeout": "5 secs",
+          "Read Timeout": "10 secs",
+          "Send Message Body": "true",
+          "Follow Redirects": "false"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "10 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["Response", "Failure", "No Retry", "Retry"],
+        "position": { "x": 800, "y": 800 }
+      },
+      {
+        "identifier": "proc-build-provenance-record",
+        "instanceIdentifier": "proc-build-provenance-record-inst",
+        "name": "BuildProvenanceRecord",
+        "comments": "Constructs a JSON provenance record from flow file attributes for ClickHouse insertion.",
+        "type": "org.apache.nifi.processors.standard.ReplaceText",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "Replacement Strategy": "Always Replace",
+          "Replacement Value": "{\"transfer_id\":\"${UUID()}\",\"source_enclave\":\"${source.enclave}\",\"classification\":\"${source.classification}\",\"policy_decision\":\"${invokehttp.status.code}\",\"timestamp\":\"${now():format('yyyy-MM-dd HH:mm:ss')}\",\"flow_file_size\":${fileSize},\"nifi_host\":\"${hostname()}\"}",
+          "Evaluation Mode": "Entire text"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["failure"],
+        "position": { "x": 800, "y": 500 }
+      },
+      {
+        "identifier": "proc-pending-review-queue",
+        "instanceIdentifier": "proc-pending-review-queue-inst",
+        "name": "PendingReviewQueue",
+        "comments": "Holds CUI-classified or pending-review events until manual approval. Uses UpdateAttribute to mark status and a retry loop to re-check policy after configurable delay.",
+        "type": "org.apache.nifi.processors.standard.UpdateAttribute",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "review.status": "pending",
+          "review.queued_at": "${now():format('yyyy-MM-dd HH:mm:ss.SSS')}",
+          "review.retry_count": "${review.retry_count:replaceNull('0'):plus(1)}"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "30 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "60 sec",
+        "yieldDuration": "30 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": [],
+        "position": { "x": 100, "y": 800 }
+      },
+      {
+        "identifier": "proc-size-filter",
+        "instanceIdentifier": "proc-size-filter-inst",
+        "name": "SizeFilter",
+        "comments": "Drops flow files exceeding the maximum transfer size to prevent exfiltration of large data blobs.",
+        "type": "org.apache.nifi.processors.standard.RouteOnAttribute",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "Routing Strategy": "Route to Property name",
+          "within_limit": "${fileSize:le(#{max.transfer.size.bytes})}"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": ["unmatched"],
+        "position": { "x": 400, "y": 50 }
+      },
+      {
+        "identifier": "proc-policy-check-error-log",
+        "instanceIdentifier": "proc-policy-check-error-log-inst",
+        "name": "PolicyCheckErrorLog",
+        "comments": "Logs flow files that failed the policy check HTTP call (Failure, No Retry, Retry) for debugging and alerting. Routes to the pending review queue for manual inspection.",
+        "type": "org.apache.nifi.processors.standard.LogAttribute",
+        "bundle": {
+          "group": "org.apache.nifi",
+          "artifact": "nifi-standard-nar",
+          "version": "2.0.0"
+        },
+        "properties": {
+          "Log Level": "warn",
+          "Log Payload": "false",
+          "Log prefix": "PolicyCheckError"
+        },
+        "propertyDescriptors": {},
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "schedulingPeriod": "0 sec",
+        "executionNode": "ALL",
+        "penaltyDuration": "30 sec",
+        "yieldDuration": "1 sec",
+        "bulletinLevel": "WARN",
+        "runDurationMillis": 0,
+        "concurrentlySchedulableTaskCount": 1,
+        "autoTerminatedRelationships": [],
+        "position": { "x": 100, "y": 500 }
+      }
+    ],
+    "inputPorts": [
+      {
+        "identifier": "port-low-telemetry-input",
+        "instanceIdentifier": "port-low-telemetry-input-inst",
+        "name": "low-telemetry-input",
+        "comments": "Receives telemetry events from low-side MiNiFi agent via Site-to-Site",
+        "type": "INPUT_PORT",
+        "concurrentlySchedulableTaskCount": 2,
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "position": { "x": 100, "y": -100 }
+      },
+      {
+        "identifier": "port-high-command-input",
+        "instanceIdentifier": "port-high-command-input-inst",
+        "name": "high-command-input",
+        "comments": "Receives command relay requests from high-side MiNiFi agent via Site-to-Site",
+        "type": "INPUT_PORT",
+        "concurrentlySchedulableTaskCount": 2,
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "position": { "x": 700, "y": -100 }
+      }
+    ],
+    "outputPorts": [
+      {
+        "identifier": "port-high-telemetry-output",
+        "instanceIdentifier": "port-high-telemetry-output-inst",
+        "name": "high-telemetry-output",
+        "comments": "Sends approved telemetry events to high-side MiNiFi agent via Site-to-Site",
+        "type": "OUTPUT_PORT",
+        "concurrentlySchedulableTaskCount": 2,
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "position": { "x": 200, "y": 1400 }
+      },
+      {
+        "identifier": "port-low-command-output",
+        "instanceIdentifier": "port-low-command-output-inst",
+        "name": "low-command-output",
+        "comments": "Sends approved command relay requests to low-side MiNiFi agent via Site-to-Site",
+        "type": "OUTPUT_PORT",
+        "concurrentlySchedulableTaskCount": 2,
+        "schedulingStrategy": "TIMER_DRIVEN",
+        "position": { "x": 600, "y": 1400 }
+      }
+    ],
+    "connections": [
+      {
+        "identifier": "conn-low-input-to-size-filter",
+        "instanceIdentifier": "conn-low-input-to-size-filter-inst",
+        "name": "Low Telemetry to Size Filter",
+        "source": { "id": "port-low-telemetry-input", "type": "INPUT_PORT" },
+        "destination": { "id": "proc-size-filter", "type": "PROCESSOR" },
+        "selectedRelationships": [],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "5 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-high-input-to-size-filter",
+        "instanceIdentifier": "conn-high-input-to-size-filter-inst",
+        "name": "High Commands to Size Filter",
+        "source": { "id": "port-high-command-input", "type": "INPUT_PORT" },
+        "destination": { "id": "proc-size-filter", "type": "PROCESSOR" },
+        "selectedRelationships": [],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "5 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-size-filter-to-classify",
+        "instanceIdentifier": "conn-size-filter-to-classify-inst",
+        "name": "Within Limit to Classification",
+        "source": { "id": "proc-size-filter", "type": "PROCESSOR" },
+        "destination": { "id": "proc-classify-filter", "type": "PROCESSOR" },
+        "selectedRelationships": ["within_limit"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "5 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-classify-unclass-to-policy",
+        "instanceIdentifier": "conn-classify-unclass-to-policy-inst",
+        "name": "UNCLASS to Policy Check",
+        "source": { "id": "proc-classify-filter", "type": "PROCESSOR" },
+        "destination": { "id": "proc-policy-check", "type": "PROCESSOR" },
+        "selectedRelationships": ["unclassified"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-classify-cui-to-review",
+        "instanceIdentifier": "conn-classify-cui-to-review-inst",
+        "name": "CUI to Review Queue",
+        "source": { "id": "proc-classify-filter", "type": "PROCESSOR" },
+        "destination": { "id": "proc-pending-review-queue", "type": "PROCESSOR" },
+        "selectedRelationships": ["cui"],
+        "backPressureObjectThreshold": 5000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "60 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-review-to-policy",
+        "instanceIdentifier": "conn-review-to-policy-inst",
+        "name": "Review Queue to Policy Check (retry)",
+        "source": { "id": "proc-pending-review-queue", "type": "PROCESSOR" },
+        "destination": { "id": "proc-policy-check", "type": "PROCESSOR" },
+        "selectedRelationships": ["success"],
+        "backPressureObjectThreshold": 5000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "60 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-policy-to-route-result",
+        "instanceIdentifier": "conn-policy-to-route-result-inst",
+        "name": "Policy Response to Route",
+        "source": { "id": "proc-policy-check", "type": "PROCESSOR" },
+        "destination": { "id": "proc-route-policy-result", "type": "PROCESSOR" },
+        "selectedRelationships": ["Response"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-policy-original-to-provenance",
+        "instanceIdentifier": "conn-policy-original-to-provenance-inst",
+        "name": "Policy Original to Provenance",
+        "source": { "id": "proc-policy-check", "type": "PROCESSOR" },
+        "destination": { "id": "proc-build-provenance-record", "type": "PROCESSOR" },
+        "selectedRelationships": ["Original"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-provenance-build-to-export",
+        "instanceIdentifier": "conn-provenance-build-to-export-inst",
+        "name": "Provenance Record to ClickHouse",
+        "source": { "id": "proc-build-provenance-record", "type": "PROCESSOR" },
+        "destination": { "id": "proc-provenance-export", "type": "PROCESSOR" },
+        "selectedRelationships": ["success"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-approved-to-direction",
+        "instanceIdentifier": "conn-approved-to-direction-inst",
+        "name": "Approved to Direction Router",
+        "source": { "id": "proc-route-policy-result", "type": "PROCESSOR" },
+        "destination": { "id": "proc-route-direction", "type": "PROCESSOR" },
+        "selectedRelationships": ["approved"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-pending-to-review",
+        "instanceIdentifier": "conn-pending-to-review-inst",
+        "name": "Pending Review to Queue",
+        "source": { "id": "proc-route-policy-result", "type": "PROCESSOR" },
+        "destination": { "id": "proc-pending-review-queue", "type": "PROCESSOR" },
+        "selectedRelationships": ["pending_review"],
+        "backPressureObjectThreshold": 5000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "60 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-direction-to-high",
+        "instanceIdentifier": "conn-direction-to-high-inst",
+        "name": "Approved to High Side",
+        "source": { "id": "proc-route-direction", "type": "PROCESSOR" },
+        "destination": { "id": "port-high-telemetry-output", "type": "OUTPUT_PORT" },
+        "selectedRelationships": ["to_high"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-direction-to-low",
+        "instanceIdentifier": "conn-direction-to-low-inst",
+        "name": "Approved Commands to Low Side",
+        "source": { "id": "proc-route-direction", "type": "PROCESSOR" },
+        "destination": { "id": "port-low-command-output", "type": "OUTPUT_PORT" },
+        "selectedRelationships": ["to_low"],
+        "backPressureObjectThreshold": 10000,
+        "backPressureDataSizeThreshold": "100 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-policy-failure-to-error-log",
+        "instanceIdentifier": "conn-policy-failure-to-error-log-inst",
+        "name": "Policy Check Failure to Error Log",
+        "source": { "id": "proc-policy-check", "type": "PROCESSOR" },
+        "destination": { "id": "proc-policy-check-error-log", "type": "PROCESSOR" },
+        "selectedRelationships": ["Failure"],
+        "backPressureObjectThreshold": 5000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-policy-noretry-to-error-log",
+        "instanceIdentifier": "conn-policy-noretry-to-error-log-inst",
+        "name": "Policy Check No Retry to Error Log",
+        "source": { "id": "proc-policy-check", "type": "PROCESSOR" },
+        "destination": { "id": "proc-policy-check-error-log", "type": "PROCESSOR" },
+        "selectedRelationships": ["No Retry"],
+        "backPressureObjectThreshold": 5000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-policy-retry-to-error-log",
+        "instanceIdentifier": "conn-policy-retry-to-error-log-inst",
+        "name": "Policy Check Retry to Error Log",
+        "source": { "id": "proc-policy-check", "type": "PROCESSOR" },
+        "destination": { "id": "proc-policy-check-error-log", "type": "PROCESSOR" },
+        "selectedRelationships": ["Retry"],
+        "backPressureObjectThreshold": 5000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "10 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      },
+      {
+        "identifier": "conn-error-log-to-review-queue",
+        "instanceIdentifier": "conn-error-log-to-review-queue-inst",
+        "name": "Error Log to Review Queue",
+        "source": { "id": "proc-policy-check-error-log", "type": "PROCESSOR" },
+        "destination": { "id": "proc-pending-review-queue", "type": "PROCESSOR" },
+        "selectedRelationships": ["success"],
+        "backPressureObjectThreshold": 5000,
+        "backPressureDataSizeThreshold": "50 MB",
+        "flowFileExpiration": "60 min",
+        "labelIndex": 1,
+        "zIndex": 0
+      }
+    ],
+    "labels": [
+      {
+        "identifier": "label-flow-title",
+        "name": "",
+        "value": "EMS-COP CTI Transfer Hub\n\nData flow orchestration for cross-enclave transfers.\nClassification filtering -> Policy check -> Direction routing.",
+        "position": { "x": 0, "y": -250 },
+        "width": 800,
+        "height": 80,
+        "style": {
+          "font-size": "14px"
+        }
+      }
+    ],
+    "funnels": [],
+    "controllerServices": []
+  }
+}

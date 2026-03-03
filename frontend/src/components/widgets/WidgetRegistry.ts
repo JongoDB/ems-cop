@@ -48,6 +48,8 @@ const PluginIframe = lazy(() => import('./PluginIframeWidget'));
 const MetricsChart = lazy(() => import('./MetricsChartWidget'));
 const EndpointTable = lazy(() => import('./EndpointTableWidget'));
 const CommandPalette = lazy(() => import('./CommandPaletteWidget'));
+const CTIHealth = lazy(() => import('./CTIHealthWidget'));
+const ConsolidatedAudit = lazy(() => import('./ConsolidatedAuditWidget'));
 
 // ════════════════════════════════════════════
 //  WIDGET REGISTRY
@@ -184,6 +186,28 @@ export const widgetRegistry: Map<string, WidgetDefinition> = new Map([
     defaultSize: { w: 4, h: 2 },
     minSize: { w: 3, h: 1 },
     component: CommandPalette as ComponentType<WidgetProps>,
+  }],
+
+  ['cti_health', {
+    type: 'cti_health',
+    name: 'CTI Link Status',
+    description: 'Controlled Transfer Interface health and transfer status',
+    icon: 'Activity',
+    category: 'monitoring',
+    defaultSize: { w: 4, h: 3 },
+    minSize: { w: 3, h: 2 },
+    component: CTIHealth as ComponentType<WidgetProps>,
+  }],
+
+  ['consolidated_audit', {
+    type: 'consolidated_audit',
+    name: 'Consolidated Audit',
+    description: 'Unified audit trail across both enclaves',
+    icon: 'ScrollText',
+    category: 'monitoring',
+    defaultSize: { w: 6, h: 4 },
+    minSize: { w: 4, h: 3 },
+    component: ConsolidatedAudit as ComponentType<WidgetProps>,
   }],
 ]);
 

@@ -1,0 +1,570 @@
+# EMS-COP Docker Compose — Low-Side Enclave
+# Internet-facing, tactical operations enclave with Sliver C2 and managed endpoints.
+#
+# Usage:
+#   # Low side only
+#   docker compose -f docker-compose.low.yml up -d
+#
+#   # Dual enclave (low + high + CTI bridge)
+#   docker compose -f docker-compose.low.yml -f docker-compose.cti.yml -f docker-compose.high.yml up -d
+#
+# Env file: copy env.low.template to .env.low, then:
+#   docker compose -f docker-compose.low.yml --env-file .env.low up -d
+
+x-common-env-low: &common-env-low
+  NODE_ENV: production
+  TZ: UTC
+  ENCLAVE: low
+  POSTGRES_HOST: postgres-low
+  POSTGRES_PORT: "5432"
+  POSTGRES_DB: ems
+  POSTGRES_USER: ems_admin
+  POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ems_dev_password_change_me}
+  REDIS_URL: redis://:${REDIS_PASSWORD:-ems_redis_password}@redis-low:6379
+  NATS_URL: nats://nats-low:4222
+  CLICKHOUSE_HOST: clickhouse-low
+  CLICKHOUSE_PORT: "8123"
+  CLICKHOUSE_DB: ems_audit
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ems_audit_password}
+  MINIO_ENDPOINT: minio-low:9000
+  MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-ems_minio_admin}
+  MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-ems_minio_secret_change_me}
+  JWT_SECRET: ${JWT_SECRET:-ems_jwt_secret_change_me_in_production}
+  ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:18080}
+  CTI_RELAY_URL: http://cti-relay:3010
+
+networks:
+  low-ems-net:
+    name: low-ems-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.100.0.0/16
+  endpoint-net:
+    name: endpoint-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.101.0.0/16
+  cti-net:
+    external: true
+
+volumes:
+  postgres-low-data:
+  clickhouse-low-data:
+  redis-low-data:
+  minio-low-data:
+  nats-low-data:
+  sliver-config:
+  sliver-builds:
+
+services:
+
+  # ════════════════════════════════════════════
+  #  INFRASTRUCTURE — LOW SIDE
+  # ════════════════════════════════════════════
+
+  traefik-low:
+    image: traefik:v3.3
+    container_name: ems-traefik-low
+    ports:
+      - "${EMS_HTTP_PORT:-18080}:80"
+      - "${EMS_HTTPS_PORT:-18443}:443"
+      - "${TRAEFIK_DASHBOARD_PORT:-18081}:8080"
+    volumes:
+      - ./infra/traefik/traefik-low.yml:/etc/traefik/traefik.yml:ro
+      - ./infra/traefik/dynamic-low.yml:/etc/traefik/dynamic.yml:ro
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  postgres-low:
+    image: postgres:16-alpine
+    container_name: ems-postgres-low
+    environment:
+      POSTGRES_DB: ems
+      POSTGRES_USER: ems_admin
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ems_dev_password_change_me}
+    volumes:
+      - postgres-low-data:/var/lib/postgresql/data
+      - ./infra/db/postgres/migrations:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${PG_HOST_PORT:-15432}:5432"
+    networks:
+      - low-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ems_admin -d ems"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  clickhouse-low:
+    image: clickhouse/clickhouse-server:24-alpine
+    container_name: ems-clickhouse-low
+    environment:
+      CLICKHOUSE_DB: ems_audit
+      CLICKHOUSE_USER: ems_audit
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-ems_audit_password}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-low-data:/var/lib/clickhouse
+      - ./infra/db/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    ports:
+      - "${CH_HTTP_PORT:-18123}:8123"
+      - "${CH_NATIVE_PORT:-19000}:9000"
+    networks:
+      - low-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -nv -O- 'http://127.0.0.1:8123/ping' || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis-low:
+    image: redis:7-alpine
+    container_name: ems-redis-low
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-ems_redis_password}
+    volumes:
+      - redis-low-data:/data
+    ports:
+      - "${REDIS_HOST_PORT:-16379}:6379"
+    networks:
+      - low-ems-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-ems_redis_password}", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  nats-low:
+    image: nats:2-alpine
+    container_name: ems-nats-low
+    command: >
+      --jetstream
+      --store_dir /data
+      --http_port 8222
+    volumes:
+      - nats-low-data:/data
+    ports:
+      - "${NATS_HOST_PORT:-14222}:4222"
+      - "${NATS_MON_PORT:-18222}:8222"
+    networks:
+      - low-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8222/healthz || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio-low:
+    image: minio/minio:latest
+    container_name: ems-minio-low
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:-ems_minio_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:-ems_minio_secret_change_me}
+    volumes:
+      - minio-low-data:/data
+    ports:
+      - "${MINIO_API_PORT:-19090}:9000"
+      - "${MINIO_CONSOLE_PORT:-19001}:9001"
+    networks:
+      - low-ems-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  EMS CORE SERVICES — LOW SIDE
+  # ════════════════════════════════════════════
+
+  auth-service-low:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    container_name: ems-auth-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: auth-service
+      SERVICE_PORT: "3001"
+    depends_on:
+      postgres-low:
+        condition: service_healthy
+      redis-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  workflow-engine-low:
+    build:
+      context: ./services/workflow-engine
+      dockerfile: Dockerfile
+    container_name: ems-workflow-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: workflow-engine
+      SERVICE_PORT: "3002"
+    depends_on:
+      postgres-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3002/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  ticket-service-low:
+    build:
+      context: ./services/ticket
+      dockerfile: Dockerfile
+    container_name: ems-ticket-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: ticket-service
+      SERVICE_PORT: "3003"
+    depends_on:
+      postgres-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3003/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  dashboard-service-low:
+    build:
+      context: ./services/dashboard
+      dockerfile: Dockerfile
+    container_name: ems-dashboard-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: dashboard-service
+      SERVICE_PORT: "3004"
+    depends_on:
+      postgres-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3004/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  c2-gateway-low:
+    build:
+      context: ./services/c2-gateway
+      dockerfile: Dockerfile
+    container_name: ems-c2-gateway-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: c2-gateway
+      SERVICE_PORT: "3005"
+      SLIVER_GRPC_HOST: sliver-server
+      SLIVER_GRPC_PORT: "31337"
+      SLIVER_OPERATOR_CONFIG: /home/sliver/.sliver/configs/ems-operator.cfg
+    volumes:
+      - sliver-config:/home/sliver/.sliver:ro
+    depends_on:
+      nats-low:
+        condition: service_healthy
+      sliver-server:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3005/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+      - endpoint-net  # Bridge to endpoint network for C2 traffic
+    restart: unless-stopped
+
+  audit-service-low:
+    build:
+      context: ./services/audit
+      dockerfile: Dockerfile
+    container_name: ems-audit-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: audit-service
+      SERVICE_PORT: "3006"
+    depends_on:
+      clickhouse-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3006/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  notification-service-low:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    container_name: ems-notification-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: notification-service
+      SERVICE_PORT: "3007"
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASS: ${SMTP_PASS:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@ems-cop.local}
+      TICKET_SERVICE_URL: http://ticket-service-low:3003
+      JIRA_DEFAULT_URL: ${JIRA_DEFAULT_URL:-}
+      JIRA_DEFAULT_EMAIL: ${JIRA_DEFAULT_EMAIL:-}
+      JIRA_DEFAULT_TOKEN: ${JIRA_DEFAULT_TOKEN:-}
+    depends_on:
+      postgres-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+      redis-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3007/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  endpoint-service-low:
+    build:
+      context: ./services/endpoint
+      dockerfile: Dockerfile
+    container_name: ems-endpoint-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: endpoint-service
+      SERVICE_PORT: "3008"
+    depends_on:
+      postgres-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3008/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  ws-relay-low:
+    build:
+      context: ./services/ws-relay
+      dockerfile: Dockerfile
+    container_name: ems-ws-relay-low
+    environment:
+      <<: *common-env-low
+      SERVICE_NAME: ws-relay
+      SERVICE_PORT: "3009"
+    depends_on:
+      redis-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3009/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  FRONTEND — LOW SIDE
+  # ════════════════════════════════════════════
+
+  frontend-low:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_ENCLAVE: low
+    container_name: ems-frontend-low
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/ || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - low-ems-net
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  SLIVER C2 BACKEND (low side only)
+  # ════════════════════════════════════════════
+
+  sliver-server:
+    build:
+      context: ./sliver
+      dockerfile: Dockerfile
+    container_name: ems-sliver-low
+    volumes:
+      - sliver-config:/home/sliver/.sliver
+      - sliver-builds:/home/sliver/builds
+    ports:
+      - "${SLIVER_GRPC_PORT:-31337}:31337"
+    networks:
+      low-ems-net:
+        ipv4_address: 10.100.0.100
+      endpoint-net:
+        ipv4_address: 10.101.0.100
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  MANAGED ENDPOINTS (low side only)
+  # ════════════════════════════════════════════
+
+  endpoint-ubuntu-1:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.ubuntu
+    container_name: ems-endpoint-ubuntu-1
+    hostname: corp-ws-001
+    environment:
+      ENDPOINT_ROLE: workstation
+      ENDPOINT_SEGMENT: corp-a
+      VNC_PASSWORD: ${VNC_PASSWORD:-vnc_pass}
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.1.10
+    restart: unless-stopped
+
+  endpoint-ubuntu-2:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.ubuntu
+    container_name: ems-endpoint-ubuntu-2
+    hostname: corp-ws-002
+    environment:
+      ENDPOINT_ROLE: workstation
+      ENDPOINT_SEGMENT: corp-a
+      VNC_PASSWORD: ${VNC_PASSWORD:-vnc_pass}
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.1.11
+    restart: unless-stopped
+
+  endpoint-alpine-1:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.alpine
+    container_name: ems-endpoint-alpine-1
+    hostname: dmz-web-001
+    environment:
+      ENDPOINT_ROLE: webserver
+      ENDPOINT_SEGMENT: dmz-b
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.2.10
+    restart: unless-stopped
+
+  endpoint-alpine-2:
+    build:
+      context: ./endpoints
+      dockerfile: Dockerfile.alpine
+    container_name: ems-endpoint-alpine-2
+    hostname: dmz-db-001
+    environment:
+      ENDPOINT_ROLE: database
+      ENDPOINT_SEGMENT: dmz-b
+    networks:
+      endpoint-net:
+        ipv4_address: 10.101.2.11
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  MINIFI AGENT — LOW SIDE
+  #  Lightweight data collection agent that subscribes to low-side
+  #  NATS topics (audit.*, endpoint.*, c2.*) and forwards events
+  #  to NiFi CTI Hub via Site-to-Site protocol.
+  # ════════════════════════════════════════════
+
+  minifi-low:
+    image: apache/nifi-minifi-java:2.0.0
+    container_name: ems-minifi-low
+    volumes:
+      - ./nifi/minifi-low.yml:/opt/minifi/minifi-current/conf/config.yml:ro
+    environment:
+      NATS_URL: nats://nats-low:4222
+      NIFI_URL: http://nifi:8443
+    networks:
+      - low-ems-net
+      - cti-net
+    depends_on:
+      nats-low:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  CTI BRIDGE — LOW SIDE
+  #  Lightweight socat proxy that exposes only PG and NATS from
+  #  low-ems-net to cti-net. The cti-relay connects to these
+  #  proxied ports instead of directly to low-side infrastructure.
+  # ════════════════════════════════════════════
+
+  cti-low-bridge:
+    image: alpine/socat:latest
+    container_name: ems-cti-low-bridge
+    command: >
+      sh -c "
+      socat TCP-LISTEN:5432,fork,reuseaddr TCP:postgres-low:5432 &
+      socat TCP-LISTEN:4222,fork,reuseaddr TCP:nats-low:4222 &
+      wait
+      "
+    depends_on:
+      postgres-low:
+        condition: service_healthy
+      nats-low:
+        condition: service_healthy
+    networks:
+      low-ems-net:
+      cti-net:
+        aliases:
+          - pg-low-proxy
+          - nats-low-proxy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 5432 && nc -z localhost 4222"]
+      interval: 10s
+      timeout: 3s
+      retries: 5

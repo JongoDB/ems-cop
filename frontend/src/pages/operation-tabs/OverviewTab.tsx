@@ -1,11 +1,13 @@
 import { useOutletContext } from 'react-router-dom'
 import { Network, FileSearch, AlertTriangle, Calendar } from 'lucide-react'
+import ClassificationBadge from '../../components/ClassificationBadge'
 
 interface Operation {
   id: string
   name: string
   status: string
   risk_level: number
+  classification?: string
   objective: string
   network_count: number
   finding_count: number
@@ -79,6 +81,10 @@ export default function OverviewTab() {
         }}>
           <h3 className="detail-section-title">DETAILS</h3>
           <div className="detail-meta" style={{ borderBottom: 'none', paddingBottom: 0, marginBottom: 0 }}>
+            <div className="meta-row">
+              <span className="meta-label">CLASSIFICATION</span>
+              <ClassificationBadge classification={operation.classification} size="md" />
+            </div>
             <div className="meta-row">
               <span className="meta-label">RISK LEVEL</span>
               <span style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
