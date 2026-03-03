@@ -16,14 +16,19 @@ interface Incident {
   id: string
   title: string
   description?: string
-  severity: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  incident_severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  severity?: 'critical' | 'high' | 'medium' | 'low' | 'info'
+  priority?: string
   status: string
-  source: string
+  alert_source?: string
+  source?: string
+  ticket_type?: string
   classification?: string
   mitre_techniques?: string[]
   containment_status?: string
   assigned_to?: string
   assignee_name?: string
+  creator_name?: string
   playbook_execution_id?: string
   created_at: string
   updated_at: string
@@ -104,8 +109,8 @@ export default function IncidentDetailPage() {
   const fetchIncident = useCallback(async () => {
     if (!id) return
     try {
-      const data = await apiFetch<Incident>(`/tickets/incidents/${id}`)
-      setIncident(data)
+      const res = await apiFetch<{ data: Incident }>(`/tickets/${id}`)
+      setIncident(res.data ?? res as unknown as Incident)
     } catch {
       setIncident(null)
     } finally {
@@ -156,7 +161,7 @@ export default function IncidentDetailPage() {
   const handleTransition = async (action: string) => {
     if (!id) return
     try {
-      await apiFetch(`/tickets/incidents/${id}/transition`, {
+      await apiFetch(`/tickets/${id}/transition`, {
         method: 'POST',
         body: JSON.stringify({ action }),
       })
@@ -238,7 +243,7 @@ export default function IncidentDetailPage() {
           }}>
             {incident.title}
           </h1>
-          <SeverityBadge severity={incident.severity} />
+          <SeverityBadge severity={(incident.incident_severity || incident.severity || 'medium') as 'critical' | 'high' | 'medium' | 'low' | 'info'} />
           <ClassificationBadge classification={incident.classification} size="md" />
           <span
             className="status-badge"
@@ -296,11 +301,11 @@ export default function IncidentDetailPage() {
               </div>
               <div className="meta-row">
                 <span className="meta-label">SEVERITY</span>
-                <SeverityBadge severity={incident.severity} />
+                <SeverityBadge severity={(incident.incident_severity || incident.severity || 'medium') as 'critical' | 'high' | 'medium' | 'low' | 'info'} />
               </div>
               <div className="meta-row">
                 <span className="meta-label">SOURCE</span>
-                <span>{incident.source || '--'}</span>
+                <span>{incident.alert_source || incident.source || '--'}</span>
               </div>
               <div className="meta-row">
                 <span className="meta-label">ASSIGNED TO</span>
