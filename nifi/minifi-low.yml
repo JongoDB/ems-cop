@@ -1,0 +1,163 @@
+# MiNiFi Low-Side Agent Configuration
+# Lightweight data collection agent running on the low-side (tactical) enclave.
+#
+# Responsibilities:
+#   - Subscribes to low-side NATS topics (audit.*, endpoint.*, c2.*)
+#   - Forwards events to NiFi CTI Hub via Site-to-Site (S2S) protocol
+#   - Runs on both low-ems-net (to reach NATS) and cti-net (to reach NiFi)
+#
+# Environment variables (injected via Docker Compose):
+#   NATS_URL  - Low-side NATS server URL (e.g., nats://nats-low:4222)
+#   NIFI_URL  - NiFi CTI Hub URL (e.g., http://nifi:8443/nifi)
+
+MiNiFi Config Version: 3
+
+Flow Controller:
+  name: EMS-COP Low-Side MiNiFi Agent
+  comment: Collects audit, endpoint, and C2 telemetry from the low-side NATS bus and forwards to NiFi CTI Hub
+
+Core Properties:
+  flow controller graceful shutdown period: 10 sec
+  flow service write delay interval: 500 ms
+  administrative yield duration: 30 sec
+  bored yield duration: 10 ms
+
+FlowFile Repository:
+  implementation: org.apache.nifi.controller.repository.WriteAheadFlowFileRepository
+  partitions: 256
+  checkpoint interval: 2 mins
+
+Content Repository:
+  implementation: org.apache.nifi.controller.repository.FileSystemRepository
+  content claim max appendable size: 10 MB
+  content claim max flow files: 100
+
+Provenance Repository:
+  provenance rollover time: 1 min
+
+Processors:
+  # ────────────────────────────────────────────
+  # NATS Consumers — one per topic family
+  # Each uses ExecuteProcess to run nats-cli subscriber
+  # ────────────────────────────────────────────
+
+  - id: consume-nats-audit
+    class: org.apache.nifi.processors.standard.ExecuteProcess
+    name: Consume NATS Audit Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 1 sec
+    penalty duration: 30 sec
+    yield duration: 1 sec
+    run duration nanos: 0
+    auto-terminated relationships list:
+    properties:
+      Command: /usr/local/bin/nats
+      Command Arguments: sub "audit.>" --count=100 --server=${NATS_URL}
+      Batch Duration: 5 sec
+      Redirect Error Stream: "false"
+
+  - id: consume-nats-endpoint
+    class: org.apache.nifi.processors.standard.ExecuteProcess
+    name: Consume NATS Endpoint Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 1 sec
+    penalty duration: 30 sec
+    yield duration: 1 sec
+    run duration nanos: 0
+    auto-terminated relationships list:
+    properties:
+      Command: /usr/local/bin/nats
+      Command Arguments: sub "endpoint.>" --count=100 --server=${NATS_URL}
+      Batch Duration: 5 sec
+      Redirect Error Stream: "false"
+
+  - id: consume-nats-c2
+    class: org.apache.nifi.processors.standard.ExecuteProcess
+    name: Consume NATS C2 Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 1 sec
+    penalty duration: 30 sec
+    yield duration: 1 sec
+    run duration nanos: 0
+    auto-terminated relationships list:
+    properties:
+      Command: /usr/local/bin/nats
+      Command Arguments: sub "c2.>" --count=100 --server=${NATS_URL}
+      Batch Duration: 5 sec
+      Redirect Error Stream: "false"
+
+  # ────────────────────────────────────────────
+  # Attribute enrichment — tag events with source enclave
+  # ────────────────────────────────────────────
+
+  - id: tag-source-enclave
+    class: org.apache.nifi.processors.attributes.UpdateAttribute
+    name: Tag Source Enclave
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 0 sec
+    properties:
+      source.enclave: low
+      source.classification: UNCLASSIFIED
+      collected.timestamp: ${now():format('yyyy-MM-dd HH:mm:ss.SSS')}
+
+Remote Process Groups:
+  - id: rpg-nifi
+    name: NiFi CTI Hub
+    comment: Site-to-Site connection to the NiFi instance in the CTI zone
+    url: http://nifi:8443/nifi
+    timeout: 30 sec
+    yield period: 10 sec
+    transport protocol: RAW
+    proxy host:
+    proxy port:
+    proxy user:
+    proxy password:
+    Input Ports:
+      - id: low-telemetry-input
+        name: low-telemetry-input
+        comment: Receives low-side telemetry events (audit, endpoint, C2)
+        max concurrent tasks: 2
+        use compression: true
+
+Connections:
+  # Audit events -> tag -> NiFi
+  - id: conn-audit-to-tag
+    name: Audit Events to Tag
+    source id: consume-nats-audit
+    source relationship names:
+      - output
+    destination id: tag-source-enclave
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 5 min
+
+  - id: conn-endpoint-to-tag
+    name: Endpoint Events to Tag
+    source id: consume-nats-endpoint
+    source relationship names:
+      - output
+    destination id: tag-source-enclave
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 5 min
+
+  - id: conn-c2-to-tag
+    name: C2 Events to Tag
+    source id: consume-nats-c2
+    source relationship names:
+      - output
+    destination id: tag-source-enclave
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 5 min
+
+  # Tagged events -> NiFi RPG
+  - id: conn-tag-to-rpg
+    name: Tagged Events to NiFi
+    source id: tag-source-enclave
+    source relationship names:
+      - success
+    destination id: low-telemetry-input
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 10 min

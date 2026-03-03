@@ -1,0 +1,20 @@
+# Traefik Static Configuration — High-Side Enclave
+# Ports are offset to avoid collisions when running both enclaves on the same host:
+#   web: 80 (mapped to host 28080), websecure: 443 (mapped to host 28443), dashboard: 8080 (mapped to host 28081)
+api:
+  dashboard: true
+  insecure: true
+
+entryPoints:
+  web:
+    address: ":80"
+  websecure:
+    address: ":443"
+
+providers:
+  file:
+    filename: /etc/traefik/dynamic.yml
+    watch: true
+
+log:
+  level: INFO

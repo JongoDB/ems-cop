@@ -32,6 +32,9 @@ redis-data/
 minio-data/
 nats-data/
 
+# TLS certs (generated per-machine)
+infra/traefik/certs/
+
 # Sliver artifacts (sensitive)
 sliver-config/
 sliver-builds/

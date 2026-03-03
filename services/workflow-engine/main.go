@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 	"unicode"
@@ -29,28 +30,114 @@ type Server struct {
 	port       string
 	logger     *slog.Logger
 	httpServer *http.Server
+	cti        *ctiHealth
+}
+
+// ---------------------------------------------------------------------------
+// CTI Health Checker
+// ---------------------------------------------------------------------------
+
+type ctiHealth struct {
+	mu        sync.RWMutex
+	connected bool
+	lastCheck time.Time
+	relayURL  string
+	logger    *slog.Logger
+	client    *http.Client
+}
+
+func newCTIHealth(relayURL string, logger *slog.Logger) *ctiHealth {
+	return &ctiHealth{
+		relayURL:  relayURL,
+		logger:    logger,
+		connected: true,
+		client:    &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func (c *ctiHealth) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
+
+func (c *ctiHealth) LastCheck() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastCheck
+}
+
+func (c *ctiHealth) Start(ctx context.Context) {
+	if c.relayURL == "" {
+		c.logger.Info("CTI relay URL not configured, single-enclave mode")
+		return
+	}
+	c.logger.Info("starting CTI health checker", "relay_url", c.relayURL)
+	c.check()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.check()
+			}
+		}
+	}()
+}
+
+func (c *ctiHealth) check() {
+	resp, err := c.client.Get(c.relayURL + "/health")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastCheck = time.Now()
+	if err != nil {
+		if c.connected {
+			c.logger.Warn("CTI relay health check failed", "error", err)
+		}
+		c.connected = false
+		return
+	}
+	resp.Body.Close()
+	wasConnected := c.connected
+	c.connected = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if !wasConnected && c.connected {
+		c.logger.Info("CTI relay connection restored")
+	} else if wasConnected && !c.connected {
+		c.logger.Warn("CTI relay health check returned non-OK status", "status", resp.StatusCode)
+	}
+}
+
+func (s *Server) isDegraded() bool {
+	return enclave == "low" && s.cti != nil && !s.cti.IsConnected()
 }
 
 type Operation struct {
-	ID                string   `json:"id"`
-	Name              string   `json:"name"`
-	Objective         string   `json:"objective"`
-	ScopeDescription  string   `json:"scope_description"`
-	RulesOfEngagement string   `json:"rules_of_engagement"`
-	RiskLevel         int      `json:"risk_level"`
-	Status            string   `json:"status"`
-	WorkflowID        *string  `json:"workflow_id"`
-	PlannedStart      *string  `json:"planned_start"`
-	PlannedEnd        *string  `json:"planned_end"`
-	ActualStart       *string  `json:"actual_start"`
-	ActualEnd         *string  `json:"actual_end"`
-	Tags              []string `json:"tags"`
-	Metadata          any      `json:"metadata"`
-	CreatedBy         string   `json:"created_by"`
-	CreatedAt         string   `json:"created_at"`
-	UpdatedAt         string   `json:"updated_at"`
-	NetworkCount      int      `json:"network_count"`
-	FindingCount      int      `json:"finding_count"`
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	Objective           string   `json:"objective"`
+	ScopeDescription    string   `json:"scope_description"`
+	RulesOfEngagement   string   `json:"rules_of_engagement"`
+	RiskLevel           int      `json:"risk_level"`
+	Status              string   `json:"status"`
+	Classification      string   `json:"classification"`
+	RoutingMode         string   `json:"routing_mode"`
+	OriginOperationID   *string  `json:"origin_operation_id,omitempty"`
+	OriginEnclave       *string  `json:"origin_enclave,omitempty"`
+	WorkflowID          *string  `json:"workflow_id"`
+	PlannedStart        *string  `json:"planned_start"`
+	PlannedEnd          *string  `json:"planned_end"`
+	ActualStart         *string  `json:"actual_start"`
+	ActualEnd           *string  `json:"actual_end"`
+	Tags                []string `json:"tags"`
+	Metadata            any      `json:"metadata"`
+	CreatedBy           string   `json:"created_by"`
+	CreatedAt           string   `json:"created_at"`
+	UpdatedAt           string   `json:"updated_at"`
+	NetworkCount        int      `json:"network_count"`
+	FindingCount        int      `json:"finding_count"`
 }
 
 type OperationMember struct {
@@ -66,8 +153,16 @@ type CreateOperationRequest struct {
 	ScopeDescription  string   `json:"scope_description"`
 	RulesOfEngagement string   `json:"rules_of_engagement"`
 	RiskLevel         *int     `json:"risk_level"`
+	Classification    string   `json:"classification"`
+	RoutingMode       string   `json:"routing_mode"`
 	Tags              []string `json:"tags"`
 	Metadata          any      `json:"metadata"`
+}
+
+// RouteOperationRequest is the body for POST /api/v1/operations/{id}/route
+type RouteOperationRequest struct {
+	TargetEnclave string `json:"target_enclave"`
+	RoutingReason string `json:"routing_reason"`
 }
 
 type UpdateOperationRequest struct {
@@ -76,6 +171,7 @@ type UpdateOperationRequest struct {
 	ScopeDescription  *string   `json:"scope_description"`
 	RulesOfEngagement *string   `json:"rules_of_engagement"`
 	RiskLevel         *int      `json:"risk_level"`
+	Classification    *string   `json:"classification"`
 	Tags              *[]string `json:"tags"`
 	Metadata          any       `json:"metadata"`
 }
@@ -94,17 +190,18 @@ type AddMemberRequest struct {
 // ---------------------------------------------------------------------------
 
 type Workflow struct {
-	ID          string               `json:"id"`
-	Name        string               `json:"name"`
-	Description string               `json:"description"`
-	Version     int                  `json:"version"`
-	IsTemplate  bool                 `json:"is_template"`
-	IsDefault   bool                 `json:"is_default"`
-	CreatedBy   *string              `json:"created_by"`
-	CreatedAt   string               `json:"created_at"`
-	UpdatedAt   string               `json:"updated_at"`
-	Stages      []WorkflowStage      `json:"stages"`
-	Transitions []WorkflowTransition `json:"transitions"`
+	ID             string               `json:"id"`
+	Name           string               `json:"name"`
+	Description    string               `json:"description"`
+	Version        int                  `json:"version"`
+	IsTemplate     bool                 `json:"is_template"`
+	IsDefault      bool                 `json:"is_default"`
+	Classification string               `json:"classification"`
+	CreatedBy      *string              `json:"created_by"`
+	CreatedAt      string               `json:"created_at"`
+	UpdatedAt      string               `json:"updated_at"`
+	Stages         []WorkflowStage      `json:"stages"`
+	Transitions    []WorkflowTransition `json:"transitions"`
 }
 
 type WorkflowStage struct {
@@ -135,6 +232,7 @@ type WorkflowRun struct {
 	CurrentStageID *string               `json:"current_stage_id"`
 	CurrentStage   *WorkflowStage        `json:"current_stage,omitempty"`
 	Status         string                `json:"status"`
+	Classification string                `json:"classification"`
 	Context        map[string]any        `json:"context"`
 	StartedAt      string                `json:"started_at"`
 	CompletedAt    *string               `json:"completed_at"`
@@ -156,12 +254,13 @@ type WorkflowRunHistory struct {
 
 // Request types
 type CreateWorkflowRequest struct {
-	Name        string                     `json:"name"`
-	Description string                     `json:"description"`
-	IsTemplate  bool                       `json:"is_template"`
-	IsDefault   bool                       `json:"is_default"`
-	Stages      []CreateStageRequest       `json:"stages"`
-	Transitions []CreateTransitionRequest  `json:"transitions"`
+	Name           string                     `json:"name"`
+	Description    string                     `json:"description"`
+	IsTemplate     bool                       `json:"is_template"`
+	IsDefault      bool                       `json:"is_default"`
+	Classification string                     `json:"classification"`
+	Stages         []CreateStageRequest       `json:"stages"`
+	Transitions    []CreateTransitionRequest  `json:"transitions"`
 }
 
 type CreateStageRequest struct {
@@ -317,6 +416,27 @@ func hasRole(roles []string, required string) bool {
 	return false
 }
 
+// Classification helpers
+
+var enclave = getEnv("ENCLAVE", "")
+
+func isValidClassification(c string) bool {
+	return c == "UNCLASS" || c == "CUI" || c == "SECRET"
+}
+
+func classificationRank(c string) int {
+	switch c {
+	case "UNCLASS":
+		return 0
+	case "CUI":
+		return 1
+	case "SECRET":
+		return 2
+	default:
+		return -1
+	}
+}
+
 func parsePagination(r *http.Request) (page, limit, offset int) {
 	page = 1
 	limit = 20
@@ -352,18 +472,21 @@ func parseJSONB(data []byte) map[string]any {
 func scanOperation(scanner interface{ Scan(dest ...any) error }) (Operation, error) {
 	var op Operation
 	var (
-		workflowID   *string
-		plannedStart *time.Time
-		plannedEnd   *time.Time
-		actualStart  *time.Time
-		actualEnd    *time.Time
-		createdAt    time.Time
-		updatedAt    time.Time
-		metadata     []byte
+		workflowID        *string
+		plannedStart      *time.Time
+		plannedEnd        *time.Time
+		actualStart       *time.Time
+		actualEnd         *time.Time
+		createdAt         time.Time
+		updatedAt         time.Time
+		metadata          []byte
+		originOperationID *string
+		originEnclave     *string
 	)
 	err := scanner.Scan(
 		&op.ID, &op.Name, &op.Objective, &op.ScopeDescription, &op.RulesOfEngagement,
-		&op.RiskLevel, &op.Status,
+		&op.RiskLevel, &op.Status, &op.Classification, &op.RoutingMode,
+		&originOperationID, &originEnclave,
 		&workflowID, &plannedStart, &plannedEnd, &actualStart, &actualEnd,
 		&op.Tags, &metadata, &op.CreatedBy, &createdAt, &updatedAt,
 		&op.NetworkCount, &op.FindingCount,
@@ -373,6 +496,8 @@ func scanOperation(scanner interface{ Scan(dest ...any) error }) (Operation, err
 	}
 
 	op.WorkflowID = workflowID
+	op.OriginOperationID = originOperationID
+	op.OriginEnclave = originEnclave
 	if plannedStart != nil {
 		s := plannedStart.UTC().Format(time.RFC3339)
 		op.PlannedStart = &s
@@ -411,7 +536,8 @@ func scanOperation(scanner interface{ Scan(dest ...any) error }) (Operation, err
 }
 
 const operationSelectCols = `o.id, o.name, o.objective, o.scope_description, o.rules_of_engagement,
-       o.risk_level, o.status,
+       o.risk_level, o.status, o.classification, o.routing_mode,
+       o.origin_operation_id, o.origin_enclave,
        o.workflow_id, o.planned_start, o.planned_end, o.actual_start, o.actual_end,
        o.tags, o.metadata, o.created_by, o.created_at, o.updated_at,
        (SELECT count(*) FROM networks WHERE operation_id = o.id) AS network_count,
@@ -426,7 +552,7 @@ func scanWorkflowRow(scanner interface{ Scan(dest ...any) error }) (Workflow, er
 	var createdBy *string
 	var createdAt, updatedAt time.Time
 	err := scanner.Scan(&wf.ID, &wf.Name, &wf.Description, &wf.Version,
-		&wf.IsTemplate, &wf.IsDefault, &createdBy, &createdAt, &updatedAt)
+		&wf.IsTemplate, &wf.IsDefault, &wf.Classification, &createdBy, &createdAt, &updatedAt)
 	if err != nil {
 		return wf, err
 	}
@@ -472,7 +598,7 @@ func scanRunRow(scanner interface{ Scan(dest ...any) error }) (WorkflowRun, erro
 	var startedAt time.Time
 	var completedAt *time.Time
 	err := scanner.Scan(&run.ID, &run.WorkflowID, &run.TicketID, &run.CurrentStageID,
-		&run.Status, &contextData, &startedAt, &completedAt)
+		&run.Status, &run.Classification, &contextData, &startedAt, &completedAt)
 	if err != nil {
 		return run, err
 	}
@@ -504,7 +630,7 @@ func scanHistoryRow(scanner interface{ Scan(dest ...any) error }) (WorkflowRunHi
 
 func (s *Server) fetchWorkflowFull(ctx context.Context, id string) (*Workflow, error) {
 	row := s.db.QueryRow(ctx,
-		`SELECT id, name, description, version, is_template, is_default, created_by, created_at, updated_at
+		`SELECT id, name, description, version, is_template, is_default, classification, created_by, created_at, updated_at
 		 FROM workflows WHERE id = $1`, id)
 	wf, err := scanWorkflowRow(row)
 	if err != nil {
@@ -591,10 +717,10 @@ func (s *Server) startWorkflowRunInternal(ctx context.Context, workflowID string
 	err = s.db.QueryRow(ctx,
 		`INSERT INTO workflow_runs (workflow_id, ticket_id, current_stage_id, status, context)
 		 VALUES ($1, $2, $3, 'active', $4)
-		 RETURNING id, workflow_id, ticket_id, current_stage_id, status, context, started_at, completed_at`,
+		 RETURNING id, workflow_id, ticket_id, current_stage_id, status, classification, context, started_at, completed_at`,
 		workflowID, ticketID, firstStage.ID, contextBytes).Scan(
 		&run.ID, &run.WorkflowID, &run.TicketID, &run.CurrentStageID,
-		&run.Status, &contextBytes, &startedAt, &run.CompletedAt)
+		&run.Status, &run.Classification, &contextBytes, &startedAt, &run.CompletedAt)
 	if err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
 	}
@@ -615,10 +741,11 @@ func (s *Server) startWorkflowRunInternal(ctx context.Context, workflowID string
 	}
 
 	s.publishEvent("workflow.run_started", map[string]any{
-		"run_id":      run.ID,
-		"workflow_id": workflowID,
-		"ticket_id":   ticketID,
-		"stage":       firstStage.Name,
+		"run_id":         run.ID,
+		"workflow_id":    workflowID,
+		"ticket_id":     ticketID,
+		"stage":         firstStage.Name,
+		"classification": run.Classification,
 	})
 
 	// Process auto stages
@@ -1142,10 +1269,36 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 		checks["nats"] = "ok"
 	}
 
-	writeJSON(w, status, map[string]any{"status": overall, "service": "workflow-engine", "checks": checks})
+	resp := map[string]any{"status": overall, "service": "workflow-engine", "checks": checks}
+	if s.cti != nil {
+		resp["cti_connected"] = s.cti.IsConnected()
+		resp["degraded"] = s.isDegraded()
+	}
+	writeJSON(w, status, resp)
+}
+
+func (s *Server) handleCTIStatus(w http.ResponseWriter, r *http.Request) {
+	ctiConnected := true
+	degraded := false
+	if s.cti != nil {
+		ctiConnected = s.cti.IsConnected()
+		degraded = s.isDegraded()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cti_connected": ctiConnected,
+		"enclave":       enclave,
+		"degraded":      degraded,
+	})
 }
 
 func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
+	// Degraded mode: block new operation creation on low side
+	if s.isDegraded() {
+		writeError(w, http.StatusServiceUnavailable, "DEGRADED_MODE",
+			"CTI link unavailable — new operations blocked on low side")
+		return
+	}
+
 	var req CreateOperationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
@@ -1175,9 +1328,39 @@ func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	classification := req.Classification
+	if classification == "" {
+		classification = "UNCLASS"
+	}
+	if !isValidClassification(classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	// Enclave enforcement: block SECRET on low side
+	if enclave == "low" && classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot create SECRET operations on low-side enclave")
+		return
+	}
+
 	tags := req.Tags
 	if tags == nil {
 		tags = []string{}
+	}
+
+	routingMode := req.RoutingMode
+	if routingMode == "" {
+		routingMode = "local"
+	}
+	if routingMode != "local" && routingMode != "cross_domain" && routingMode != "auto" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "routing_mode must be 'local', 'cross_domain', or 'auto'")
+		return
+	}
+
+	// Cross-domain operations can only be created on high side
+	if routingMode == "cross_domain" && enclave == "low" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION",
+			"Cross-domain operations can only be created on the high-side enclave")
+		return
 	}
 
 	metadataBytes := []byte("{}")
@@ -1187,15 +1370,16 @@ func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	query := `INSERT INTO operations (name, objective, scope_description, rules_of_engagement, risk_level, tags, metadata, created_by)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-              RETURNING id, name, objective, scope_description, rules_of_engagement, risk_level, status,
+	query := `INSERT INTO operations (name, objective, scope_description, rules_of_engagement, risk_level, classification, routing_mode, tags, metadata, created_by)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+              RETURNING id, name, objective, scope_description, rules_of_engagement, risk_level, status, classification, routing_mode,
+                        origin_operation_id, origin_enclave,
                         workflow_id, planned_start, planned_end, actual_start, actual_end,
                         tags, metadata, created_by, created_at, updated_at, 0, 0`
 
 	row := s.db.QueryRow(r.Context(), query,
 		req.Name, req.Objective, req.ScopeDescription, req.RulesOfEngagement,
-		riskLevel, tags, metadataBytes, userID)
+		riskLevel, classification, routingMode, tags, metadataBytes, userID)
 
 	op, err := scanOperation(row)
 	if err != nil {
@@ -1205,6 +1389,23 @@ func (s *Server) handleCreateOperation(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.publishEvent("operation.created", op)
+
+	// If cross-domain, publish CTI routing event for the CTI relay to pick up
+	if routingMode == "cross_domain" && enclave == "high" {
+		s.publishEvent("cti.operation.created", map[string]any{
+			"operation_id":   op.ID,
+			"name":           op.Name,
+			"objective":      op.Objective,
+			"risk_level":     op.RiskLevel,
+			"classification": op.Classification,
+			"routing_mode":   op.RoutingMode,
+			"created_by":     op.CreatedBy,
+			"origin_enclave": "high",
+		})
+		s.logger.Info("published cross-domain operation event",
+			"operation_id", op.ID, "routing_mode", routingMode)
+	}
+
 	writeJSON(w, http.StatusCreated, op)
 }
 
@@ -1212,14 +1413,30 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 	page, limit, offset := parsePagination(r)
 	status := r.URL.Query().Get("status")
 	search := r.URL.Query().Get("search")
+	classificationFilter := r.URL.Query().Get("classification")
 
+	enclaveFilter := ""
+	if enclave == "low" {
+		enclaveFilter = " AND o.classification != 'SECRET'"
+	}
+
+	classFilter := ""
+	args := []any{status, search}
+	argIdx := 3
+	if classificationFilter != "" {
+		classFilter = fmt.Sprintf(" AND o.classification = $%d", argIdx)
+		args = append(args, classificationFilter)
+		argIdx++
+	}
+
+	args = append(args, limit, offset)
 	query := fmt.Sprintf(`SELECT %s FROM operations o
 		WHERE ($1 = '' OR o.status = $1)
-		  AND ($2 = '' OR o.name ILIKE '%%' || $2 || '%%' OR o.objective ILIKE '%%' || $2 || '%%')
+		  AND ($2 = '' OR o.name ILIKE '%%' || $2 || '%%' OR o.objective ILIKE '%%' || $2 || '%%')%s%s
 		ORDER BY o.created_at DESC
-		LIMIT $3 OFFSET $4`, operationSelectCols)
+		LIMIT $%d OFFSET $%d`, operationSelectCols, classFilter, enclaveFilter, argIdx, argIdx+1)
 
-	rows, err := s.db.Query(r.Context(), query, status, search, limit, offset)
+	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {
 		s.logger.Error("list operations query failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to query operations")
@@ -1241,11 +1458,18 @@ func (s *Server) handleListOperations(w http.ResponseWriter, r *http.Request) {
 		ops = []Operation{}
 	}
 
-	countQuery := `SELECT count(*) FROM operations o
+	countArgs := []any{status, search}
+	countClassFilter := ""
+	if classificationFilter != "" {
+		countClassFilter = " AND o.classification = $3"
+		countArgs = append(countArgs, classificationFilter)
+	}
+	countQuery := fmt.Sprintf(`SELECT count(*) FROM operations o
 		WHERE ($1 = '' OR o.status = $1)
-		  AND ($2 = '' OR o.name ILIKE '%' || $2 || '%' OR o.objective ILIKE '%' || $2 || '%')`
+		  AND ($2 = '' OR o.name ILIKE '%%' || $2 || '%%' OR o.objective ILIKE '%%' || $2 || '%%')%s%s`,
+		countClassFilter, enclaveFilter)
 	var total int
-	if err := s.db.QueryRow(r.Context(), countQuery, status, search).Scan(&total); err != nil {
+	if err := s.db.QueryRow(r.Context(), countQuery, countArgs...).Scan(&total); err != nil {
 		s.logger.Error("count operations failed", "error", err)
 		total = len(ops)
 	}
@@ -1280,6 +1504,13 @@ func (s *Server) handleGetOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: hide SECRET operations on low-side enclave
+	if enclave == "low" && op.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	}
+
+	w.Header().Set("X-Classification", op.Classification)
 	writeJSON(w, http.StatusOK, op)
 }
 
@@ -1288,6 +1519,19 @@ func (s *Server) handleUpdateOperation(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
 		return
+	}
+
+	// Enclave enforcement: block updates to SECRET operations on low-side enclave
+	if enclave == "low" {
+		var classification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM operations WHERE id = $1", id).Scan(&classification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if classification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
 	}
 
 	var req UpdateOperationRequest
@@ -1327,6 +1571,29 @@ func (s *Server) handleUpdateOperation(w http.ResponseWriter, r *http.Request) {
 		}
 		setClauses = append(setClauses, fmt.Sprintf("risk_level = $%d", argIdx))
 		args = append(args, *req.RiskLevel)
+		argIdx++
+	}
+	if req.Classification != nil {
+		if !isValidClassification(*req.Classification) {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+			return
+		}
+		// Check for downgrade: fetch current classification
+		var currentClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM operations WHERE id = $1", id).Scan(&currentClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Operation not found")
+			return
+		}
+		if classificationRank(*req.Classification) < classificationRank(currentClassification) {
+			writeError(w, http.StatusForbidden, "CLASSIFICATION_DOWNGRADE", "Cannot downgrade classification from "+currentClassification+" to "+*req.Classification)
+			return
+		}
+		if enclave == "low" && *req.Classification == "SECRET" {
+			writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot set SECRET classification on low-side enclave")
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, *req.Classification)
 		argIdx++
 	}
 	if req.Tags != nil {
@@ -1397,9 +1664,10 @@ func (s *Server) handleTransitionOperation(w http.ResponseWriter, r *http.Reques
 	var workflowID *string
 	var opName string
 	var riskLevel int
+	var opClassification string
 	err := s.db.QueryRow(r.Context(),
-		"SELECT status, workflow_id, name, risk_level FROM operations WHERE id = $1", id).
-		Scan(&currentStatus, &workflowID, &opName, &riskLevel)
+		"SELECT status, workflow_id, name, risk_level, classification FROM operations WHERE id = $1", id).
+		Scan(&currentStatus, &workflowID, &opName, &riskLevel, &opClassification)
 	if err != nil {
 		if err.Error() == "no rows in result set" {
 			writeError(w, http.StatusNotFound, "NOT_FOUND", "Operation not found")
@@ -1407,6 +1675,19 @@ func (s *Server) handleTransitionOperation(w http.ResponseWriter, r *http.Reques
 		}
 		s.logger.Error("get operation status failed", "error", err, "id", id)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get operation status")
+		return
+	}
+
+	// Enclave enforcement: block transitions on SECRET operations on low-side enclave
+	if enclave == "low" && opClassification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	}
+
+	// Degraded mode: block transitions to active states on low side
+	if s.isDegraded() && (req.Status == "in_progress" || req.Status == "approved") {
+		writeError(w, http.StatusServiceUnavailable, "DEGRADED_MODE",
+			"CTI link unavailable — operation state transitions blocked on low side")
 		return
 	}
 
@@ -1477,10 +1758,15 @@ func (s *Server) handleListMembers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var exists bool
-	err := s.db.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM operations WHERE id = $1)", id).Scan(&exists)
-	if err != nil || !exists {
+	// Enclave enforcement: check classification before returning members
+	var opClassification string
+	err := s.db.QueryRow(r.Context(), "SELECT classification FROM operations WHERE id = $1", id).Scan(&opClassification)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Operation not found")
+		return
+	}
+	if enclave == "low" && opClassification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -1534,10 +1820,15 @@ func (s *Server) handleAddMember(w http.ResponseWriter, r *http.Request) {
 		req.Role = "member"
 	}
 
-	var exists bool
-	err := s.db.QueryRow(r.Context(), "SELECT EXISTS(SELECT 1 FROM operations WHERE id = $1)", id).Scan(&exists)
-	if err != nil || !exists {
+	// Enclave enforcement: check classification before adding member
+	var opClassification string
+	err := s.db.QueryRow(r.Context(), "SELECT classification FROM operations WHERE id = $1", id).Scan(&opClassification)
+	if err != nil {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "Operation not found")
+		return
+	}
+	if enclave == "low" && opClassification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -1584,6 +1875,19 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: check classification before removing member
+	if enclave == "low" {
+		var opClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM operations WHERE id = $1", id).Scan(&opClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if opClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+	}
+
 	result, err := s.db.Exec(r.Context(),
 		"DELETE FROM operation_members WHERE operation_id = $1 AND user_id = $2",
 		id, userID)
@@ -1606,6 +1910,99 @@ func (s *Server) handleRemoveMember(w http.ResponseWriter, r *http.Request) {
 }
 
 // ---------------------------------------------------------------------------
+// Handler — Route Operation Cross-Domain
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleRouteOperation(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	// Only high side can route operations cross-domain
+	if enclave == "low" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION",
+			"Cross-domain routing can only be initiated from the high-side enclave")
+		return
+	}
+
+	var req RouteOperationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.TargetEnclave == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "target_enclave is required")
+		return
+	}
+	if req.TargetEnclave != "low" && req.TargetEnclave != "high" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "target_enclave must be 'low' or 'high'")
+		return
+	}
+
+	ctx := r.Context()
+
+	// Fetch the operation
+	query := fmt.Sprintf(`SELECT %s FROM operations o WHERE o.id = $1`, operationSelectCols)
+	row := s.db.QueryRow(ctx, query, id)
+	op, err := scanOperation(row)
+	if err != nil {
+		if err.Error() == "no rows in result set" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Operation not found")
+			return
+		}
+		s.logger.Error("get operation for routing failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get operation")
+		return
+	}
+
+	// SECRET operations cannot be routed cross-domain
+	if op.Classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "CLASSIFICATION_RESTRICTION",
+			"SECRET operations cannot be routed cross-domain")
+		return
+	}
+
+	// Update routing mode
+	_, err = s.db.Exec(ctx,
+		`UPDATE operations SET routing_mode = 'cross_domain', updated_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		s.logger.Error("update routing mode failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to update routing mode")
+		return
+	}
+
+	userID := getUserID(r)
+
+	// Publish CTI route request event
+	s.publishEvent("cti.operation.route_request", map[string]any{
+		"operation_id":   op.ID,
+		"name":           op.Name,
+		"objective":      op.Objective,
+		"risk_level":     op.RiskLevel,
+		"classification": op.Classification,
+		"target_enclave": req.TargetEnclave,
+		"routing_reason": req.RoutingReason,
+		"requested_by":   userID,
+		"origin_enclave": enclave,
+	})
+
+	s.logger.Info("operation routed cross-domain",
+		"operation_id", id,
+		"target_enclave", req.TargetEnclave,
+		"routing_reason", req.RoutingReason,
+	)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"operation_id":   id,
+		"routing_mode":   "cross_domain",
+		"target_enclave": req.TargetEnclave,
+		"status":         "route_requested",
+	})
+}
+
+// ---------------------------------------------------------------------------
 // Handlers — Workflow Definition CRUD
 // ---------------------------------------------------------------------------
 
@@ -1613,6 +2010,7 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	page, limit, offset := parsePagination(r)
 	isTemplate := r.URL.Query().Get("is_template")
 	isDefault := r.URL.Query().Get("is_default")
+	classificationFilter := r.URL.Query().Get("classification")
 
 	conditions := []string{}
 	args := []any{}
@@ -1627,6 +2025,15 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 		conditions = append(conditions, fmt.Sprintf("is_default = $%d", argIdx))
 		args = append(args, isDefault == "true")
 		argIdx++
+	}
+	if classificationFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, classificationFilter)
+		argIdx++
+	}
+	// Enclave enforcement: on low side, never return SECRET workflows
+	if enclave == "low" {
+		conditions = append(conditions, "classification != 'SECRET'")
 	}
 
 	where := ""
@@ -1644,7 +2051,7 @@ func (s *Server) handleListWorkflows(w http.ResponseWriter, r *http.Request) {
 	// Query
 	args = append(args, limit, offset)
 	dataQ := fmt.Sprintf(
-		`SELECT id, name, description, version, is_template, is_default, created_by, created_at, updated_at
+		`SELECT id, name, description, version, is_template, is_default, classification, created_by, created_at, updated_at
 		 FROM workflows %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
 		where, argIdx, argIdx+1)
 
@@ -1701,6 +2108,13 @@ func (s *Server) handleGetWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: hide SECRET workflows on low-side enclave
+	if enclave == "low" && wf.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	}
+
+	w.Header().Set("X-Classification", wf.Classification)
 	writeJSON(w, http.StatusOK, wf)
 }
 
@@ -1721,6 +2135,19 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	classification := req.Classification
+	if classification == "" {
+		classification = "UNCLASS"
+	}
+	if !isValidClassification(classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	if enclave == "low" && classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot create SECRET workflows on low-side enclave")
+		return
+	}
+
 	ctx := r.Context()
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -1736,9 +2163,9 @@ func (s *Server) handleCreateWorkflow(w http.ResponseWriter, r *http.Request) {
 
 	var wfID string
 	err = tx.QueryRow(ctx,
-		`INSERT INTO workflows (name, description, is_template, is_default, created_by)
-		 VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		req.Name, req.Description, req.IsTemplate, req.IsDefault, userID).Scan(&wfID)
+		`INSERT INTO workflows (name, description, is_template, is_default, classification, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		req.Name, req.Description, req.IsTemplate, req.IsDefault, classification, userID).Scan(&wfID)
 	if err != nil {
 		s.logger.Error("create workflow failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create workflow")
@@ -1807,6 +2234,19 @@ func (s *Server) handleUpdateWorkflow(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
 		return
+	}
+
+	// Enclave enforcement: block updates to SECRET workflows on low-side enclave
+	if enclave == "low" {
+		var wfClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM workflows WHERE id = $1", id).Scan(&wfClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if wfClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
 	}
 
 	var req UpdateWorkflowRequest
@@ -1911,6 +2351,19 @@ func (s *Server) handleDeleteWorkflow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: block deletion of SECRET workflows on low-side enclave
+	if enclave == "low" {
+		var wfClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM workflows WHERE id = $1", id).Scan(&wfClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if wfClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+	}
+
 	var activeCount int
 	_ = s.db.QueryRow(r.Context(),
 		`SELECT count(*) FROM workflow_runs WHERE workflow_id = $1 AND status = 'active'`, id).Scan(&activeCount)
@@ -1977,6 +2430,12 @@ func (s *Server) handleCloneWorkflow(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch workflow")
+		return
+	}
+
+	// Enclave enforcement: hide SECRET workflows on low-side enclave
+	if enclave == "low" && orig.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -2127,6 +2586,10 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 		args = append(args, status)
 		argIdx++
 	}
+	// Enclave enforcement: on low side, never return SECRET workflow runs
+	if enclave == "low" {
+		conditions = append(conditions, "wr.classification != 'SECRET'")
+	}
 
 	where := ""
 	if len(conditions) > 0 {
@@ -2138,7 +2601,7 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 
 	args = append(args, limit, offset)
 	q := fmt.Sprintf(
-		`SELECT wr.id, wr.workflow_id, wr.ticket_id, wr.current_stage_id, wr.status, wr.context, wr.started_at, wr.completed_at
+		`SELECT wr.id, wr.workflow_id, wr.ticket_id, wr.current_stage_id, wr.status, wr.classification, wr.context, wr.started_at, wr.completed_at
 		 FROM workflow_runs wr %s ORDER BY wr.started_at DESC LIMIT $%d OFFSET $%d`,
 		where, argIdx, argIdx+1)
 
@@ -2190,7 +2653,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	}
 
 	row := s.db.QueryRow(r.Context(),
-		`SELECT id, workflow_id, ticket_id, current_stage_id, status, context, started_at, completed_at
+		`SELECT id, workflow_id, ticket_id, current_stage_id, status, classification, context, started_at, completed_at
 		 FROM workflow_runs WHERE id = $1`, id)
 	run, err := scanRunRow(row)
 	if err != nil {
@@ -2200,6 +2663,12 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Error("get run failed", "error", err, "id", id)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get run")
+		return
+	}
+
+	// Enclave enforcement: hide SECRET workflow runs on low-side enclave
+	if enclave == "low" && run.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -2233,6 +2702,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		run.History = []WorkflowRunHistory{}
 	}
 
+	w.Header().Set("X-Classification", run.Classification)
 	writeJSON(w, http.StatusOK, run)
 }
 
@@ -2260,7 +2730,7 @@ func (s *Server) handleRunAction(w http.ResponseWriter, r *http.Request) {
 
 	// Fetch run
 	row := s.db.QueryRow(ctx,
-		`SELECT id, workflow_id, ticket_id, current_stage_id, status, context, started_at, completed_at
+		`SELECT id, workflow_id, ticket_id, current_stage_id, status, classification, context, started_at, completed_at
 		 FROM workflow_runs WHERE id = $1`, id)
 	run, err := scanRunRow(row)
 	if err != nil {
@@ -2269,6 +2739,12 @@ func (s *Server) handleRunAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get run")
+		return
+	}
+
+	// Enclave enforcement: block actions on SECRET workflow runs on low-side enclave
+	if enclave == "low" && run.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -2314,6 +2790,24 @@ func (s *Server) handleRunAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Degraded mode: block risk 3+ approvals on low side
+	if s.isDegraded() && req.Action == "approve" {
+		// Check if the workflow run context contains a risk level
+		riskLevel := 0
+		if rl, ok := run.Context["risk_level"].(float64); ok {
+			riskLevel = int(rl)
+		}
+		// Also check stage config for a min_risk_level indicator
+		if rl, ok := stage.Config["min_risk_level"].(float64); ok && int(rl) > riskLevel {
+			riskLevel = int(rl)
+		}
+		if riskLevel >= 3 {
+			writeError(w, http.StatusServiceUnavailable, "DEGRADED_MODE",
+				"CTI link unavailable — risk 3+ approvals blocked on low side")
+			return
+		}
+	}
+
 	// Validate user role
 	requiredRole, _ := stage.Config["required_role"].(string)
 	if requiredRole != "" && !hasRole(roles, requiredRole) {
@@ -2340,6 +2834,22 @@ func (s *Server) handleRunAction(w http.ResponseWriter, r *http.Request) {
 			"actor_id":   userID,
 			"ticket_id":  run.TicketID,
 		})
+		// If this approval is for a cross-domain operation, notify the CTI relay
+		if opID, ok := run.Context["operation_id"].(string); ok && opID != "" {
+			var routingMode string
+			_ = s.db.QueryRow(ctx, "SELECT routing_mode FROM operations WHERE id = $1", opID).Scan(&routingMode)
+			if routingMode == "cross_domain" {
+				s.publishEvent("cti.operation.approved", map[string]any{
+					"operation_id": opID,
+					"run_id":       run.ID,
+					"stage_name":   stage.Name,
+					"actor_id":     userID,
+					"risk_level":   run.Context["risk_level"],
+				})
+				s.logger.Info("published cross-domain approval event",
+					"operation_id", opID, "run_id", run.ID)
+			}
+		}
 	case "reject":
 		trigger = "on_reject"
 		s.publishEvent("workflow.rejected", map[string]any{
@@ -2395,7 +2905,7 @@ func (s *Server) handleRunAction(w http.ResponseWriter, r *http.Request) {
 
 	// Return updated run
 	updatedRow := s.db.QueryRow(ctx,
-		`SELECT id, workflow_id, ticket_id, current_stage_id, status, context, started_at, completed_at
+		`SELECT id, workflow_id, ticket_id, current_stage_id, status, classification, context, started_at, completed_at
 		 FROM workflow_runs WHERE id = $1`, id)
 	updatedRun, err := scanRunRow(updatedRow)
 	if err != nil {
@@ -2416,6 +2926,19 @@ func (s *Server) handleAbortRun(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
 		return
+	}
+
+	// Enclave enforcement: block abort of SECRET workflow runs on low-side enclave
+	if enclave == "low" {
+		var runClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM workflow_runs WHERE id = $1", id).Scan(&runClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if runClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
 	}
 
 	userID := getUserID(r)
@@ -2450,6 +2973,19 @@ func (s *Server) handleGetRunHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: block history access for SECRET workflow runs on low-side enclave
+	if enclave == "low" {
+		var runClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM workflow_runs WHERE id = $1", id).Scan(&runClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if runClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+	}
+
 	rows, err := s.db.Query(r.Context(),
 		`SELECT h.id, h.run_id, h.stage_id, COALESCE(ws.name, ''), h.action, h.actor_id, h.comment, h.metadata, h.occurred_at
 		 FROM workflow_run_history h
@@ -2481,6 +3017,19 @@ func (s *Server) handleUpdateRunContext(w http.ResponseWriter, r *http.Request) 
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
 		return
+	}
+
+	// Enclave enforcement: block context updates for SECRET workflow runs on low-side enclave
+	if enclave == "low" {
+		var runClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM workflow_runs WHERE id = $1", id).Scan(&runClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if runClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
 	}
 
 	var req UpdateRunContextRequest
@@ -2634,7 +3183,7 @@ func (s *Server) runEscalationTicker(ctx context.Context) {
 
 func (s *Server) checkEscalations(ctx context.Context) {
 	rows, err := s.db.Query(ctx, `
-		SELECT wr.id, wr.workflow_id, wr.ticket_id, wr.current_stage_id, wr.status, wr.context, wr.started_at, wr.completed_at,
+		SELECT wr.id, wr.workflow_id, wr.ticket_id, wr.current_stage_id, wr.status, wr.classification, wr.context, wr.started_at, wr.completed_at,
 		       ws.config,
 		       (SELECT MAX(occurred_at) FROM workflow_run_history WHERE run_id = wr.id AND stage_id = wr.current_stage_id AND action = 'entered') AS entered_at
 		FROM workflow_runs wr
@@ -2655,7 +3204,7 @@ func (s *Server) checkEscalations(ctx context.Context) {
 		var enteredAt *time.Time
 
 		err := rows.Scan(&run.ID, &run.WorkflowID, &run.TicketID, &run.CurrentStageID,
-			&run.Status, &contextData, &startedAt, &completedAt, &configData, &enteredAt)
+			&run.Status, &run.Classification, &contextData, &startedAt, &completedAt, &configData, &enteredAt)
 		if err != nil {
 			continue
 		}
@@ -2713,6 +3262,9 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
 	mux.HandleFunc("GET /health", s.handleHealthReady)
 
+	// CTI status
+	mux.HandleFunc("GET /api/v1/operations/cti-status", s.handleCTIStatus)
+
 	// Operations CRUD
 	mux.HandleFunc("POST /api/v1/operations", s.handleCreateOperation)
 	mux.HandleFunc("GET /api/v1/operations", s.handleListOperations)
@@ -2722,6 +3274,9 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("GET /api/v1/operations/{id}/members", s.handleListMembers)
 	mux.HandleFunc("POST /api/v1/operations/{id}/members", s.handleAddMember)
 	mux.HandleFunc("DELETE /api/v1/operations/{id}/members/{userId}", s.handleRemoveMember)
+
+	// Cross-domain routing
+	mux.HandleFunc("POST /api/v1/operations/{id}/route", s.handleRouteOperation)
 
 	// Workflow Definition CRUD
 	mux.HandleFunc("POST /api/v1/workflows", s.handleCreateWorkflow)
@@ -2812,7 +3367,18 @@ func main() {
 	port := getEnv("SERVICE_PORT", "3002")
 	server := &Server{db: pool, nc: nc, port: port, logger: logger}
 
+	// CTI health checker
+	ctiRelayURL := os.Getenv("CTI_RELAY_URL")
+	if ctiRelayURL != "" {
+		server.cti = newCTIHealth(ctiRelayURL, logger)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// Start CTI health checker
+	if server.cti != nil {
+		server.cti.Start(ctx)
+	}
 
 	// Graceful shutdown
 	go func() {

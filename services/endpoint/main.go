@@ -16,6 +16,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -33,6 +34,88 @@ type Server struct {
 	port       string
 	logger     *slog.Logger
 	httpServer *http.Server
+	cti        *ctiHealth
+}
+
+// ---------------------------------------------------------------------------
+// CTI Health Checker
+// ---------------------------------------------------------------------------
+
+type ctiHealth struct {
+	mu        sync.RWMutex
+	connected bool
+	lastCheck time.Time
+	relayURL  string
+	logger    *slog.Logger
+	client    *http.Client
+}
+
+func newCTIHealth(relayURL string, logger *slog.Logger) *ctiHealth {
+	return &ctiHealth{
+		relayURL:  relayURL,
+		logger:    logger,
+		connected: true,
+		client:    &http.Client{Timeout: 5 * time.Second},
+	}
+}
+
+func (c *ctiHealth) IsConnected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
+
+func (c *ctiHealth) LastCheck() time.Time {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.lastCheck
+}
+
+func (c *ctiHealth) Start(ctx context.Context) {
+	if c.relayURL == "" {
+		c.logger.Info("CTI relay URL not configured, single-enclave mode")
+		return
+	}
+	c.logger.Info("starting CTI health checker", "relay_url", c.relayURL)
+	c.check()
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.check()
+			}
+		}
+	}()
+}
+
+func (c *ctiHealth) check() {
+	resp, err := c.client.Get(c.relayURL + "/health")
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastCheck = time.Now()
+	if err != nil {
+		if c.connected {
+			c.logger.Warn("CTI relay health check failed", "error", err)
+		}
+		c.connected = false
+		return
+	}
+	resp.Body.Close()
+	wasConnected := c.connected
+	c.connected = resp.StatusCode >= 200 && resp.StatusCode < 300
+	if !wasConnected && c.connected {
+		c.logger.Info("CTI relay connection restored")
+	} else if wasConnected && !c.connected {
+		c.logger.Warn("CTI relay health check returned non-OK status", "status", resp.StatusCode)
+	}
+}
+
+func (s *Server) isDegraded() bool {
+	return enclave == "low" && s.cti != nil && !s.cti.IsConnected()
 }
 
 type Network struct {
@@ -41,6 +124,7 @@ type Network struct {
 	Name             string   `json:"name"`
 	Description      string   `json:"description"`
 	CIDRRanges       []string `json:"cidr_ranges"`
+	Classification   string   `json:"classification"`
 	ImportSource     *string  `json:"import_source"`
 	Metadata         any      `json:"metadata"`
 	CreatedBy        *string  `json:"created_by"`
@@ -51,22 +135,23 @@ type Network struct {
 }
 
 type NetworkNode struct {
-	ID         string   `json:"id"`
-	NetworkID  string   `json:"network_id"`
-	EndpointID *string  `json:"endpoint_id"`
-	IPAddress  string   `json:"ip_address"`
-	Hostname   string   `json:"hostname"`
-	MACAddress *string  `json:"mac_address"`
-	OS         string   `json:"os"`
-	OSVersion  string   `json:"os_version"`
-	Status     string   `json:"status"`
-	NodeType   string   `json:"node_type"`
-	PositionX  *float64 `json:"position_x"`
-	PositionY  *float64 `json:"position_y"`
-	Services   any      `json:"services"`
-	Metadata   any      `json:"metadata"`
-	CreatedAt  string   `json:"created_at"`
-	UpdatedAt  string   `json:"updated_at"`
+	ID             string   `json:"id"`
+	NetworkID      string   `json:"network_id"`
+	EndpointID     *string  `json:"endpoint_id"`
+	IPAddress      string   `json:"ip_address"`
+	Hostname       string   `json:"hostname"`
+	MACAddress     *string  `json:"mac_address"`
+	OS             string   `json:"os"`
+	OSVersion      string   `json:"os_version"`
+	Status         string   `json:"status"`
+	NodeType       string   `json:"node_type"`
+	Classification string   `json:"classification"`
+	PositionX      *float64 `json:"position_x"`
+	PositionY      *float64 `json:"position_y"`
+	Services       any      `json:"services"`
+	Metadata       any      `json:"metadata"`
+	CreatedAt      string   `json:"created_at"`
+	UpdatedAt      string   `json:"updated_at"`
 }
 
 type NetworkEdge struct {
@@ -92,48 +177,52 @@ type TopologyResponse struct {
 // Request types
 
 type CreateNetworkRequest struct {
-	OperationID string   `json:"operation_id"`
-	Name        string   `json:"name"`
-	Description string   `json:"description"`
-	CIDRRanges  []string `json:"cidr_ranges"`
-	Metadata    any      `json:"metadata"`
+	OperationID    string   `json:"operation_id"`
+	Name           string   `json:"name"`
+	Description    string   `json:"description"`
+	CIDRRanges     []string `json:"cidr_ranges"`
+	Classification string   `json:"classification"`
+	Metadata       any      `json:"metadata"`
 }
 
 type UpdateNetworkRequest struct {
-	Name        *string  `json:"name"`
-	Description *string  `json:"description"`
-	CIDRRanges  *[]string `json:"cidr_ranges"`
-	Metadata    any      `json:"metadata"`
+	Name           *string   `json:"name"`
+	Description    *string   `json:"description"`
+	CIDRRanges     *[]string `json:"cidr_ranges"`
+	Classification *string   `json:"classification"`
+	Metadata       any       `json:"metadata"`
 }
 
 type CreateNodeRequest struct {
-	EndpointID *string  `json:"endpoint_id"`
-	IPAddress  string   `json:"ip_address"`
-	Hostname   string   `json:"hostname"`
-	MACAddress *string  `json:"mac_address"`
-	OS         string   `json:"os"`
-	OSVersion  string   `json:"os_version"`
-	Status     string   `json:"status"`
-	NodeType   string   `json:"node_type"`
-	PositionX  *float64 `json:"position_x"`
-	PositionY  *float64 `json:"position_y"`
-	Services   any      `json:"services"`
-	Metadata   any      `json:"metadata"`
+	EndpointID     *string  `json:"endpoint_id"`
+	IPAddress      string   `json:"ip_address"`
+	Hostname       string   `json:"hostname"`
+	MACAddress     *string  `json:"mac_address"`
+	OS             string   `json:"os"`
+	OSVersion      string   `json:"os_version"`
+	Status         string   `json:"status"`
+	NodeType       string   `json:"node_type"`
+	Classification string   `json:"classification"`
+	PositionX      *float64 `json:"position_x"`
+	PositionY      *float64 `json:"position_y"`
+	Services       any      `json:"services"`
+	Metadata       any      `json:"metadata"`
 }
 
 type UpdateNodeRequest struct {
-	EndpointID *string  `json:"endpoint_id"`
-	IPAddress  *string  `json:"ip_address"`
-	Hostname   *string  `json:"hostname"`
-	MACAddress *string  `json:"mac_address"`
-	OS         *string  `json:"os"`
-	OSVersion  *string  `json:"os_version"`
-	Status     *string  `json:"status"`
-	NodeType   *string  `json:"node_type"`
-	PositionX  *float64 `json:"position_x"`
-	PositionY  *float64 `json:"position_y"`
-	Services   any      `json:"services"`
-	Metadata   any      `json:"metadata"`
+	EndpointID     *string  `json:"endpoint_id"`
+	IPAddress      *string  `json:"ip_address"`
+	Hostname       *string  `json:"hostname"`
+	MACAddress     *string  `json:"mac_address"`
+	OS             *string  `json:"os"`
+	OSVersion      *string  `json:"os_version"`
+	Status         *string  `json:"status"`
+	NodeType       *string  `json:"node_type"`
+	Classification *string  `json:"classification"`
+	PositionX      *float64 `json:"position_x"`
+	PositionY      *float64 `json:"position_y"`
+	Services       any      `json:"services"`
+	Metadata       any      `json:"metadata"`
 }
 
 type CreateEdgeRequest struct {
@@ -443,6 +532,42 @@ func getUserID(r *http.Request) string {
 	return r.Header.Get("X-User-ID")
 }
 
+// Classification helpers
+
+var enclave = getEnv("ENCLAVE", "")
+
+func isValidClassification(c string) bool {
+	return c == "UNCLASS" || c == "CUI" || c == "SECRET"
+}
+
+func classificationRank(c string) int {
+	switch c {
+	case "UNCLASS":
+		return 0
+	case "CUI":
+		return 1
+	case "SECRET":
+		return 2
+	default:
+		return -1
+	}
+}
+
+// checkNetworkEnclaveByID checks if the network with the given ID is SECRET on a
+// low-side enclave. Returns true if access should be blocked (i.e. SECRET on low).
+// Returns false, "" if network not found (caller should handle that separately).
+func (s *Server) isNetworkSecretOnLow(ctx context.Context, networkID string) (bool, error) {
+	if enclave != "low" {
+		return false, nil
+	}
+	var classification string
+	err := s.db.QueryRow(ctx, "SELECT classification FROM networks WHERE id = $1", networkID).Scan(&classification)
+	if err != nil {
+		return false, err
+	}
+	return classification == "SECRET", nil
+}
+
 func parsePagination(r *http.Request) (page, limit, offset int) {
 	page = 1
 	limit = 20
@@ -498,7 +623,7 @@ func scanNetwork(scanner interface{ Scan(dest ...any) error }) (Network, error) 
 	)
 	err := scanner.Scan(
 		&n.ID, &n.OperationID, &n.Name, &n.Description,
-		&cidrRanges, &importSource, &metadata, &createdBy,
+		&cidrRanges, &n.Classification, &importSource, &metadata, &createdBy,
 		&createdAt, &updatedAt, &n.NodeCount, &n.CompromisedCount,
 	)
 	if err != nil {
@@ -517,7 +642,7 @@ func scanNetwork(scanner interface{ Scan(dest ...any) error }) (Network, error) 
 }
 
 const networkSelectCols = `n.id, n.operation_id, n.name, n.description,
-       n.cidr_ranges, n.import_source, n.metadata, n.created_by,
+       n.cidr_ranges, n.classification, n.import_source, n.metadata, n.created_by,
        n.created_at, n.updated_at,
        (SELECT count(*) FROM network_nodes WHERE network_id = n.id) AS node_count,
        (SELECT count(*) FROM network_nodes WHERE network_id = n.id AND status = 'compromised') AS compromised_count`
@@ -536,7 +661,7 @@ func scanNode(scanner interface{ Scan(dest ...any) error }) (NetworkNode, error)
 	)
 	err := scanner.Scan(
 		&nd.ID, &nd.NetworkID, &endpointID, &nd.IPAddress, &nd.Hostname,
-		&macAddress, &nd.OS, &nd.OSVersion, &nd.Status, &nd.NodeType,
+		&macAddress, &nd.OS, &nd.OSVersion, &nd.Status, &nd.NodeType, &nd.Classification,
 		&positionX, &positionY, &services, &metadata,
 		&createdAt, &updatedAt,
 	)
@@ -555,7 +680,7 @@ func scanNode(scanner interface{ Scan(dest ...any) error }) (NetworkNode, error)
 }
 
 const nodeSelectCols = `id, network_id, endpoint_id, ip_address, hostname,
-       mac_address, os, os_version, status, node_type,
+       mac_address, os, os_version, status, node_type, classification,
        position_x, position_y, services, metadata,
        created_at, updated_at`
 
@@ -615,14 +740,40 @@ func (s *Server) handleHealthReady(w http.ResponseWriter, r *http.Request) {
 		checks["nats"] = "ok"
 	}
 
-	writeJSON(w, status, map[string]any{"status": overall, "service": "endpoint-service", "checks": checks})
+	resp := map[string]any{"status": overall, "service": "endpoint-service", "checks": checks}
+	if s.cti != nil {
+		resp["cti_connected"] = s.cti.IsConnected()
+		resp["degraded"] = s.isDegraded()
+	}
+	writeJSON(w, status, resp)
 }
 
 // ---------------------------------------------------------------------------
 // Handlers — Networks
 // ---------------------------------------------------------------------------
 
+func (s *Server) handleCTIStatus(w http.ResponseWriter, r *http.Request) {
+	ctiConnected := true
+	degraded := false
+	if s.cti != nil {
+		ctiConnected = s.cti.IsConnected()
+		degraded = s.isDegraded()
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cti_connected": ctiConnected,
+		"enclave":       enclave,
+		"degraded":      degraded,
+	})
+}
+
 func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
+	// Degraded mode: block new network creation on low side
+	if s.isDegraded() {
+		writeError(w, http.StatusServiceUnavailable, "DEGRADED_MODE",
+			"CTI link unavailable — new network creation blocked on low side")
+		return
+	}
+
 	var req CreateNetworkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
@@ -634,6 +785,19 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Name == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "name is required")
+		return
+	}
+
+	classification := req.Classification
+	if classification == "" {
+		classification = "UNCLASS"
+	}
+	if !isValidClassification(classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	if enclave == "low" && classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot create SECRET networks on low-side enclave")
 		return
 	}
 
@@ -651,9 +815,9 @@ func (s *Server) handleCreateNetwork(w http.ResponseWriter, r *http.Request) {
 
 	var netID string
 	err := s.db.QueryRow(r.Context(),
-		`INSERT INTO networks (operation_id, name, description, cidr_ranges, metadata, created_by)
-		 VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-		req.OperationID, req.Name, req.Description, cidrRanges, metadataBytes, userID).Scan(&netID)
+		`INSERT INTO networks (operation_id, name, description, cidr_ranges, classification, metadata, created_by)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+		req.OperationID, req.Name, req.Description, cidrRanges, classification, metadataBytes, userID).Scan(&netID)
 	if err != nil {
 		s.logger.Error("create network insert failed", "error", err)
 		if strings.Contains(err.Error(), "foreign key") {
@@ -685,13 +849,28 @@ func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 	}
 
 	page, limit, offset := parsePagination(r)
+	classificationFilter := r.URL.Query().Get("classification")
 
+	extraWhere := ""
+	args := []any{operationID}
+	argIdx := 2
+
+	if classificationFilter != "" {
+		extraWhere += fmt.Sprintf(" AND n.classification = $%d", argIdx)
+		args = append(args, classificationFilter)
+		argIdx++
+	}
+	if enclave == "low" {
+		extraWhere += " AND n.classification != 'SECRET'"
+	}
+
+	args = append(args, limit, offset)
 	query := fmt.Sprintf(`SELECT %s FROM networks n
-		WHERE n.operation_id = $1
+		WHERE n.operation_id = $1%s
 		ORDER BY n.name
-		LIMIT $2 OFFSET $3`, networkSelectCols)
+		LIMIT $%d OFFSET $%d`, networkSelectCols, extraWhere, argIdx, argIdx+1)
 
-	rows, err := s.db.Query(r.Context(), query, operationID, limit, offset)
+	rows, err := s.db.Query(r.Context(), query, args...)
 	if err != nil {
 		s.logger.Error("list networks query failed", "error", err)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to query networks")
@@ -713,9 +892,18 @@ func (s *Server) handleListNetworks(w http.ResponseWriter, r *http.Request) {
 		nets = []Network{}
 	}
 
+	countArgs := []any{operationID}
+	countExtra := ""
+	if classificationFilter != "" {
+		countExtra += " AND classification = $2"
+		countArgs = append(countArgs, classificationFilter)
+	}
+	if enclave == "low" {
+		countExtra += " AND classification != 'SECRET'"
+	}
 	var total int
 	if err := s.db.QueryRow(r.Context(),
-		"SELECT count(*) FROM networks WHERE operation_id = $1", operationID).Scan(&total); err != nil {
+		fmt.Sprintf("SELECT count(*) FROM networks WHERE operation_id = $1%s", countExtra), countArgs...).Scan(&total); err != nil {
 		s.logger.Error("count networks failed", "error", err)
 		total = len(nets)
 	}
@@ -750,6 +938,13 @@ func (s *Server) handleGetNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: hide SECRET networks on low-side enclave
+	if enclave == "low" && net.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	}
+
+	w.Header().Set("X-Classification", net.Classification)
 	writeJSON(w, http.StatusOK, net)
 }
 
@@ -758,6 +953,19 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
 		return
+	}
+
+	// Enclave enforcement: block updates to SECRET networks on low-side enclave
+	if enclave == "low" {
+		var netClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM networks WHERE id = $1", id).Scan(&netClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if netClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
 	}
 
 	var req UpdateNetworkRequest
@@ -783,6 +991,29 @@ func (s *Server) handleUpdateNetwork(w http.ResponseWriter, r *http.Request) {
 	if req.CIDRRanges != nil {
 		setClauses = append(setClauses, fmt.Sprintf("cidr_ranges = $%d", argIdx))
 		args = append(args, *req.CIDRRanges)
+		argIdx++
+	}
+	if req.Classification != nil {
+		if !isValidClassification(*req.Classification) {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+			return
+		}
+		// No-downgrade enforcement
+		var currentClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM networks WHERE id = $1", id).Scan(&currentClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Network not found")
+			return
+		}
+		if classificationRank(*req.Classification) < classificationRank(currentClassification) {
+			writeError(w, http.StatusForbidden, "CLASSIFICATION_DOWNGRADE", "Cannot downgrade classification from "+currentClassification+" to "+*req.Classification)
+			return
+		}
+		if enclave == "low" && *req.Classification == "SECRET" {
+			writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot set SECRET classification on low-side enclave")
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, *req.Classification)
 		argIdx++
 	}
 	if req.Metadata != nil {
@@ -834,6 +1065,19 @@ func (s *Server) handleDeleteNetwork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: block deletion of SECRET networks on low-side enclave
+	if enclave == "low" {
+		var netClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM networks WHERE id = $1", id).Scan(&netClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if netClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+	}
+
 	result, err := s.db.Exec(r.Context(), "DELETE FROM networks WHERE id = $1", id)
 	if err != nil {
 		s.logger.Error("delete network failed", "error", err, "id", id)
@@ -857,6 +1101,15 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	networkID := r.PathValue("id")
 	if networkID == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "network id is required")
+		return
+	}
+
+	// Enclave enforcement: block access to nodes in SECRET networks on low-side enclave
+	if blocked, err := s.isNetworkSecretOnLow(r.Context(), networkID); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	} else if blocked {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -921,6 +1174,15 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: block node creation in SECRET networks on low-side enclave
+	if blocked, err := s.isNetworkSecretOnLow(r.Context(), networkID); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	} else if blocked {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	}
+
 	var req CreateNodeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
@@ -951,6 +1213,20 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Default and validate classification
+	classification := req.Classification
+	if classification == "" {
+		classification = "UNCLASS"
+	}
+	if !isValidClassification(classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	if enclave == "low" && classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot create SECRET nodes on low-side enclave")
+		return
+	}
+
 	servicesBytes := marshalJSONB(req.Services)
 	if servicesBytes == nil {
 		servicesBytes = []byte("[]")
@@ -962,8 +1238,8 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 
 	query := fmt.Sprintf(`INSERT INTO network_nodes
 		(network_id, endpoint_id, ip_address, hostname, mac_address, os, os_version,
-		 status, node_type, position_x, position_y, services, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		 status, node_type, classification, position_x, position_y, services, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (network_id, ip_address) DO UPDATE SET
 			endpoint_id = COALESCE(EXCLUDED.endpoint_id, network_nodes.endpoint_id),
 			hostname = COALESCE(NULLIF(EXCLUDED.hostname, ''), network_nodes.hostname),
@@ -972,6 +1248,7 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 			os_version = COALESCE(NULLIF(EXCLUDED.os_version, ''), network_nodes.os_version),
 			status = EXCLUDED.status,
 			node_type = EXCLUDED.node_type,
+			classification = EXCLUDED.classification,
 			position_x = COALESCE(EXCLUDED.position_x, network_nodes.position_x),
 			position_y = COALESCE(EXCLUDED.position_y, network_nodes.position_y),
 			services = COALESCE(EXCLUDED.services, network_nodes.services),
@@ -981,7 +1258,7 @@ func (s *Server) handleCreateNode(w http.ResponseWriter, r *http.Request) {
 
 	row := s.db.QueryRow(r.Context(), query,
 		networkID, req.EndpointID, req.IPAddress, req.Hostname, req.MACAddress,
-		req.OS, req.OSVersion, req.Status, req.NodeType,
+		req.OS, req.OSVersion, req.Status, req.NodeType, classification,
 		req.PositionX, req.PositionY, servicesBytes, metadataBytes)
 
 	nd, err := scanNode(row)
@@ -1004,6 +1281,24 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
 		return
+	}
+
+	// Enclave enforcement: block updates to nodes with SECRET classification or in SECRET networks
+	if enclave == "low" {
+		var nodeClassification, networkID string
+		if err := s.db.QueryRow(r.Context(),
+			"SELECT classification, network_id FROM network_nodes WHERE id = $1", id).Scan(&nodeClassification, &networkID); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if nodeClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if blocked, _ := s.isNetworkSecretOnLow(r.Context(), networkID); blocked {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
 	}
 
 	var req UpdateNodeRequest
@@ -1064,6 +1359,28 @@ func (s *Server) handleUpdateNode(w http.ResponseWriter, r *http.Request) {
 		}
 		setClauses = append(setClauses, fmt.Sprintf("node_type = $%d", argIdx))
 		args = append(args, *req.NodeType)
+		argIdx++
+	}
+	if req.Classification != nil {
+		if !isValidClassification(*req.Classification) {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+			return
+		}
+		var currentClassification string
+		if err := s.db.QueryRow(r.Context(), "SELECT classification FROM network_nodes WHERE id = $1", id).Scan(&currentClassification); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Node not found")
+			return
+		}
+		if classificationRank(*req.Classification) < classificationRank(currentClassification) {
+			writeError(w, http.StatusForbidden, "CLASSIFICATION_DOWNGRADE", "Cannot downgrade classification from "+currentClassification+" to "+*req.Classification)
+			return
+		}
+		if enclave == "low" && *req.Classification == "SECRET" {
+			writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot set SECRET classification on low-side enclave")
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, *req.Classification)
 		argIdx++
 	}
 	if req.PositionX != nil {
@@ -1131,6 +1448,24 @@ func (s *Server) handleDeleteNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: block deletion of nodes with SECRET classification or in SECRET networks
+	if enclave == "low" {
+		var nodeClassification, networkID string
+		if err := s.db.QueryRow(r.Context(),
+			"SELECT classification, network_id FROM network_nodes WHERE id = $1", id).Scan(&nodeClassification, &networkID); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if nodeClassification == "SECRET" {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if blocked, _ := s.isNetworkSecretOnLow(r.Context(), networkID); blocked {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+	}
+
 	result, err := s.db.Exec(r.Context(), "DELETE FROM network_nodes WHERE id = $1", id)
 	if err != nil {
 		s.logger.Error("delete node failed", "error", err, "id", id)
@@ -1154,6 +1489,15 @@ func (s *Server) handleListEdges(w http.ResponseWriter, r *http.Request) {
 	networkID := r.PathValue("id")
 	if networkID == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "network id is required")
+		return
+	}
+
+	// Enclave enforcement: block access to edges in SECRET networks on low-side enclave
+	if blocked, err := s.isNetworkSecretOnLow(r.Context(), networkID); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	} else if blocked {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -1192,6 +1536,15 @@ func (s *Server) handleCreateEdge(w http.ResponseWriter, r *http.Request) {
 	networkID := r.PathValue("id")
 	if networkID == "" {
 		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "network id is required")
+		return
+	}
+
+	// Enclave enforcement: block edge creation in SECRET networks on low-side enclave
+	if blocked, err := s.isNetworkSecretOnLow(r.Context(), networkID); err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+		return
+	} else if blocked {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -1269,6 +1622,19 @@ func (s *Server) handleDeleteEdge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Enclave enforcement: block deletion of edges in SECRET networks on low-side enclave
+	if enclave == "low" {
+		var networkID string
+		if err := s.db.QueryRow(r.Context(), "SELECT network_id FROM network_edges WHERE id = $1", id).Scan(&networkID); err != nil {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+		if blocked, _ := s.isNetworkSecretOnLow(r.Context(), networkID); blocked {
+			writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
+			return
+		}
+	}
+
 	result, err := s.db.Exec(r.Context(), "DELETE FROM network_edges WHERE id = $1", id)
 	if err != nil {
 		s.logger.Error("delete edge failed", "error", err, "id", id)
@@ -1308,6 +1674,12 @@ func (s *Server) handleGetTopology(w http.ResponseWriter, r *http.Request) {
 		}
 		s.logger.Error("get network for topology failed", "error", err, "id", id)
 		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to get network")
+		return
+	}
+
+	// Enclave enforcement: hide SECRET network topology on low-side enclave
+	if enclave == "low" && net.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -1359,6 +1731,7 @@ func (s *Server) handleGetTopology(w http.ResponseWriter, r *http.Request) {
 		edges = []NetworkEdge{}
 	}
 
+	w.Header().Set("X-Classification", net.Classification)
 	writeJSON(w, http.StatusOK, TopologyResponse{
 		Network: net,
 		Nodes:   nodes,
@@ -1374,11 +1747,17 @@ func (s *Server) handleImportFile(w http.ResponseWriter, r *http.Request) {
 	networkID := r.PathValue("id")
 	parserID := r.URL.Query().Get("parser_id")
 
-	// Verify network exists
-	var netName string
-	err := s.db.QueryRow(r.Context(), "SELECT name FROM networks WHERE id = $1", networkID).Scan(&netName)
+	// Verify network exists and check enclave classification
+	var netName, netClassification string
+	err := s.db.QueryRow(r.Context(), "SELECT name, classification FROM networks WHERE id = $1", networkID).Scan(&netName, &netClassification)
 	if err != nil {
 		writeError(w, 404, "NOT_FOUND", "Network not found")
+		return
+	}
+
+	// Enclave enforcement: block imports to SECRET networks on low-side enclave
+	if enclave == "low" && netClassification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Resource not found")
 		return
 	}
 
@@ -3228,12 +3607,17 @@ func (s *Server) handleTestImportParser(w http.ResponseWriter, r *http.Request) 
 // ── Endpoints (managed targets) ─────────────────────────────────────────
 
 func (s *Server) handleListEndpoints(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `
+	query := `
 		SELECT e.id, e.hostname, e.fqdn, e.ip_addresses, e.os, e.os_version,
 		       e.architecture, e.environment, e.status, e.compliance_status,
-		       e.tags, e.first_seen, e.last_seen
-		FROM endpoints e
-		ORDER BY e.hostname ASC`)
+		       e.tags, e.first_seen, e.last_seen, e.classification
+		FROM endpoints e`
+	if enclave == "low" {
+		query += ` WHERE e.classification != 'SECRET'`
+	}
+	query += ` ORDER BY e.hostname ASC`
+
+	rows, err := s.db.Query(r.Context(), query)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": map[string]string{"code": "QUERY_FAILED", "message": err.Error()}})
 		return
@@ -3254,6 +3638,7 @@ func (s *Server) handleListEndpoints(w http.ResponseWriter, r *http.Request) {
 		Tags             []string  `json:"tags"`
 		FirstSeen        time.Time `json:"first_seen"`
 		LastSeen         time.Time `json:"last_seen"`
+		Classification   string    `json:"classification"`
 	}
 
 	var endpoints []Endpoint
@@ -3263,7 +3648,7 @@ func (s *Server) handleListEndpoints(w http.ResponseWriter, r *http.Request) {
 		var tags []string
 		if err := rows.Scan(&ep.ID, &ep.Hostname, &ep.FQDN, &ipJSON, &ep.OS, &ep.OSVersion,
 			&ep.Architecture, &ep.Environment, &ep.Status, &ep.ComplianceStatus,
-			&tags, &ep.FirstSeen, &ep.LastSeen); err != nil {
+			&tags, &ep.FirstSeen, &ep.LastSeen, &ep.Classification); err != nil {
 			s.logger.Error("scan endpoint", "error", err)
 			continue
 		}
@@ -3294,6 +3679,7 @@ func (s *Server) handleGetEndpoint(w http.ResponseWriter, r *http.Request) {
 		Tags             []string  `json:"tags"`
 		FirstSeen        time.Time `json:"first_seen"`
 		LastSeen         time.Time `json:"last_seen"`
+		Classification   string    `json:"classification"`
 	}
 
 	var ep Endpoint
@@ -3302,18 +3688,742 @@ func (s *Server) handleGetEndpoint(w http.ResponseWriter, r *http.Request) {
 	err := s.db.QueryRow(r.Context(), `
 		SELECT id, hostname, fqdn, ip_addresses, os, os_version,
 		       architecture, environment, status, compliance_status,
-		       tags, first_seen, last_seen
+		       tags, first_seen, last_seen, classification
 		FROM endpoints WHERE id = $1`, id).
 		Scan(&ep.ID, &ep.Hostname, &ep.FQDN, &ipJSON, &ep.OS, &ep.OSVersion,
 			&ep.Architecture, &ep.Environment, &ep.Status, &ep.ComplianceStatus,
-			&tags, &ep.FirstSeen, &ep.LastSeen)
+			&tags, &ep.FirstSeen, &ep.LastSeen, &ep.Classification)
 	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "NOT_FOUND", "message": "endpoint not found"}})
+		return
+	}
+	// Enclave enforcement: hide SECRET endpoints on low-side enclave
+	if enclave == "low" && ep.Classification == "SECRET" {
 		writeJSON(w, http.StatusNotFound, map[string]any{"error": map[string]string{"code": "NOT_FOUND", "message": "endpoint not found"}})
 		return
 	}
 	json.Unmarshal(ipJSON, &ep.IPAddresses)
 	ep.Tags = tags
 	writeJSON(w, http.StatusOK, ep)
+}
+
+// ---------------------------------------------------------------------------
+// Findings — Types
+// ---------------------------------------------------------------------------
+
+type Finding struct {
+	ID              string  `json:"id"`
+	TaskID          *string `json:"task_id"`
+	OperationID     string  `json:"operation_id"`
+	EndpointID      *string `json:"endpoint_id"`
+	FindingType     string  `json:"finding_type"`
+	Severity        string  `json:"severity"`
+	Title           string  `json:"title"`
+	Description     string  `json:"description"`
+	Evidence        string  `json:"evidence"`
+	Remediation     *string `json:"remediation"`
+	Tags            []string `json:"tags"`
+	Metadata        any     `json:"metadata"`
+	Classification  string  `json:"classification"`
+	CveID           *string `json:"cve_id"`
+	CvssScore       *float64 `json:"cvss_score"`
+	NetworkNodeID   *string `json:"network_node_id"`
+	OriginFindingID *string `json:"origin_finding_id"`
+	OriginEnclave   *string `json:"origin_enclave"`
+	RedactedSummary *string `json:"redacted_summary"`
+	CreatedBy       string  `json:"created_by"`
+	CreatedAt       string  `json:"created_at"`
+	UpdatedAt       string  `json:"updated_at"`
+}
+
+type EnrichFindingRequest struct {
+	Title           string   `json:"title"`
+	Description     string   `json:"description"`
+	Classification  string   `json:"classification"`
+	Severity        *string  `json:"severity"`
+	Evidence        *string  `json:"evidence"`
+	Remediation     *string  `json:"remediation"`
+	Tags            []string `json:"tags"`
+	Metadata        any      `json:"metadata"`
+}
+
+type RedactFindingRequest struct {
+	RedactedSummary       string `json:"redacted_summary"`
+	RedactedClassification string `json:"redacted_classification"`
+}
+
+type FindingLink struct {
+	ID              string `json:"id"`
+	SourceFindingID string `json:"source_finding_id"`
+	LinkedFindingID string `json:"linked_finding_id"`
+	LinkType        string `json:"link_type"`
+	SourceEnclave   string `json:"source_enclave"`
+	CreatedAt       string `json:"created_at"`
+}
+
+type FindingLineageEntry struct {
+	Finding  Finding `json:"finding"`
+	LinkType string  `json:"link_type"`
+	LinkDir  string  `json:"link_direction"` // "source" = this finding enriches target, "target" = this finding is enriched by source
+}
+
+// ---------------------------------------------------------------------------
+// Findings — Scan helper
+// ---------------------------------------------------------------------------
+
+func scanFinding(scanner interface{ Scan(dest ...any) error }) (Finding, error) {
+	var f Finding
+	var (
+		taskID          *string
+		endpointID      *string
+		remediation     *string
+		tags            []string
+		metadata        []byte
+		cveID           *string
+		cvssScore       *float64
+		networkNodeID   *string
+		originFindingID *string
+		originEnclave   *string
+		redactedSummary *string
+		createdAt       time.Time
+		updatedAt       time.Time
+	)
+	err := scanner.Scan(
+		&f.ID, &taskID, &f.OperationID, &endpointID,
+		&f.FindingType, &f.Severity, &f.Title, &f.Description,
+		&f.Evidence, &remediation, &tags, &metadata,
+		&f.Classification, &cveID, &cvssScore, &networkNodeID,
+		&originFindingID, &originEnclave, &redactedSummary,
+		&f.CreatedBy, &createdAt, &updatedAt,
+	)
+	if err != nil {
+		return f, err
+	}
+	f.TaskID = taskID
+	f.EndpointID = endpointID
+	f.Remediation = remediation
+	f.Tags = tags
+	if f.Tags == nil {
+		f.Tags = []string{}
+	}
+	f.Metadata = parseJSONB(metadata)
+	f.CveID = cveID
+	f.CvssScore = cvssScore
+	f.NetworkNodeID = networkNodeID
+	f.OriginFindingID = originFindingID
+	f.OriginEnclave = originEnclave
+	f.RedactedSummary = redactedSummary
+	f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	f.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return f, nil
+}
+
+const findingSelectCols = `id, task_id, operation_id, endpoint_id,
+       finding_type, severity, title, description,
+       evidence, remediation, tags, metadata,
+       classification, cve_id, cvss_score, network_node_id,
+       origin_finding_id, origin_enclave, redacted_summary,
+       created_by, created_at, COALESCE(updated_at, created_at)`
+
+// ---------------------------------------------------------------------------
+// Findings — List & Get
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleListFindings(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	page, limit, offset := parsePagination(r)
+
+	operationID := r.URL.Query().Get("operation_id")
+	severity := r.URL.Query().Get("severity")
+	classification := r.URL.Query().Get("classification")
+
+	where := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if operationID != "" {
+		where = append(where, fmt.Sprintf("operation_id = $%d", argIdx))
+		args = append(args, operationID)
+		argIdx++
+	}
+	if severity != "" {
+		where = append(where, fmt.Sprintf("severity = $%d", argIdx))
+		args = append(args, severity)
+		argIdx++
+	}
+	if classification != "" {
+		where = append(where, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, classification)
+		argIdx++
+	}
+	// Enclave enforcement: hide SECRET on low side
+	if enclave == "low" {
+		where = append(where, "classification != 'SECRET'")
+	}
+
+	whereClause := ""
+	if len(where) > 0 {
+		whereClause = " WHERE " + strings.Join(where, " AND ")
+	}
+
+	// Count
+	var total int
+	countQuery := "SELECT COUNT(*) FROM findings" + whereClause
+	if err := s.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+		s.logger.Error("count findings failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "QUERY_FAILED", "Failed to count findings")
+		return
+	}
+
+	// Data
+	dataQuery := fmt.Sprintf("SELECT %s FROM findings%s ORDER BY created_at DESC LIMIT $%d OFFSET $%d",
+		findingSelectCols, whereClause, argIdx, argIdx+1)
+	args = append(args, limit, offset)
+
+	rows, err := s.db.Query(ctx, dataQuery, args...)
+	if err != nil {
+		s.logger.Error("list findings failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "QUERY_FAILED", "Failed to list findings")
+		return
+	}
+	defer rows.Close()
+
+	var findings []Finding
+	for rows.Next() {
+		f, err := scanFinding(rows)
+		if err != nil {
+			s.logger.Error("scan finding", "error", err)
+			continue
+		}
+		findings = append(findings, f)
+	}
+	if findings == nil {
+		findings = []Finding{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data":       findings,
+		"pagination": map[string]any{"page": page, "limit": limit, "total": total},
+	})
+}
+
+func (s *Server) handleGetFinding(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	ctx := r.Context()
+
+	query := fmt.Sprintf("SELECT %s FROM findings WHERE id = $1", findingSelectCols)
+	f, err := scanFinding(s.db.QueryRow(ctx, query, id))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Finding not found")
+		return
+	}
+	// Enclave enforcement
+	if enclave == "low" && f.Classification == "SECRET" {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Finding not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, f)
+}
+
+// ---------------------------------------------------------------------------
+// Findings — Enrich (high side only)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleEnrichFinding(w http.ResponseWriter, r *http.Request) {
+	// Only allowed on high side
+	if enclave == "low" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTED",
+			"Finding enrichment is only available on the high-side enclave")
+		return
+	}
+
+	sourceID := r.PathValue("id")
+	ctx := r.Context()
+	userID := getUserID(r)
+	if userID == "" {
+		userID = "system"
+	}
+
+	// Fetch the source finding
+	srcQuery := fmt.Sprintf("SELECT %s FROM findings WHERE id = $1", findingSelectCols)
+	src, err := scanFinding(s.db.QueryRow(ctx, srcQuery, sourceID))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Source finding not found")
+		return
+	}
+
+	var req EnrichFindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	// Validate classification
+	enrichedClassification := req.Classification
+	if enrichedClassification == "" {
+		enrichedClassification = "CUI"
+	}
+	if !isValidClassification(enrichedClassification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	// Enriched copy must be same or higher classification
+	if classificationRank(enrichedClassification) < classificationRank(src.Classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"Enriched finding classification cannot be lower than the source finding")
+		return
+	}
+
+	// Title is required
+	if req.Title == "" {
+		req.Title = "[Enriched] " + src.Title
+	}
+	if req.Description == "" {
+		req.Description = src.Description
+	}
+
+	severity := src.Severity
+	if req.Severity != nil {
+		severity = *req.Severity
+	}
+	evidence := src.Evidence
+	if req.Evidence != nil {
+		evidence = *req.Evidence
+	}
+	tags := src.Tags
+	if req.Tags != nil {
+		tags = req.Tags
+	}
+	metadata := marshalJSONB(src.Metadata)
+	if req.Metadata != nil {
+		metadata = marshalJSONB(req.Metadata)
+	}
+
+	// Create the enriched copy
+	var enrichedID string
+	err = s.db.QueryRow(ctx,
+		`INSERT INTO findings (
+			operation_id, task_id, endpoint_id, finding_type, severity,
+			title, description, evidence, remediation, tags, metadata,
+			classification, cve_id, cvss_score, network_node_id,
+			origin_finding_id, origin_enclave, created_by
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		RETURNING id`,
+		src.OperationID, src.TaskID, src.EndpointID, src.FindingType, severity,
+		req.Title, req.Description, evidence, req.Remediation, tags, metadata,
+		enrichedClassification, src.CveID, src.CvssScore, src.NetworkNodeID,
+		sourceID, "low", userID,
+	).Scan(&enrichedID)
+	if err != nil {
+		s.logger.Error("create enriched finding failed", "error", err, "source_id", sourceID)
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "Failed to create enriched finding")
+		return
+	}
+
+	// Create a finding_links entry
+	_, err = s.db.Exec(ctx,
+		`INSERT INTO finding_links (source_finding_id, linked_finding_id, link_type, source_enclave)
+		 VALUES ($1, $2, 'enrichment', 'high')
+		 ON CONFLICT (source_finding_id, linked_finding_id) DO NOTHING`,
+		sourceID, enrichedID)
+	if err != nil {
+		s.logger.Warn("failed to create finding link", "error", err, "source", sourceID, "linked", enrichedID)
+	}
+
+	// Fetch and return the created finding
+	enrichedQuery := fmt.Sprintf("SELECT %s FROM findings WHERE id = $1", findingSelectCols)
+	enriched, err := scanFinding(s.db.QueryRow(ctx, enrichedQuery, enrichedID))
+	if err != nil {
+		s.logger.Error("fetch enriched finding failed", "error", err, "id", enrichedID)
+		writeError(w, http.StatusInternalServerError, "FETCH_FAILED", "Created finding but failed to fetch it")
+		return
+	}
+
+	s.publishEvent("finding.enriched", map[string]any{
+		"finding_id":         enrichedID,
+		"source_finding_id":  sourceID,
+		"classification":     enrichedClassification,
+		"enclave":            enclave,
+	})
+
+	s.logger.Info("finding enriched",
+		"enriched_id", enrichedID,
+		"source_id", sourceID,
+		"classification", enrichedClassification,
+	)
+
+	writeJSON(w, http.StatusCreated, enriched)
+}
+
+// ---------------------------------------------------------------------------
+// Findings — Lineage
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleFindingLineage(w http.ResponseWriter, r *http.Request) {
+	findingID := r.PathValue("id")
+	ctx := r.Context()
+
+	// Verify the finding exists
+	var exists bool
+	err := s.db.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM findings WHERE id = $1)", findingID).Scan(&exists)
+	if err != nil || !exists {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Finding not found")
+		return
+	}
+
+	// Get all linked findings in both directions
+	var lineage []FindingLineageEntry
+
+	// Direction 1: This finding is the SOURCE (it enriches/relates to linked findings)
+	query1 := fmt.Sprintf(`
+		SELECT fl.link_type, %s
+		FROM finding_links fl
+		JOIN findings f ON f.id = fl.linked_finding_id
+		WHERE fl.source_finding_id = $1
+		ORDER BY fl.created_at`, findingSelectCols)
+
+	rows, err := s.db.Query(ctx, query1, findingID)
+	if err != nil {
+		s.logger.Error("lineage query (source) failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "QUERY_FAILED", "Failed to query lineage")
+		return
+	}
+	for rows.Next() {
+		var linkType string
+		var f Finding
+		var (
+			taskID          *string
+			endpointID      *string
+			remediation     *string
+			tags            []string
+			metadata        []byte
+			cveID           *string
+			cvssScore       *float64
+			networkNodeID   *string
+			originFindingID *string
+			originEnclave   *string
+			redactedSummary *string
+			createdAt       time.Time
+			updatedAt       time.Time
+		)
+		if err := rows.Scan(&linkType,
+			&f.ID, &taskID, &f.OperationID, &endpointID,
+			&f.FindingType, &f.Severity, &f.Title, &f.Description,
+			&f.Evidence, &remediation, &tags, &metadata,
+			&f.Classification, &cveID, &cvssScore, &networkNodeID,
+			&originFindingID, &originEnclave, &redactedSummary,
+			&f.CreatedBy, &createdAt, &updatedAt,
+		); err != nil {
+			s.logger.Error("scan lineage entry (source)", "error", err)
+			continue
+		}
+		f.TaskID = taskID
+		f.EndpointID = endpointID
+		f.Remediation = remediation
+		f.Tags = tags
+		if f.Tags == nil {
+			f.Tags = []string{}
+		}
+		f.Metadata = parseJSONB(metadata)
+		f.CveID = cveID
+		f.CvssScore = cvssScore
+		f.NetworkNodeID = networkNodeID
+		f.OriginFindingID = originFindingID
+		f.OriginEnclave = originEnclave
+		f.RedactedSummary = redactedSummary
+		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		f.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+
+		// Enclave enforcement: hide SECRET findings on low side
+		if enclave == "low" && f.Classification == "SECRET" {
+			continue
+		}
+
+		lineage = append(lineage, FindingLineageEntry{
+			Finding:  f,
+			LinkType: linkType,
+			LinkDir:  "source",
+		})
+	}
+	rows.Close()
+
+	// Direction 2: This finding is the TARGET (other findings enrich/relate to it)
+	query2 := fmt.Sprintf(`
+		SELECT fl.link_type, %s
+		FROM finding_links fl
+		JOIN findings f ON f.id = fl.source_finding_id
+		WHERE fl.linked_finding_id = $1
+		ORDER BY fl.created_at`, findingSelectCols)
+
+	rows2, err := s.db.Query(ctx, query2, findingID)
+	if err != nil {
+		s.logger.Error("lineage query (target) failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "QUERY_FAILED", "Failed to query lineage")
+		return
+	}
+	for rows2.Next() {
+		var linkType string
+		var f Finding
+		var (
+			taskID          *string
+			endpointID      *string
+			remediation     *string
+			tags            []string
+			metadata        []byte
+			cveID           *string
+			cvssScore       *float64
+			networkNodeID   *string
+			originFindingID *string
+			originEnclave   *string
+			redactedSummary *string
+			createdAt       time.Time
+			updatedAt       time.Time
+		)
+		if err := rows2.Scan(&linkType,
+			&f.ID, &taskID, &f.OperationID, &endpointID,
+			&f.FindingType, &f.Severity, &f.Title, &f.Description,
+			&f.Evidence, &remediation, &tags, &metadata,
+			&f.Classification, &cveID, &cvssScore, &networkNodeID,
+			&originFindingID, &originEnclave, &redactedSummary,
+			&f.CreatedBy, &createdAt, &updatedAt,
+		); err != nil {
+			s.logger.Error("scan lineage entry (target)", "error", err)
+			continue
+		}
+		f.TaskID = taskID
+		f.EndpointID = endpointID
+		f.Remediation = remediation
+		f.Tags = tags
+		if f.Tags == nil {
+			f.Tags = []string{}
+		}
+		f.Metadata = parseJSONB(metadata)
+		f.CveID = cveID
+		f.CvssScore = cvssScore
+		f.NetworkNodeID = networkNodeID
+		f.OriginFindingID = originFindingID
+		f.OriginEnclave = originEnclave
+		f.RedactedSummary = redactedSummary
+		f.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+		f.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+
+		// Enclave enforcement: hide SECRET findings on low side
+		if enclave == "low" && f.Classification == "SECRET" {
+			continue
+		}
+
+		lineage = append(lineage, FindingLineageEntry{
+			Finding:  f,
+			LinkType: linkType,
+			LinkDir:  "target",
+		})
+	}
+	rows2.Close()
+
+	// Also check origin_finding_id chain (direct parent/child)
+	query3 := fmt.Sprintf(`
+		SELECT %s FROM findings WHERE origin_finding_id = $1
+		ORDER BY created_at`, findingSelectCols)
+	rows3, err := s.db.Query(ctx, query3, findingID)
+	if err == nil {
+		existingIDs := map[string]bool{}
+		for _, entry := range lineage {
+			existingIDs[entry.Finding.ID] = true
+		}
+		for rows3.Next() {
+			child, err := scanFinding(rows3)
+			if err != nil {
+				continue
+			}
+			if existingIDs[child.ID] {
+				continue
+			}
+			if enclave == "low" && child.Classification == "SECRET" {
+				continue
+			}
+			lineage = append(lineage, FindingLineageEntry{
+				Finding:  child,
+				LinkType: "enrichment",
+				LinkDir:  "source",
+			})
+		}
+		rows3.Close()
+	}
+
+	if lineage == nil {
+		lineage = []FindingLineageEntry{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"finding_id": findingID,
+		"lineage":    lineage,
+		"count":      len(lineage),
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Findings — Redact (high side only)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleRedactFinding(w http.ResponseWriter, r *http.Request) {
+	// Only allowed on high side
+	if enclave == "low" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTED",
+			"Finding redaction is only available on the high-side enclave")
+		return
+	}
+
+	sourceID := r.PathValue("id")
+	ctx := r.Context()
+	userID := getUserID(r)
+	if userID == "" {
+		userID = "system"
+	}
+
+	// Fetch the source finding
+	srcQuery := fmt.Sprintf("SELECT %s FROM findings WHERE id = $1", findingSelectCols)
+	src, err := scanFinding(s.db.QueryRow(ctx, srcQuery, sourceID))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Source finding not found")
+		return
+	}
+
+	// Source must be CUI or SECRET (redacting UNCLASS is a no-op)
+	if src.Classification == "UNCLASS" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"Cannot redact an UNCLASS finding — it can already be shared freely")
+		return
+	}
+
+	var req RedactFindingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	if req.RedactedSummary == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "redacted_summary is required")
+		return
+	}
+
+	redactedClassification := req.RedactedClassification
+	if redactedClassification == "" {
+		redactedClassification = "UNCLASS"
+	}
+	if !isValidClassification(redactedClassification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"redacted_classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	// Redacted version must be lower or equal classification
+	if classificationRank(redactedClassification) >= classificationRank(src.Classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR",
+			"Redacted finding must have a lower classification than the source")
+		return
+	}
+
+	// Create the redacted copy
+	var redactedID string
+	err = s.db.QueryRow(ctx,
+		`INSERT INTO findings (
+			operation_id, task_id, endpoint_id, finding_type, severity,
+			title, description, evidence, remediation, tags, metadata,
+			classification, cve_id, cvss_score, network_node_id,
+			origin_finding_id, origin_enclave, redacted_summary, created_by
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, '', $8, $9, '{}', $10, $11, $12, $13, $14, $15, $16, $17)
+		RETURNING id`,
+		src.OperationID, src.TaskID, src.EndpointID, src.FindingType, src.Severity,
+		"[Redacted] "+src.Title, req.RedactedSummary,
+		src.Remediation, src.Tags,
+		redactedClassification, src.CveID, src.CvssScore, src.NetworkNodeID,
+		sourceID, "high", req.RedactedSummary, userID,
+	).Scan(&redactedID)
+	if err != nil {
+		s.logger.Error("create redacted finding failed", "error", err, "source_id", sourceID)
+		writeError(w, http.StatusInternalServerError, "CREATE_FAILED", "Failed to create redacted finding")
+		return
+	}
+
+	// Create a finding_links entry
+	_, err = s.db.Exec(ctx,
+		`INSERT INTO finding_links (source_finding_id, linked_finding_id, link_type, source_enclave)
+		 VALUES ($1, $2, 'related', 'high')
+		 ON CONFLICT (source_finding_id, linked_finding_id) DO NOTHING`,
+		sourceID, redactedID)
+	if err != nil {
+		s.logger.Warn("failed to create finding link for redaction", "error", err, "source", sourceID, "redacted", redactedID)
+	}
+
+	// Fetch and return the created finding
+	redactedQuery := fmt.Sprintf("SELECT %s FROM findings WHERE id = $1", findingSelectCols)
+	redacted, err := scanFinding(s.db.QueryRow(ctx, redactedQuery, redactedID))
+	if err != nil {
+		s.logger.Error("fetch redacted finding failed", "error", err, "id", redactedID)
+		writeError(w, http.StatusInternalServerError, "FETCH_FAILED", "Created finding but failed to fetch it")
+		return
+	}
+
+	s.publishEvent("finding.redacted", map[string]any{
+		"finding_id":        redactedID,
+		"source_finding_id": sourceID,
+		"classification":    redactedClassification,
+		"enclave":           enclave,
+	})
+
+	s.logger.Info("finding redacted",
+		"redacted_id", redactedID,
+		"source_id", sourceID,
+		"source_classification", src.Classification,
+		"redacted_classification", redactedClassification,
+	)
+
+	writeJSON(w, http.StatusCreated, redacted)
+}
+
+// ---------------------------------------------------------------------------
+// Findings — Sync to High (low side triggers)
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleSyncFindingToHigh(w http.ResponseWriter, r *http.Request) {
+	findingID := r.PathValue("id")
+	ctx := r.Context()
+
+	// Fetch the finding
+	query := fmt.Sprintf("SELECT %s FROM findings WHERE id = $1", findingSelectCols)
+	f, err := scanFinding(s.db.QueryRow(ctx, query, findingID))
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Finding not found")
+		return
+	}
+
+	// SECRET cannot sync (should not exist on low side, but defense-in-depth)
+	if f.Classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "CLASSIFICATION_BLOCKED",
+			"SECRET findings cannot be synced across enclaves")
+		return
+	}
+
+	// Publish a NATS event for the CTI relay to pick up
+	eventData := map[string]any{
+		"event_type":     "cti.finding.sync_request",
+		"finding_id":     findingID,
+		"operation_id":   f.OperationID,
+		"classification": f.Classification,
+		"direction":      "low_to_high",
+		"timestamp":      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	s.publishEvent("cti.finding.sync_request", eventData)
+
+	s.logger.Info("finding sync to high requested",
+		"finding_id", findingID,
+		"classification", f.Classification,
+	)
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"status":     "sync_requested",
+		"finding_id": findingID,
+		"direction":  "low_to_high",
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -3324,6 +4434,9 @@ func (s *Server) Start() {
 	mux.HandleFunc("GET /health/live", s.handleHealthLive)
 	mux.HandleFunc("GET /health/ready", s.handleHealthReady)
 	mux.HandleFunc("GET /health", s.handleHealthReady)
+
+	// CTI status
+	mux.HandleFunc("GET /api/v1/endpoints/cti-status", s.handleCTIStatus)
 
 	// Networks
 	mux.HandleFunc("POST /api/v1/networks", s.handleCreateNetwork)
@@ -3345,11 +4458,19 @@ func (s *Server) Start() {
 	mux.HandleFunc("POST /api/v1/networks/{id}/edges", s.handleCreateEdge)
 	mux.HandleFunc("DELETE /api/v1/edges/{id}", s.handleDeleteEdge)
 
-	// Display Schemas
+	// Findings (cross-domain)
+	mux.HandleFunc("GET /api/v1/findings", s.handleListFindings)
+	mux.HandleFunc("GET /api/v1/findings/{id}", s.handleGetFinding)
+	mux.HandleFunc("POST /api/v1/findings/{id}/enrich", s.handleEnrichFinding)
+	mux.HandleFunc("GET /api/v1/findings/{id}/lineage", s.handleFindingLineage)
+	mux.HandleFunc("POST /api/v1/findings/{id}/redact", s.handleRedactFinding)
+	mux.HandleFunc("POST /api/v1/findings/{id}/sync-to-high", s.handleSyncFindingToHigh)
+
 	// Endpoints (managed targets from PostgreSQL endpoints table)
 	mux.HandleFunc("GET /api/v1/endpoints", s.handleListEndpoints)
 	mux.HandleFunc("GET /api/v1/endpoints/{id}", s.handleGetEndpoint)
 
+	// Display Schemas
 	mux.HandleFunc("GET /api/v1/display-schemas", s.handleListDisplaySchemas)
 	mux.HandleFunc("GET /api/v1/display-schemas/{id}", s.handleGetDisplaySchema)
 	mux.HandleFunc("POST /api/v1/display-schemas", s.handleCreateDisplaySchema)
@@ -3430,12 +4551,21 @@ func main() {
 	port := getEnv("SERVICE_PORT", "3008")
 	server := &Server{db: pool, nc: nc, port: port, logger: logger}
 
+	// CTI health checker
+	ctiCtx, ctiCancel := context.WithCancel(context.Background())
+	ctiRelayURL := os.Getenv("CTI_RELAY_URL")
+	if ctiRelayURL != "" {
+		server.cti = newCTIHealth(ctiRelayURL, logger)
+		server.cti.Start(ctiCtx)
+	}
+
 	// Graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		logger.Info("shutting down")
+		ctiCancel() // stop CTI health checker
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer shutdownCancel()
 		if server.httpServer != nil {

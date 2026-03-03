@@ -6,6 +6,10 @@ import C2Page from './pages/C2Page'
 import OperationsPage from './pages/OperationsPage'
 import OperationDetailPage from './pages/OperationDetailPage'
 import DashboardsPage from './pages/DashboardsPage'
+import TransferApprovalsPage from './pages/TransferApprovalsPage'
+import TransferHistoryPage from './pages/TransferHistoryPage'
+import ConsolidatedAuditPage from './pages/ConsolidatedAuditPage'
+import FindingLineagePage from './pages/FindingLineagePage'
 import OverviewTab from './pages/operation-tabs/OverviewTab'
 import NetworksTab from './pages/operation-tabs/NetworksTab'
 import C2Tab from './pages/operation-tabs/C2Tab'
@@ -17,6 +21,8 @@ import ParserWorkbench from './pages/admin/ParserWorkbench'
 import WorkflowListPage from './pages/admin/WorkflowListPage'
 import WorkflowEditorPage from './pages/admin/WorkflowEditorPage'
 import JiraConfigPage from './pages/admin/JiraConfigPage'
+import C2BackendsPage from './pages/admin/C2BackendsPage'
+import NiFiStatusPage from './pages/admin/NiFiStatusPage'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppLayout from './components/AppLayout'
 import AdminLayout from './components/AdminLayout'
@@ -43,6 +49,11 @@ function App() {
             <Route path="/c2" element={<C2Page />} />
             <Route path="/dashboards" element={<DashboardsPage />} />
             <Route path="/dashboards/:id" element={<DashboardsPage />} />
+            <Route path="/transfers/approvals" element={<TransferApprovalsPage />} />
+            <Route path="/transfers/history" element={<TransferHistoryPage />} />
+            <Route path="/audit/consolidated" element={<ConsolidatedAuditPage />} />
+            <Route path="/findings/lineage" element={<FindingLineagePage />} />
+            <Route path="/findings/:id/lineage" element={<FindingLineagePage />} />
             <Route path="/admin" element={<AdminLayout />}>
               <Route index element={<Navigate to="display-schemas" replace />} />
               <Route path="display-schemas" element={<DisplaySchemaEditor />} />
@@ -50,6 +61,8 @@ function App() {
               <Route path="workflows" element={<WorkflowListPage />} />
               <Route path="workflows/:id" element={<WorkflowEditorPage />} />
               <Route path="jira" element={<JiraConfigPage />} />
+              <Route path="c2-backends" element={<C2BackendsPage />} />
+              <Route path="nifi" element={<NiFiStatusPage />} />
             </Route>
             <Route path="/" element={<Navigate to="/operations" replace />} />
           </Route>

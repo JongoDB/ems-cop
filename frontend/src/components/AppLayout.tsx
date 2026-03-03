@@ -1,8 +1,12 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal } from 'lucide-react'
+import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal, ArrowRightLeft, ScrollText, FileSearch } from 'lucide-react'
 import { APP_VERSION } from '../version'
 import NotificationBell from './NotificationBell'
+import EnclaveBanner from './EnclaveBanner'
+import DegradedModeOverlay from './DegradedModeOverlay'
+import { useEnclaveStore } from '../stores/enclaveStore'
+import { useCTIStore } from '../stores/ctiStore'
 
 const NAV_ITEMS = [
   { path: '/operations', label: 'OPERATIONS', icon: Crosshair },
@@ -11,12 +15,30 @@ const NAV_ITEMS = [
   { path: '/c2', label: 'C2', icon: Terminal },
 ]
 
+function CTIIndicator() {
+  const enclave = useEnclaveStore((s) => s.enclave)
+  const connected = useCTIStore((s) => s.connected)
+
+  if (!enclave) return null
+
+  return (
+    <div className={`cti-indicator ${connected ? 'cti-connected' : 'cti-disconnected'}`} title={`CTI Link: ${connected ? 'Connected' : 'Disconnected'}`}>
+      <span className={`cti-dot ${connected ? '' : 'cti-dot-pulse'}`} />
+      <span className="cti-label">CTI</span>
+    </div>
+  )
+}
+
 export default function AppLayout() {
   const { user, roles, logout } = useAuth()
   const location = useLocation()
+  const enclave = useEnclaveStore((s) => s.enclave)
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell ${enclave ? 'app-shell-enclave' : ''}`}>
+      <EnclaveBanner />
+      <DegradedModeOverlay />
+
       <nav className="navbar">
         <div className="navbar-left">
           <Shield size={20} strokeWidth={1.5} className="navbar-icon" />
@@ -33,6 +55,31 @@ export default function AppLayout() {
               {label}
             </Link>
           ))}
+          <Link
+            to="/findings/lineage"
+            className={`navbar-link${location.pathname.startsWith('/findings') ? ' active' : ''}`}
+          >
+            <FileSearch size={14} />
+            FINDINGS
+          </Link>
+          {enclave && (
+            <Link
+              to="/transfers/approvals"
+              className={`navbar-link${location.pathname.startsWith('/transfers') ? ' active' : ''}`}
+            >
+              <ArrowRightLeft size={14} />
+              TRANSFERS
+            </Link>
+          )}
+          {(enclave === 'high' || !enclave) && (
+            <Link
+              to="/audit/consolidated"
+              className={`navbar-link${location.pathname.startsWith('/audit') ? ' active' : ''}`}
+            >
+              <ScrollText size={14} />
+              AUDIT
+            </Link>
+          )}
           {roles.includes('admin') && (
             <Link
               to="/admin/display-schemas"
@@ -44,6 +91,7 @@ export default function AppLayout() {
           )}
         </div>
         <div className="navbar-right">
+          <CTIIndicator />
           <NotificationBell />
           <div className="user-badge">
             <span className="user-name">{user?.display_name}</span>
@@ -59,7 +107,7 @@ export default function AppLayout() {
         </div>
       </nav>
 
-      <main className={`main-content${['/dashboards', '/c2', '/admin'].some(p => location.pathname.startsWith(p)) ? ' full-width' : ''}`}>
+      <main className={`main-content${['/dashboards', '/c2', '/admin', '/transfers', '/audit'].some(p => location.pathname.startsWith(p)) ? ' full-width' : ''}`}>
         <Outlet />
       </main>
     </div>

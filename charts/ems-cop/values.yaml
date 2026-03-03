@@ -196,6 +196,14 @@ frontend:
       cpu: 250m
       memory: 256Mi
 
+# Enclave configuration
+# For dual-enclave deployments, override with:
+#   helm install ems-cop . -f values.yaml -f values-low.yaml
+#   helm install ems-cop . -f values.yaml -f values-high.yaml
+enclave:
+  mode: ""            # "", "low", or "high" — empty = single-enclave dev mode
+  ctiRelayUrl: ""     # URL to CTI relay service (e.g., "http://cti-relay:3010")
+
 # Ingress configuration
 ingress:
   traefik:

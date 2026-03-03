@@ -3,9 +3,13 @@ import { useAuth } from '../hooks/useAuth'
 import { apiFetch } from '../lib/api'
 import {
   Terminal, RefreshCw, Wifi, WifiOff,
-  Plus, Lock, Pencil, Trash2, X,
+  Plus, Lock, Pencil, Trash2, X, Server,
+  ArrowRightLeft,
 } from 'lucide-react'
 import TerminalPanel from '../components/TerminalPanel'
+import C2ProviderSelect, { useC2Providers } from '../components/C2ProviderSelect'
+import CrossDomainCommandPanel from '../components/CrossDomainCommandPanel'
+import { useEnclaveStore } from '../stores/enclaveStore'
 
 interface C2Session {
   id: string
@@ -17,6 +21,7 @@ interface C2Session {
   transport: string
   is_alive: boolean
   last_message: string
+  provider?: string
 }
 
 interface CommandResult {
@@ -75,12 +80,17 @@ function osLabel(os: string): string {
 
 export default function C2Page() {
   const { user, roles } = useAuth()
+  const { enclave } = useEnclaveStore()
   const [sessions, setSessions] = useState<C2Session[]>([])
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
-  const [activeTab, setActiveTab] = useState<'terminal' | 'commands'>('terminal')
+  const [activeTab, setActiveTab] = useState<'terminal' | 'commands' | 'cross-domain'>('terminal')
   const [commandOutput, setCommandOutput] = useState<string>('')
   const [commandLoading, setCommandLoading] = useState(false)
   const [loading, setLoading] = useState(true)
+
+  // Provider filter
+  const [selectedProvider, setSelectedProvider] = useState<string | null>(null)
+  const { providers: connectedProviders } = useC2Providers()
 
   // Command presets
   const [presets, setPresets] = useState<CommandPreset[]>([])
@@ -96,14 +106,15 @@ export default function C2Page() {
 
   const fetchSessions = useCallback(async () => {
     try {
-      const data = await apiFetch<C2Session[]>('/c2/sessions')
+      const query = selectedProvider ? `?provider=${encodeURIComponent(selectedProvider)}` : ''
+      const data = await apiFetch<C2Session[]>(`/c2/sessions${query}`)
       setSessions(Array.isArray(data) ? data : [])
     } catch {
       setSessions([])
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [selectedProvider])
 
   const selectedSessionData = sessions.find((s) => s.id === selectedSession)
   const sessionOS = selectedSessionData ? detectOS(selectedSessionData.os) : 'linux'
@@ -140,8 +151,9 @@ export default function C2Page() {
     setCommandLoading(true)
     setCommandOutput((prev) => prev + `\n$ ${command}\n`)
     try {
+      const query = selectedProvider ? `?provider=${encodeURIComponent(selectedProvider)}` : ''
       const result = await apiFetch<CommandResult>(
-        `/c2/sessions/${selectedSession}/execute`,
+        `/c2/sessions/${selectedSession}/execute${query}`,
         {
           method: 'POST',
           body: JSON.stringify({ command }),
@@ -249,6 +261,45 @@ export default function C2Page() {
             </div>
           </div>
 
+          {/* Provider filter */}
+          <div style={{
+            padding: '6px 10px', borderBottom: '1px solid var(--color-border)',
+            display: 'flex', alignItems: 'center', gap: 6,
+          }}>
+            <C2ProviderSelect
+              value={selectedProvider}
+              onChange={(p) => { setSelectedProvider(p); setSelectedSession(null) }}
+              showAllOption={true}
+              allLabel="All Providers"
+              compact={true}
+            />
+          </div>
+
+          {/* Provider status bar */}
+          {connectedProviders.length > 0 && (
+            <div style={{
+              padding: '4px 10px', borderBottom: '1px solid var(--color-border)',
+              display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap',
+            }}>
+              {connectedProviders.map((p) => (
+                <span key={p.name} style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  fontFamily: 'var(--font-mono)', fontSize: 9, letterSpacing: 0.5,
+                  padding: '2px 6px', borderRadius: 'var(--radius)',
+                  background: p.connected === 'connected' ? 'rgba(64,192,87,0.08)' : 'rgba(255,107,107,0.08)',
+                  border: `1px solid ${p.connected === 'connected' ? 'rgba(64,192,87,0.3)' : 'rgba(255,107,107,0.3)'}`,
+                  color: p.connected === 'connected' ? 'var(--color-success)' : 'var(--color-danger)',
+                }}>
+                  <div style={{
+                    width: 5, height: 5, borderRadius: '50%',
+                    background: p.connected === 'connected' ? 'var(--color-success)' : 'var(--color-danger)',
+                  }} />
+                  {p.name}
+                </span>
+              ))}
+            </div>
+          )}
+
           <div className="c2-session-list">
             {loading ? (
               <div className="c2-session-empty">Loading sessions...</div>
@@ -287,6 +338,15 @@ export default function C2Page() {
                   </div>
                   <div className="session-info">
                     <span className="session-last-seen">{timeAgo(session.last_message)}</span>
+                    {session.provider && (
+                      <>
+                        <span className="session-sep">&middot;</span>
+                        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3, fontSize: 9, color: 'var(--color-accent)' }}>
+                          <Server size={8} />
+                          {session.provider}
+                        </span>
+                      </>
+                    )}
                   </div>
                 </button>
               ))
@@ -310,6 +370,9 @@ export default function C2Page() {
               <span className="c2-banner-host">{selectedSessionData.hostname}</span>
               <span className="c2-banner-detail">
                 {osLabel(selectedSessionData.os)} &middot; {selectedSessionData.arch} &middot; {selectedSessionData.transport} &middot; {selectedSessionData.remote_addr}
+                {selectedSessionData.provider && (
+                  <span style={{ marginLeft: 4 }}>&middot; <Server size={10} style={{ display: 'inline', verticalAlign: 'middle' }} /> {selectedSessionData.provider}</span>
+                )}
               </span>
             </div>
           )}
@@ -329,11 +392,22 @@ export default function C2Page() {
             >
               COMMANDS
             </button>
+            {enclave === 'high' && (
+              <button
+                className={`c2-tab ${activeTab === 'cross-domain' ? 'active' : ''}`}
+                onClick={() => setActiveTab('cross-domain')}
+              >
+                <ArrowRightLeft size={12} />
+                CROSS-DOMAIN
+              </button>
+            )}
           </div>
 
           {/* Tab Content */}
           <div className="c2-tab-content">
-            {activeTab === 'terminal' ? (
+            {activeTab === 'cross-domain' ? (
+              <CrossDomainCommandPanel />
+            ) : activeTab === 'terminal' ? (
               <TerminalPanel sessionId={selectedSession} />
             ) : (
               <div className="c2-commands-panel">

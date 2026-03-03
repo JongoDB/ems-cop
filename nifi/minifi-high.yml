@@ -1,0 +1,243 @@
+# MiNiFi High-Side Agent Configuration
+# Lightweight data collection agent running on the high-side (strategic) enclave.
+#
+# Responsibilities:
+#   - Subscribes to high-side NATS topics (workflow.*, ticket.*, operation.*)
+#   - Forwards approved command relay requests to NiFi CTI Hub via S2S
+#   - Receives approved low-side telemetry from NiFi and publishes to high-side NATS
+#   - Runs on both high-ems-net (to reach NATS) and cti-net (to reach NiFi)
+#
+# Environment variables (injected via Docker Compose):
+#   NATS_URL  - High-side NATS server URL (e.g., nats://nats-high:4222)
+#   NIFI_URL  - NiFi CTI Hub URL (e.g., http://nifi:8443/nifi)
+
+MiNiFi Config Version: 3
+
+Flow Controller:
+  name: EMS-COP High-Side MiNiFi Agent
+  comment: Collects strategic planning events from high-side NATS and relays approved commands to NiFi CTI Hub
+
+Core Properties:
+  flow controller graceful shutdown period: 10 sec
+  flow service write delay interval: 500 ms
+  administrative yield duration: 30 sec
+  bored yield duration: 10 ms
+
+FlowFile Repository:
+  implementation: org.apache.nifi.controller.repository.WriteAheadFlowFileRepository
+  partitions: 256
+  checkpoint interval: 2 mins
+
+Content Repository:
+  implementation: org.apache.nifi.controller.repository.FileSystemRepository
+  content claim max appendable size: 10 MB
+  content claim max flow files: 100
+
+Provenance Repository:
+  provenance rollover time: 1 min
+
+Processors:
+  # ────────────────────────────────────────────
+  # NATS Consumers — high-side topic families
+  # ────────────────────────────────────────────
+
+  - id: consume-nats-workflow
+    class: org.apache.nifi.processors.standard.ExecuteProcess
+    name: Consume NATS Workflow Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 1 sec
+    penalty duration: 30 sec
+    yield duration: 1 sec
+    run duration nanos: 0
+    auto-terminated relationships list:
+    properties:
+      Command: /usr/local/bin/nats
+      Command Arguments: sub "workflow.>" --count=100 --server=${NATS_URL}
+      Batch Duration: 5 sec
+      Redirect Error Stream: "false"
+
+  - id: consume-nats-operations
+    class: org.apache.nifi.processors.standard.ExecuteProcess
+    name: Consume NATS Operation Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 1 sec
+    penalty duration: 30 sec
+    yield duration: 1 sec
+    run duration nanos: 0
+    auto-terminated relationships list:
+    properties:
+      Command: /usr/local/bin/nats
+      Command Arguments: sub "operation.>" --count=100 --server=${NATS_URL}
+      Batch Duration: 5 sec
+      Redirect Error Stream: "false"
+
+  - id: consume-nats-command-relay
+    class: org.apache.nifi.processors.standard.ExecuteProcess
+    name: Consume NATS Command Relay
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 1 sec
+    penalty duration: 30 sec
+    yield duration: 1 sec
+    run duration nanos: 0
+    auto-terminated relationships list:
+    properties:
+      Command: /usr/local/bin/nats
+      Command Arguments: sub "cti.command_relay.>" --count=50 --server=${NATS_URL}
+      Batch Duration: 5 sec
+      Redirect Error Stream: "false"
+
+  # ────────────────────────────────────────────
+  # Attribute enrichment — tag events with source enclave
+  # Per-topic classification: only truly SECRET content is individually
+  # classified; workflow/operation/command data is CUI so it can flow
+  # to the low side after policy approval.
+  # ────────────────────────────────────────────
+
+  - id: tag-workflow-enclave
+    class: org.apache.nifi.processors.attributes.UpdateAttribute
+    name: Tag Workflow Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 0 sec
+    properties:
+      source.enclave: high
+      source.classification: CUI
+      collected.timestamp: ${now():format('yyyy-MM-dd HH:mm:ss.SSS')}
+
+  - id: tag-operations-enclave
+    class: org.apache.nifi.processors.attributes.UpdateAttribute
+    name: Tag Operation Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 0 sec
+    properties:
+      source.enclave: high
+      source.classification: CUI
+      collected.timestamp: ${now():format('yyyy-MM-dd HH:mm:ss.SSS')}
+
+  - id: tag-command-relay-enclave
+    class: org.apache.nifi.processors.attributes.UpdateAttribute
+    name: Tag Command Relay Events
+    scheduling strategy: TIMER_DRIVEN
+    scheduling period: 0 sec
+    properties:
+      source.enclave: high
+      source.classification: CUI
+      collected.timestamp: ${now():format('yyyy-MM-dd HH:mm:ss.SSS')}
+
+  # ────────────────────────────────────────────
+  # Publish approved telemetry to high-side NATS
+  # Receives data from NiFi output port after policy check
+  # ────────────────────────────────────────────
+
+  - id: publish-to-high-nats
+    class: org.apache.nifi.processors.standard.ExecuteProcess
+    name: Publish Approved Telemetry to High NATS
+    scheduling strategy: EVENT_DRIVEN
+    penalty duration: 30 sec
+    yield duration: 1 sec
+    run duration nanos: 0
+    auto-terminated relationships list:
+      - output
+    properties:
+      Command: /usr/local/bin/nats
+      Command Arguments: pub "cti.telemetry.approved" --server=${NATS_URL}
+      Batch Duration: 1 sec
+      Redirect Error Stream: "false"
+
+Remote Process Groups:
+  - id: rpg-nifi
+    name: NiFi CTI Hub
+    comment: Site-to-Site connection to the NiFi instance in the CTI zone
+    url: http://nifi:8443/nifi
+    timeout: 30 sec
+    yield period: 10 sec
+    transport protocol: RAW
+    proxy host:
+    proxy port:
+    proxy user:
+    proxy password:
+    Input Ports:
+      - id: high-command-input
+        name: high-command-input
+        comment: Receives high-side command relay requests for approval and forwarding to low-side
+        max concurrent tasks: 2
+        use compression: true
+    Output Ports:
+      - id: high-telemetry-output
+        name: high-telemetry-output
+        comment: Receives approved low-side telemetry after policy check
+        max concurrent tasks: 2
+        use compression: true
+
+Connections:
+  # Workflow events -> per-topic tag -> NiFi
+  - id: conn-workflow-to-tag
+    name: Workflow Events to Tag
+    source id: consume-nats-workflow
+    source relationship names:
+      - output
+    destination id: tag-workflow-enclave
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 5 min
+
+  - id: conn-operations-to-tag
+    name: Operation Events to Tag
+    source id: consume-nats-operations
+    source relationship names:
+      - output
+    destination id: tag-operations-enclave
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 5 min
+
+  - id: conn-command-relay-to-tag
+    name: Command Relay to Tag
+    source id: consume-nats-command-relay
+    source relationship names:
+      - output
+    destination id: tag-command-relay-enclave
+    max work queue size: 5000
+    max work queue data size: 50 MB
+    flowfile expiration: 5 min
+
+  # Tagged events -> NiFi RPG (command input)
+  - id: conn-workflow-tag-to-rpg
+    name: Tagged Workflow Events to NiFi
+    source id: tag-workflow-enclave
+    source relationship names:
+      - success
+    destination id: high-command-input
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 10 min
+
+  - id: conn-operations-tag-to-rpg
+    name: Tagged Operation Events to NiFi
+    source id: tag-operations-enclave
+    source relationship names:
+      - success
+    destination id: high-command-input
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 10 min
+
+  - id: conn-command-relay-tag-to-rpg
+    name: Tagged Command Relay Events to NiFi
+    source id: tag-command-relay-enclave
+    source relationship names:
+      - success
+    destination id: high-command-input
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 10 min
+
+  # NiFi RPG (telemetry output) -> publish to high-side NATS
+  - id: conn-rpg-to-publish
+    name: Approved Telemetry to High NATS
+    source id: high-telemetry-output
+    source relationship names:
+      - success
+    destination id: publish-to-high-nats
+    max work queue size: 10000
+    max work queue data size: 100 MB
+    flowfile expiration: 10 min

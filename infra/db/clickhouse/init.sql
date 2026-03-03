@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS ems_audit.events
     hash            String DEFAULT '',         -- SHA-256(previous_hash + serialized event)
     previous_hash   String DEFAULT '',         -- hash chain for tamper evidence
 
+    -- Classification and enclave tracking
+    classification  String DEFAULT 'UNCLASS',       -- UNCLASS, CUI, SECRET
+    source_enclave  String DEFAULT 'local',         -- low, high, or local
+
     -- Denormalized for fast filtering without joins
     risk_level      UInt8 DEFAULT 0,
     ticket_number   String DEFAULT ''
@@ -64,7 +68,8 @@ CREATE TABLE IF NOT EXISTS ems_audit.c2_telemetry
     endpoint_id     UUID,
     event_type      LowCardinality(String),    -- 'checkin', 'task_sent', 'task_result', 'session_open', 'session_close'
     data            String DEFAULT '{}',       -- JSON payload
-    operation_id    Nullable(UUID)
+    operation_id    Nullable(UUID),
+    classification  String DEFAULT 'UNCLASS'   -- UNCLASS, CUI, SECRET
 )
 ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)

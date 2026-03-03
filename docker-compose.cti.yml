@@ -1,0 +1,130 @@
+# EMS-COP Docker Compose — CTI Bridge Zone
+# Bridges the low-side and high-side enclaves via the cti-relay service.
+#
+# Usage:
+#   # Dual enclave (requires low + high compose files)
+#   docker compose -f docker-compose.low.yml -f docker-compose.cti.yml -f docker-compose.high.yml up -d
+#
+# Prerequisites:
+#   - docker-compose.low.yml defines low-ems-net, endpoint-net, and cti-low-bridge
+#   - docker-compose.high.yml defines high-ems-net and cti-high-bridge
+#   - This file defines cti-net (used as external by low + high compose files)
+#
+# Network Isolation Architecture:
+#   The cti-relay connects ONLY to cti-net. It does NOT attach to low-ems-net or
+#   high-ems-net directly. This prevents a compromised relay from having direct
+#   access to infrastructure services (Redis, ClickHouse, MinIO, etc.) on either
+#   enclave. Instead, lightweight socat bridge containers in each enclave expose
+#   only the specific ports the relay needs (PostgreSQL 5432, NATS 4222):
+#
+#     low-ems-net                 cti-net                    high-ems-net
+#     ┌───────────────┐   ┌─────────────────────┐   ┌───────────────┐
+#     │ postgres-low   │   │                     │   │ postgres-high  │
+#     │ nats-low       │◄──┤  cti-low-bridge     │   │ nats-high      │
+#     │ redis-low      │   │  (socat TCP proxy)  │   │ redis-high     │
+#     │ clickhouse-low │   │                     │   │ clickhouse-high│
+#     │ ...            │   ├─────────────────────┤   │ ...            │
+#     └───────────────┘   │                     │   └───────────────┘
+#                          │  cti-relay          │
+#                          │  (cti-net ONLY)     │
+#                          │                     │
+#     ┌───────────────┐   ├─────────────────────┤   ┌───────────────┐
+#     │               │   │  cti-high-bridge    │   │               │
+#     │               │   │  (socat TCP proxy)  ├──►│               │
+#     └───────────────┘   └─────────────────────┘   └───────────────┘
+#
+#   The bridge services (cti-low-bridge, cti-high-bridge) are defined in their
+#   respective enclave compose files. Each bridge connects to both its enclave
+#   network and cti-net, forwarding only PG and NATS traffic.
+#
+# The cti-relay service:
+#   - Reaches low-side PG/NATS via pg-low-proxy / nats-low-proxy (cti-low-bridge)
+#   - Reaches high-side PG/NATS via pg-high-proxy / nats-high-proxy (cti-high-bridge)
+#   - Bridges approved intelligence (CTI reports, sanitized findings) between enclaves
+#   - Enforces classification level policies (low = UNCLASSIFIED, high = SECRET)
+#   - All cross-enclave transfers are audited
+
+networks:
+  cti-net:
+    name: cti-net
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.102.0.0/16
+
+volumes:
+  nifi-data:
+  nifi-content:
+  nifi-provenance:
+
+services:
+
+  cti-relay:
+    build:
+      context: ./services/cti-relay
+      dockerfile: Dockerfile
+    container_name: ems-cti-relay
+    environment:
+      SERVICE_NAME: cti-relay
+      SERVICE_PORT: "3010"
+      TZ: UTC
+      # Low-side connections (via cti-low-bridge socat proxy on cti-net)
+      CTI_LOW_NATS_URL: nats://nats-low-proxy:4222
+      CTI_LOW_PG_HOST: pg-low-proxy
+      CTI_LOW_PG_PORT: "5432"
+      CTI_LOW_PG_DB: ems
+      CTI_LOW_PG_USER: ems_admin
+      CTI_LOW_PG_PASSWORD: ${CTI_LOW_PG_PASSWORD:-ems_dev_password_change_me}
+      # High-side connections (via cti-high-bridge socat proxy on cti-net)
+      CTI_HIGH_NATS_URL: nats://nats-high-proxy:4222
+      CTI_HIGH_PG_HOST: pg-high-proxy
+      CTI_HIGH_PG_PORT: "5432"
+      CTI_HIGH_PG_DB: ems
+      CTI_HIGH_PG_USER: ems_admin
+      CTI_HIGH_PG_PASSWORD: ${CTI_HIGH_PG_PASSWORD:-ems_dev_password_change_me}
+      # Relay config
+      CTI_SYNC_INTERVAL: ${CTI_SYNC_INTERVAL:-30}
+      CTI_MAX_BATCH_SIZE: ${CTI_MAX_BATCH_SIZE:-100}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3010/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - cti-net
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════
+  #  APACHE NIFI — CTI DATA FLOW ORCHESTRATION
+  #  Central hub for cross-enclave data flow. Receives events from
+  #  low-side and high-side MiNiFi agents via Site-to-Site protocol,
+  #  applies classification filtering, enforces transfer policies
+  #  via CTI relay, and routes approved data to destination enclaves.
+  # ════════════════════════════════════════════
+
+  nifi:
+    build:
+      context: ./nifi
+      dockerfile: Dockerfile
+    container_name: ems-nifi
+    environment:
+      NIFI_WEB_HTTP_PORT: "8443"
+      NIFI_SENSITIVE_PROPS_KEY: ${NIFI_SENSITIVE_PROPS_KEY:-ems-cop-nifi-key-change-me}
+      SINGLE_USER_CREDENTIALS_USERNAME: ${NIFI_ADMIN_USER:-admin}
+      SINGLE_USER_CREDENTIALS_PASSWORD: ${NIFI_ADMIN_PASSWORD:-emsNifiAdmin123!}
+    volumes:
+      - nifi-data:/opt/nifi/nifi-current/conf
+      - nifi-content:/opt/nifi/content
+      - nifi-provenance:/opt/nifi/provenance
+      - ./nifi/flow-templates:/opt/nifi/flow-templates:ro
+    # NiFi UI is only accessible from cti-net (no host port exposed).
+    # For admin access, use: docker exec -it ems-nifi /bin/bash
+    # Or temporary port forward: docker port ems-nifi 8443 (after `docker run -p 18443:8443`)
+    networks:
+      - cti-net
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8443/nifi-api/system-diagnostics || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped

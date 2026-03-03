@@ -3,12 +3,14 @@ import { WidgetProps } from './WidgetRegistry'
 import { apiFetch } from '../../lib/api'
 import { useSocket } from '../../hooks/useSocket'
 import { useWidgetEventBus } from '../../stores/widgetEventBus'
+import ClassificationBadge from '../ClassificationBadge'
 
 interface Ticket {
   id: string
   title: string
   status: string
   priority: string
+  classification?: string
   assignee?: { id: string; display_name?: string; username?: string } | null
   assignee_id?: string
   assignee_name?: string
@@ -187,6 +189,7 @@ export default function TicketQueueWidget({ id, config }: WidgetProps) {
             <thead>
               <tr>
                 <th style={thStyle}>Title</th>
+                <th style={thStyle}>Class</th>
                 <th style={thStyle}>Status</th>
                 <th style={thStyle}>Priority</th>
                 <th style={thStyle}>Assignee</th>
@@ -207,6 +210,9 @@ export default function TicketQueueWidget({ id, config }: WidgetProps) {
                   }}
                 >
                   <td style={{ ...tdStyle, maxWidth: '200px' }}>{t.title}</td>
+                  <td style={tdStyle}>
+                    <ClassificationBadge classification={t.classification} size="sm" />
+                  </td>
                   <td style={tdStyle}>
                     <span style={badgeStyle(STATUS_COLORS[t.status] || '#6b7280')}>
                       {t.status.replace(/_/g, ' ')}

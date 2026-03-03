@@ -9,6 +9,63 @@ app.use(express.json({ limit: '1mb' }));
 
 const port = process.env.SERVICE_PORT || 3004;
 const sc = StringCodec();
+const ENCLAVE = process.env.ENCLAVE || '';
+const CTI_RELAY_URL = process.env.CTI_RELAY_URL || '';
+
+// --- CTI Health Checker ---
+class CTIHealth {
+  constructor(relayURL, log) {
+    this.relayURL = relayURL;
+    this.logger = log;
+    this.connected = true; // optimistic start
+    this.lastCheck = null;
+    this.interval = null;
+  }
+
+  isConnected() {
+    if (!this.relayURL) return true; // single-enclave mode
+    return this.connected;
+  }
+
+  start() {
+    if (!this.relayURL) return; // no CTI = no checking
+    this.check(); // immediate first check
+    this.interval = setInterval(() => this.check(), 15000);
+  }
+
+  stop() {
+    if (this.interval) clearInterval(this.interval);
+  }
+
+  async check() {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 5000);
+      const res = await fetch(`${this.relayURL}/health/live`, { signal: controller.signal });
+      clearTimeout(timeout);
+      const wasConnected = this.connected;
+      this.connected = res.ok;
+      this.lastCheck = new Date().toISOString();
+      if (!this.connected && wasConnected) {
+        this.logger.warn({ url: this.relayURL }, 'CTI relay connection lost');
+      } else if (this.connected && !wasConnected) {
+        this.logger.info({ url: this.relayURL }, 'CTI relay connection restored');
+      }
+    } catch (err) {
+      if (this.connected) {
+        this.logger.warn({ err: err.message }, 'CTI relay health check failed');
+      }
+      this.connected = false;
+      this.lastCheck = new Date().toISOString();
+    }
+  }
+}
+
+const ctiHealth = new CTIHealth(CTI_RELAY_URL, logger);
+
+function isDegraded() {
+  return ENCLAVE === 'low' && ctiHealth && !ctiHealth.isConnected();
+}
 
 // --- Database ---
 const pool = new Pool({
@@ -90,11 +147,27 @@ async function readyCheck(_req, res) {
   checks.nats = (nc && !nc.isClosed()) ? 'ok' : 'error';
   if (checks.nats === 'error') { overall = 'degraded'; httpStatus = 503; }
 
-  res.status(httpStatus).json({ status: overall, service: 'dashboard', checks });
+  const response = { status: overall, service: 'dashboard', checks };
+  if (ENCLAVE) response.enclave = ENCLAVE;
+  if (CTI_RELAY_URL) {
+    response.cti_connected = ctiHealth.isConnected();
+    response.degraded = isDegraded();
+  }
+  res.status(httpStatus).json(response);
 }
 
 app.get('/health/ready', readyCheck);
 app.get('/health', readyCheck);
+
+// CTI STATUS
+app.get('/api/v1/dashboards/cti-status', (_req, res) => {
+  res.json({
+    cti_connected: ctiHealth.isConnected(),
+    enclave: ENCLAVE || null,
+    degraded: isDegraded(),
+    last_check: ctiHealth.lastCheck,
+  });
+});
 
 // ============================================================
 // Templates - must be registered BEFORE /:id routes
@@ -105,7 +178,9 @@ app.get('/api/v1/dashboards/templates', async (_req, res) => {
     const result = await pool.query(
       `SELECT * FROM dashboards WHERE is_template = true ORDER BY echelon_default ASC, name ASC`
     );
-    res.json({ data: result.rows });
+    const response = { data: result.rows };
+    if (isDegraded()) response.degraded = true;
+    res.json(response);
   } catch (err) {
     logger.error({ err: err.message }, 'list templates error');
     sendError(res, 500, 'INTERNAL_ERROR', 'Failed to list templates');
@@ -188,7 +263,9 @@ app.post('/api/v1/dashboards/seed', async (req, res) => {
 
       await client.query('COMMIT');
       publishEvent('dashboard.created', userId, newDash.id, { seeded_from: template.id, echelon });
-      res.status(201).json({ data: { seeded: true, dashboard: newDash } });
+      const seedResponse = { seeded: true, dashboard: newDash };
+      if (isDegraded()) seedResponse.degraded = true;
+      res.status(201).json({ data: seedResponse });
     } catch (txErr) {
       await client.query('ROLLBACK');
       throw txErr;
@@ -208,7 +285,12 @@ app.post('/api/v1/dashboards/seed', async (req, res) => {
 app.get('/api/v1/dashboards/metrics/tickets', async (req, res) => {
   try {
     const baseUrl = process.env.TICKET_SERVICE_URL || 'http://ticket:3003';
-    const response = await fetch(`${baseUrl}/api/v1/tickets?limit=1000`);
+    // Pass classification filter through to ticket-service if provided
+    const params = new URLSearchParams({ limit: '1000' });
+    if (req.query.classification) {
+      params.set('classification', req.query.classification);
+    }
+    const response = await fetch(`${baseUrl}/api/v1/tickets?${params.toString()}`);
     if (!response.ok) throw new Error(`ticket-service responded ${response.status}`);
     const body = await response.json();
     const tickets = body.data || [];
@@ -241,7 +323,12 @@ app.get('/api/v1/dashboards/metrics/sessions', async (req, res) => {
 app.get('/api/v1/dashboards/metrics/endpoints', async (req, res) => {
   try {
     const baseUrl = process.env.ENDPOINT_SERVICE_URL || 'http://endpoint:3008';
-    const response = await fetch(`${baseUrl}/api/v1/endpoints?limit=1000`);
+    // Pass classification filter through to endpoint-service if provided
+    const params = new URLSearchParams({ limit: '1000' });
+    if (req.query.classification) {
+      params.set('classification', req.query.classification);
+    }
+    const response = await fetch(`${baseUrl}/api/v1/endpoints?${params.toString()}`);
     if (!response.ok) throw new Error(`endpoint-service responded ${response.status}`);
     const body = await response.json();
     const endpoints = body.data || [];
@@ -826,6 +913,14 @@ const ECHELON_TEMPLATES = [
   },
 ];
 
+// Widget types that may expose SECRET data and should be excluded on low-side
+const SECRET_WIDGET_TYPES = ['terminal', 'sliver_c2_panel', 'command_palette'];
+
+function filterWidgetsForEnclave(widgets) {
+  if (ENCLAVE !== 'low') return widgets;
+  return widgets.filter(w => !SECRET_WIDGET_TYPES.includes(w.type));
+}
+
 async function seedTemplates() {
   const existing = await pool.query('SELECT COUNT(*) FROM dashboards WHERE is_template = true');
   if (parseInt(existing.rows[0].count) > 0) {
@@ -867,7 +962,8 @@ async function seedTemplates() {
         );
         const tabId = tabResult.rows[0].id;
 
-        for (const w of tab.widgets) {
+        const filteredWidgets = filterWidgetsForEnclave(tab.widgets);
+        for (const w of filteredWidgets) {
           await client.query(
             `INSERT INTO dashboard_widgets (tab_id, widget_type, config, position_x, position_y, width, height)
              VALUES ($1, $2, $3, $4, $5, $6, $7)`,
@@ -896,11 +992,13 @@ let server;
 async function start() {
   await connectNats();
   await seedTemplates();
-  server = app.listen(port, () => logger.info({ port }, 'listening'));
+  ctiHealth.start();
+  server = app.listen(port, () => logger.info({ port, enclave: ENCLAVE || 'single', cti: CTI_RELAY_URL || 'none' }, 'listening'));
 }
 
 async function shutdown(signal) {
   logger.info({ signal }, 'shutting down');
+  ctiHealth.stop();
   if (server) {
     server.close(() => logger.info('HTTP server closed'));
   }
