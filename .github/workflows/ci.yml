@@ -1,0 +1,175 @@
+# EMS-COP Continuous Integration
+# Runs on: push to main, all pull requests
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ════════════════════════════════════════════
+  #  Go Services — vet, build, test
+  # ════════════════════════════════════════════
+  go-services:
+    name: "Go / ${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - auth
+          - workflow-engine
+          - c2-gateway
+          - audit
+          - endpoint
+          - cti-relay
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: services/${{ matrix.service }}/go.sum
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build ./...
+
+      - name: Test
+        run: go test ./... -v -count=1 -timeout 120s
+
+  # ════════════════════════════════════════════
+  #  Node/TS Services — install, test
+  # ════════════════════════════════════════════
+  node-services:
+    name: "Node / ${{ matrix.service }}"
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - ticket
+          - dashboard
+          - notification
+          - ws-relay
+    defaults:
+      run:
+        working-directory: services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: services/${{ matrix.service }}/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Test
+        run: npm test
+
+  # ════════════════════════════════════════════
+  #  Frontend — type check + vitest
+  # ════════════════════════════════════════════
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check (full build)
+        run: npx tsc -b
+
+      - name: Unit tests
+        run: npx vitest run
+
+  # ════════════════════════════════════════════
+  #  Docker Build — verify all images build
+  # ════════════════════════════════════════════
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build all images
+        run: docker compose build
+        env:
+          DOCKER_BUILDKIT: 1
+
+  # ════════════════════════════════════════════
+  #  Security Scan — Trivy container scan
+  # ════════════════════════════════════════════
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: docker-build
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build images for scanning
+        run: docker compose build
+        env:
+          DOCKER_BUILDKIT: 1
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "image"
+          image-ref: "ems-cop/auth:latest"
+          format: "table"
+          exit-code: "1"
+          severity: "CRITICAL,HIGH"
+          ignore-unfixed: true
+
+      - name: Scan all service images
+        run: |
+          services=(auth workflow-engine ticket dashboard c2-gateway audit notification endpoint ws-relay frontend)
+          failed=0
+          for svc in "${services[@]}"; do
+            echo "=== Scanning ems-cop/${svc}:latest ==="
+            docker run --rm \
+              -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:latest image \
+              --severity CRITICAL,HIGH \
+              --ignore-unfixed \
+              --exit-code 0 \
+              "ems-cop/${svc}:latest" || failed=1
+          done
+          if [ "$failed" -eq 1 ]; then
+            echo "::warning::Some images have known vulnerabilities"
+          fi

@@ -1,0 +1,68 @@
+---
+# NiFi role — deploy Apache NiFi for CTI cross-domain data flow
+# CTI zone only — bridges low and high enclaves
+
+- name: Create NiFi directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0755"
+  loop:
+    - "{{ ems_home }}/data/nifi"
+    - "{{ ems_home }}/config/nifi"
+    - "{{ ems_home }}/config/nifi/flow-templates"
+
+- name: Copy NiFi flow templates
+  ansible.builtin.copy:
+    src: "{{ nifi_flow_templates_src }}"
+    dest: "{{ ems_home }}/config/nifi/flow-templates/"
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0644"
+  when: nifi_flow_templates_src is defined
+
+- name: Create CTI Docker network
+  community.docker.docker_network:
+    name: cti-net
+    driver: bridge
+    ipam_config:
+      - subnet: "{{ cti_net_cidr }}"
+
+- name: Pull NiFi image
+  community.docker.docker_image:
+    name: "apache/nifi:{{ nifi_version }}"
+    source: pull
+
+- name: Deploy NiFi container
+  community.docker.docker_container:
+    name: ems-nifi
+    image: "apache/nifi:{{ nifi_version }}"
+    state: started
+    restart_policy: unless-stopped
+    env:
+      NIFI_WEB_HTTPS_PORT: "{{ nifi_port | string }}"
+      SINGLE_USER_CREDENTIALS_USERNAME: "{{ nifi_admin_user }}"
+      SINGLE_USER_CREDENTIALS_PASSWORD: "{{ nifi_admin_password }}"
+      NIFI_SENSITIVE_PROPS_KEY: "{{ nifi_sensitive_props_key }}"
+    volumes:
+      - "{{ ems_home }}/data/nifi:/opt/nifi/nifi-current/flowfile_repository"
+      - "{{ ems_home }}/config/nifi/flow-templates:/opt/nifi/nifi-current/conf/flow-templates:ro"
+    ports:
+      - "{{ nifi_port }}:{{ nifi_port }}"
+    networks:
+      - name: cti-net
+
+- name: Wait for NiFi to start
+  ansible.builtin.uri:
+    url: "https://localhost:{{ nifi_port }}/nifi"
+    method: GET
+    validate_certs: false
+    status_code: [200, 302]
+  register: nifi_health
+  retries: 30
+  delay: 10
+  until: nifi_health.status is defined
+  changed_when: false
+  ignore_errors: true

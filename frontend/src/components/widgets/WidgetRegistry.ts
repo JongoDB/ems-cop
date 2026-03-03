@@ -50,6 +50,10 @@ const EndpointTable = lazy(() => import('./EndpointTableWidget'));
 const CommandPalette = lazy(() => import('./CommandPaletteWidget'));
 const CTIHealth = lazy(() => import('./CTIHealthWidget'));
 const ConsolidatedAudit = lazy(() => import('./ConsolidatedAuditWidget'));
+const AlertStats = lazy(() => import('./AlertStatsWidget'));
+const IncidentTimeline = lazy(() => import('./IncidentTimelineWidget'));
+const IOCHits = lazy(() => import('./IOCHitsWidget'));
+const MitreHeatmap = lazy(() => import('./MitreHeatmapWidget'));
 
 // ════════════════════════════════════════════
 //  WIDGET REGISTRY
@@ -208,6 +212,50 @@ export const widgetRegistry: Map<string, WidgetDefinition> = new Map([
     defaultSize: { w: 6, h: 4 },
     minSize: { w: 4, h: 3 },
     component: ConsolidatedAudit as ComponentType<WidgetProps>,
+  }],
+
+  ['alert_stats', {
+    type: 'alert_stats',
+    name: 'Alert Statistics',
+    description: 'Donut chart of alerts by severity and 24-hour trend',
+    icon: 'Bell',
+    category: 'analytics',
+    defaultSize: { w: 4, h: 3 },
+    minSize: { w: 3, h: 2 },
+    component: AlertStats as ComponentType<WidgetProps>,
+  }],
+
+  ['incident_timeline', {
+    type: 'incident_timeline',
+    name: 'Incident Timeline',
+    description: 'Vertical timeline of active incidents with severity and status',
+    icon: 'AlertTriangle',
+    category: 'monitoring',
+    defaultSize: { w: 4, h: 4 },
+    minSize: { w: 3, h: 3 },
+    component: IncidentTimeline as ComponentType<WidgetProps>,
+  }],
+
+  ['ioc_hits', {
+    type: 'ioc_hits',
+    name: 'IOC Hits',
+    description: 'Table of recent IOC matches with threat level and hit count',
+    icon: 'Search',
+    category: 'monitoring',
+    defaultSize: { w: 6, h: 3 },
+    minSize: { w: 4, h: 2 },
+    component: IOCHits as ComponentType<WidgetProps>,
+  }],
+
+  ['mitre_heatmap', {
+    type: 'mitre_heatmap',
+    name: 'MITRE Heatmap',
+    description: 'Heat-map of MITRE ATT&CK techniques observed across alerts',
+    icon: 'Grid3X3',
+    category: 'analytics',
+    defaultSize: { w: 8, h: 4 },
+    minSize: { w: 6, h: 3 },
+    component: MitreHeatmap as ComponentType<WidgetProps>,
   }],
 ]);
 

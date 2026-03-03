@@ -31,7 +31,17 @@ type Server struct {
 	logger     *slog.Logger
 	httpServer *http.Server
 	cti        *ctiHealth
+
+	// Playbook auto-trigger rate limiting (H-04)
+	autoTriggerMu    sync.Mutex
+	autoTriggerDedup map[string]time.Time // key: "playbook_id:alert_source:severity" -> last trigger time
 }
+
+const (
+	autoTriggerDedupWindow    = 5 * time.Minute
+	autoTriggerMaxConcurrent  = 10
+	autoTriggerCleanupInterval = 1 * time.Minute
+)
 
 // ---------------------------------------------------------------------------
 // CTI Health Checker
@@ -3251,6 +3261,745 @@ func (s *Server) checkEscalations(ctx context.Context) {
 }
 
 // ---------------------------------------------------------------------------
+// Types — Response Playbooks (DCO/SOC M13)
+// ---------------------------------------------------------------------------
+
+type PlaybookDefinition struct {
+	ID                string         `json:"id"`
+	Name              string         `json:"name"`
+	Description       string         `json:"description"`
+	TriggerConditions map[string]any `json:"trigger_conditions"`
+	WorkflowID        string         `json:"workflow_id"`
+	IsActive          bool           `json:"is_active"`
+	Priority          int            `json:"priority"`
+	Classification    string         `json:"classification"`
+	CreatedAt         string         `json:"created_at"`
+	UpdatedAt         string         `json:"updated_at"`
+}
+
+type PlaybookExecution struct {
+	ID               string         `json:"id"`
+	PlaybookID       string         `json:"playbook_id"`
+	IncidentTicketID *string        `json:"incident_ticket_id"`
+	AlertID          *string        `json:"alert_id"`
+	WorkflowRunID    *string        `json:"workflow_run_id"`
+	Status           string         `json:"status"`
+	TriggeredBy      string         `json:"triggered_by"`
+	ExecutionLog     map[string]any `json:"execution_log"`
+	CreatedAt        string         `json:"created_at"`
+	UpdatedAt        string         `json:"updated_at"`
+}
+
+type CreatePlaybookRequest struct {
+	Name              string         `json:"name"`
+	Description       string         `json:"description"`
+	TriggerConditions map[string]any `json:"trigger_conditions"`
+	WorkflowID        string         `json:"workflow_id"`
+	Priority          int            `json:"priority"`
+	Classification    string         `json:"classification"`
+}
+
+type UpdatePlaybookRequest struct {
+	Description       *string        `json:"description"`
+	TriggerConditions map[string]any `json:"trigger_conditions"`
+	IsActive          *bool          `json:"is_active"`
+	Priority          *int           `json:"priority"`
+}
+
+type TriggerPlaybookRequest struct {
+	IncidentTicketID string `json:"incident_ticket_id"`
+	AlertID          string `json:"alert_id"`
+	TriggeredBy      string `json:"triggered_by"`
+}
+
+// ---------------------------------------------------------------------------
+// Playbook Handlers
+// ---------------------------------------------------------------------------
+
+func (s *Server) handleListPlaybooks(w http.ResponseWriter, r *http.Request) {
+	page, limit, offset := parsePagination(r)
+	isActive := r.URL.Query().Get("is_active")
+	classificationFilter := r.URL.Query().Get("classification")
+
+	conditions := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if isActive == "true" || isActive == "false" {
+		conditions = append(conditions, fmt.Sprintf("is_active = $%d", argIdx))
+		args = append(args, isActive == "true")
+		argIdx++
+	}
+	if classificationFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("classification = $%d", argIdx))
+		args = append(args, classificationFilter)
+		argIdx++
+	}
+	if enclave == "low" {
+		conditions = append(conditions, "classification != 'SECRET'")
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var total int
+	countQ := fmt.Sprintf("SELECT count(*) FROM playbook_definitions %s", where)
+	if err := s.db.QueryRow(r.Context(), countQ, args...).Scan(&total); err != nil {
+		total = 0
+	}
+
+	args = append(args, limit, offset)
+	dataQ := fmt.Sprintf(
+		`SELECT id, name, description, trigger_conditions, workflow_id, is_active, priority, classification, created_at, updated_at
+		 FROM playbook_definitions %s ORDER BY priority DESC, created_at DESC LIMIT $%d OFFSET $%d`,
+		where, argIdx, argIdx+1)
+
+	rows, err := s.db.Query(r.Context(), dataQ, args...)
+	if err != nil {
+		s.logger.Error("list playbooks query failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list playbooks")
+		return
+	}
+	defer rows.Close()
+
+	var playbooks []PlaybookDefinition
+	for rows.Next() {
+		pb, err := scanPlaybookRow(rows)
+		if err != nil {
+			s.logger.Error("scan playbook failed", "error", err)
+			continue
+		}
+		playbooks = append(playbooks, pb)
+	}
+	if playbooks == nil {
+		playbooks = []PlaybookDefinition{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": playbooks,
+		"pagination": map[string]int{
+			"page":  page,
+			"limit": limit,
+			"total": total,
+		},
+	})
+}
+
+func scanPlaybookRow(scanner interface{ Scan(dest ...any) error }) (PlaybookDefinition, error) {
+	var pb PlaybookDefinition
+	var triggerConds []byte
+	var createdAt, updatedAt time.Time
+	err := scanner.Scan(&pb.ID, &pb.Name, &pb.Description, &triggerConds, &pb.WorkflowID,
+		&pb.IsActive, &pb.Priority, &pb.Classification, &createdAt, &updatedAt)
+	if err != nil {
+		return pb, err
+	}
+	pb.TriggerConditions = parseJSONB(triggerConds)
+	pb.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	pb.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return pb, nil
+}
+
+func (s *Server) handleCreatePlaybook(w http.ResponseWriter, r *http.Request) {
+	userID := getUserID(r)
+	if userID == "" {
+		writeError(w, http.StatusUnauthorized, "UNAUTHORIZED", "X-User-ID header required")
+		return
+	}
+
+	var req CreatePlaybookRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.Name == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "name is required")
+		return
+	}
+	if req.WorkflowID == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "workflow_id is required")
+		return
+	}
+
+	classification := req.Classification
+	if classification == "" {
+		classification = "UNCLASS"
+	}
+	if !isValidClassification(classification) {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "classification must be UNCLASS, CUI, or SECRET")
+		return
+	}
+	if enclave == "low" && classification == "SECRET" {
+		writeError(w, http.StatusForbidden, "ENCLAVE_RESTRICTION", "Cannot create SECRET playbooks on low-side enclave")
+		return
+	}
+
+	if req.TriggerConditions == nil {
+		req.TriggerConditions = map[string]any{}
+	}
+	triggerBytes, _ := json.Marshal(req.TriggerConditions)
+
+	priority := req.Priority
+	if priority == 0 {
+		priority = 1
+	}
+
+	var pb PlaybookDefinition
+	var triggerConds []byte
+	var createdAt, updatedAt time.Time
+	err := s.db.QueryRow(r.Context(),
+		`INSERT INTO playbook_definitions (name, description, trigger_conditions, workflow_id, priority, classification)
+		 VALUES ($1, $2, $3, $4, $5, $6)
+		 RETURNING id, name, description, trigger_conditions, workflow_id, is_active, priority, classification, created_at, updated_at`,
+		req.Name, req.Description, triggerBytes, req.WorkflowID, priority, classification).
+		Scan(&pb.ID, &pb.Name, &pb.Description, &triggerConds, &pb.WorkflowID,
+			&pb.IsActive, &pb.Priority, &pb.Classification, &createdAt, &updatedAt)
+	if err != nil {
+		s.logger.Error("create playbook failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to create playbook")
+		return
+	}
+	pb.TriggerConditions = parseJSONB(triggerConds)
+	pb.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	pb.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+
+	writeJSON(w, http.StatusCreated, pb)
+}
+
+func (s *Server) handleUpdatePlaybook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	var req UpdatePlaybookRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+
+	setClauses := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if req.Description != nil {
+		setClauses = append(setClauses, fmt.Sprintf("description = $%d", argIdx))
+		args = append(args, *req.Description)
+		argIdx++
+	}
+	if req.TriggerConditions != nil {
+		triggerBytes, _ := json.Marshal(req.TriggerConditions)
+		setClauses = append(setClauses, fmt.Sprintf("trigger_conditions = $%d", argIdx))
+		args = append(args, triggerBytes)
+		argIdx++
+	}
+	if req.IsActive != nil {
+		setClauses = append(setClauses, fmt.Sprintf("is_active = $%d", argIdx))
+		args = append(args, *req.IsActive)
+		argIdx++
+	}
+	if req.Priority != nil {
+		setClauses = append(setClauses, fmt.Sprintf("priority = $%d", argIdx))
+		args = append(args, *req.Priority)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "No fields to update")
+		return
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+	query := fmt.Sprintf("UPDATE playbook_definitions SET %s WHERE id = $%d",
+		strings.Join(setClauses, ", "), argIdx)
+	args = append(args, id)
+
+	result, err := s.db.Exec(r.Context(), query, args...)
+	if err != nil {
+		s.logger.Error("update playbook failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to update playbook")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Playbook not found")
+		return
+	}
+
+	// Fetch updated
+	row := s.db.QueryRow(r.Context(),
+		`SELECT id, name, description, trigger_conditions, workflow_id, is_active, priority, classification, created_at, updated_at
+		 FROM playbook_definitions WHERE id = $1`, id)
+	pb, err := scanPlaybookRow(row)
+	if err != nil {
+		s.logger.Error("fetch updated playbook failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to fetch updated playbook")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, pb)
+}
+
+func (s *Server) handleDeletePlaybook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	result, err := s.db.Exec(r.Context(),
+		`UPDATE playbook_definitions SET is_active = false, updated_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		s.logger.Error("deactivate playbook failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to deactivate playbook")
+		return
+	}
+	if result.RowsAffected() == 0 {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Playbook not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"id": id, "is_active": false})
+}
+
+func (s *Server) handleTriggerPlaybook(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	var req TriggerPlaybookRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if req.TriggeredBy == "" {
+		req.TriggeredBy = getUserID(r)
+	}
+
+	ctx := r.Context()
+
+	// Fetch playbook
+	row := s.db.QueryRow(ctx,
+		`SELECT id, name, description, trigger_conditions, workflow_id, is_active, priority, classification, created_at, updated_at
+		 FROM playbook_definitions WHERE id = $1`, id)
+	pb, err := scanPlaybookRow(row)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Playbook not found")
+		return
+	}
+	if !pb.IsActive {
+		writeError(w, http.StatusBadRequest, "PLAYBOOK_INACTIVE", "Playbook is not active")
+		return
+	}
+
+	// Create execution record
+	var incidentID, alertID *string
+	if req.IncidentTicketID != "" {
+		incidentID = &req.IncidentTicketID
+	}
+	if req.AlertID != "" {
+		alertID = &req.AlertID
+	}
+
+	exec, err := s.createPlaybookExecution(ctx, pb.ID, incidentID, alertID, req.TriggeredBy, pb.WorkflowID)
+	if err != nil {
+		s.logger.Error("trigger playbook failed", "error", err, "playbook_id", id)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to trigger playbook")
+		return
+	}
+
+	// Publish event
+	s.publishEvent("dco.playbook_triggered", map[string]any{
+		"playbook_id":  pb.ID,
+		"execution_id": exec.ID,
+		"alert_id":     req.AlertID,
+		"triggered_by": req.TriggeredBy,
+	})
+
+	writeJSON(w, http.StatusCreated, exec)
+}
+
+func (s *Server) createPlaybookExecution(ctx context.Context, playbookID string, incidentTicketID, alertID *string, triggeredBy, workflowID string) (*PlaybookExecution, error) {
+	logBytes := []byte("{}")
+
+	var exec PlaybookExecution
+	var execLog []byte
+	var createdAt, updatedAt time.Time
+
+	err := s.db.QueryRow(ctx,
+		`INSERT INTO playbook_executions (playbook_id, incident_ticket_id, alert_id, triggered_by, execution_log)
+		 VALUES ($1, $2, $3, $4, $5)
+		 RETURNING id, playbook_id, incident_ticket_id, alert_id, workflow_run_id, status, triggered_by, execution_log, created_at, updated_at`,
+		playbookID, incidentTicketID, alertID, triggeredBy, logBytes).
+		Scan(&exec.ID, &exec.PlaybookID, &exec.IncidentTicketID, &exec.AlertID,
+			&exec.WorkflowRunID, &exec.Status, &exec.TriggeredBy, &execLog, &createdAt, &updatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("insert playbook execution: %w", err)
+	}
+	exec.ExecutionLog = parseJSONB(execLog)
+	exec.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	exec.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+
+	// Start the associated workflow run
+	runCtx := map[string]any{
+		"playbook_id":       playbookID,
+		"execution_id":      exec.ID,
+		"incident_ticket_id": incidentTicketID,
+		"alert_id":          alertID,
+	}
+	run, err := s.startWorkflowRunInternal(ctx, workflowID, nil, runCtx)
+	if err != nil {
+		s.logger.Warn("failed to start workflow for playbook", "error", err, "playbook_id", playbookID)
+	} else if run != nil {
+		_, _ = s.db.Exec(ctx,
+			`UPDATE playbook_executions SET workflow_run_id = $1, status = 'running' WHERE id = $2`,
+			run.ID, exec.ID)
+		exec.WorkflowRunID = &run.ID
+		exec.Status = "running"
+	}
+
+	return &exec, nil
+}
+
+func (s *Server) handleListPlaybookExecutions(w http.ResponseWriter, r *http.Request) {
+	page, limit, offset := parsePagination(r)
+	playbookID := r.URL.Query().Get("playbook_id")
+	statusFilter := r.URL.Query().Get("status")
+	incidentTicketID := r.URL.Query().Get("incident_ticket_id")
+
+	conditions := []string{}
+	args := []any{}
+	argIdx := 1
+
+	if playbookID != "" {
+		conditions = append(conditions, fmt.Sprintf("playbook_id = $%d", argIdx))
+		args = append(args, playbookID)
+		argIdx++
+	}
+	if statusFilter != "" {
+		conditions = append(conditions, fmt.Sprintf("status = $%d", argIdx))
+		args = append(args, statusFilter)
+		argIdx++
+	}
+	if incidentTicketID != "" {
+		conditions = append(conditions, fmt.Sprintf("incident_ticket_id = $%d", argIdx))
+		args = append(args, incidentTicketID)
+		argIdx++
+	}
+
+	where := ""
+	if len(conditions) > 0 {
+		where = "WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	var total int
+	countQ := fmt.Sprintf("SELECT count(*) FROM playbook_executions %s", where)
+	if err := s.db.QueryRow(r.Context(), countQ, args...).Scan(&total); err != nil {
+		total = 0
+	}
+
+	args = append(args, limit, offset)
+	dataQ := fmt.Sprintf(
+		`SELECT id, playbook_id, incident_ticket_id, alert_id, workflow_run_id, status, triggered_by, execution_log, created_at, updated_at
+		 FROM playbook_executions %s ORDER BY created_at DESC LIMIT $%d OFFSET $%d`,
+		where, argIdx, argIdx+1)
+
+	rows, err := s.db.Query(r.Context(), dataQ, args...)
+	if err != nil {
+		s.logger.Error("list playbook executions query failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "DB_ERROR", "Failed to list playbook executions")
+		return
+	}
+	defer rows.Close()
+
+	var executions []PlaybookExecution
+	for rows.Next() {
+		exec, err := scanPlaybookExecutionRow(rows)
+		if err != nil {
+			s.logger.Error("scan playbook execution failed", "error", err)
+			continue
+		}
+		executions = append(executions, exec)
+	}
+	if executions == nil {
+		executions = []PlaybookExecution{}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"data": executions,
+		"pagination": map[string]int{
+			"page":  page,
+			"limit": limit,
+			"total": total,
+		},
+	})
+}
+
+func scanPlaybookExecutionRow(scanner interface{ Scan(dest ...any) error }) (PlaybookExecution, error) {
+	var exec PlaybookExecution
+	var execLog []byte
+	var createdAt, updatedAt time.Time
+	err := scanner.Scan(&exec.ID, &exec.PlaybookID, &exec.IncidentTicketID, &exec.AlertID,
+		&exec.WorkflowRunID, &exec.Status, &exec.TriggeredBy, &execLog, &createdAt, &updatedAt)
+	if err != nil {
+		return exec, err
+	}
+	exec.ExecutionLog = parseJSONB(execLog)
+	exec.CreatedAt = createdAt.UTC().Format(time.RFC3339)
+	exec.UpdatedAt = updatedAt.UTC().Format(time.RFC3339)
+	return exec, nil
+}
+
+func (s *Server) handleGetPlaybookExecution(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", "id is required")
+		return
+	}
+
+	row := s.db.QueryRow(r.Context(),
+		`SELECT id, playbook_id, incident_ticket_id, alert_id, workflow_run_id, status, triggered_by, execution_log, created_at, updated_at
+		 FROM playbook_executions WHERE id = $1`, id)
+	exec, err := scanPlaybookExecutionRow(row)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Playbook execution not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, exec)
+}
+
+// ---------------------------------------------------------------------------
+// Playbook Auto-Trigger (NATS subscriber for dco.alert_received)
+// ---------------------------------------------------------------------------
+
+// matchPlaybookTrigger evaluates whether an alert matches a playbook's trigger conditions.
+func matchPlaybookTrigger(trigger map[string]any, alert map[string]any) bool {
+	// Match severity: if trigger specifies severity, alert severity must be >= trigger severity
+	if trigSev, ok := trigger["severity"]; ok {
+		trigSevStr := fmt.Sprintf("%v", trigSev)
+		alertSevStr := fmt.Sprintf("%v", alert["severity"])
+		if !severityGTE(alertSevStr, trigSevStr) {
+			return false
+		}
+	}
+
+	// Match mitre_techniques: if trigger specifies techniques, alert must contain at least one
+	if trigTechs, ok := trigger["mitre_techniques"]; ok {
+		trigList, trigOk := toStringSlice(trigTechs)
+		alertTechs, alertOk := toStringSlice(alert["mitre_techniques"])
+		if trigOk && len(trigList) > 0 {
+			if !alertOk || len(alertTechs) == 0 {
+				return false
+			}
+			found := false
+			for _, tt := range trigList {
+				for _, at := range alertTechs {
+					if tt == at {
+						found = true
+						break
+					}
+				}
+				if found {
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+		}
+	}
+
+	// Match alert_source: if trigger specifies source, must match
+	if trigSource, ok := trigger["alert_source"]; ok {
+		alertSource := fmt.Sprintf("%v", alert["alert_source"])
+		if fmt.Sprintf("%v", trigSource) != alertSource {
+			return false
+		}
+	}
+
+	return true
+}
+
+func severityGTE(alertSev, trigSev string) bool {
+	sevRank := map[string]int{
+		"low": 1, "medium": 2, "high": 3, "critical": 4,
+	}
+	ar, aok := sevRank[strings.ToLower(alertSev)]
+	tr, tok := sevRank[strings.ToLower(trigSev)]
+	if !aok || !tok {
+		return alertSev == trigSev // exact match if unknown severity
+	}
+	return ar >= tr
+}
+
+func toStringSlice(v any) ([]string, bool) {
+	if v == nil {
+		return nil, false
+	}
+	switch val := v.(type) {
+	case []string:
+		return val, true
+	case []any:
+		result := make([]string, 0, len(val))
+		for _, item := range val {
+			result = append(result, fmt.Sprintf("%v", item))
+		}
+		return result, true
+	}
+	return nil, false
+}
+
+// autoTriggerDedupKey builds a deduplication key from a playbook and alert.
+func autoTriggerDedupKey(playbookID string, alert map[string]any) string {
+	source, _ := alert["alert_source"].(string)
+	severity, _ := alert["severity"].(string)
+	return playbookID + ":" + source + ":" + severity
+}
+
+// cleanAutoTriggerDedup removes expired entries from the dedup map.
+// Must be called with s.autoTriggerMu held.
+func (s *Server) cleanAutoTriggerDedup() {
+	now := time.Now()
+	for k, t := range s.autoTriggerDedup {
+		if now.Sub(t) > autoTriggerDedupWindow {
+			delete(s.autoTriggerDedup, k)
+		}
+	}
+}
+
+// startAutoTriggerCleanup runs a periodic cleanup goroutine for the dedup map.
+func (s *Server) startAutoTriggerCleanup(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(autoTriggerCleanupInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.autoTriggerMu.Lock()
+				s.cleanAutoTriggerDedup()
+				s.autoTriggerMu.Unlock()
+			}
+		}
+	}()
+}
+
+func (s *Server) subscribeDCOAlerts() {
+	if s.nc == nil {
+		return
+	}
+
+	// Initialize dedup map
+	s.autoTriggerMu.Lock()
+	if s.autoTriggerDedup == nil {
+		s.autoTriggerDedup = make(map[string]time.Time)
+	}
+	s.autoTriggerMu.Unlock()
+
+	_, err := s.nc.Subscribe("dco.alert_received", func(msg *nats.Msg) {
+		var envelope struct {
+			Data json.RawMessage `json:"data"`
+		}
+		if err := json.Unmarshal(msg.Data, &envelope); err != nil {
+			// Try parsing as direct data
+			envelope.Data = msg.Data
+		}
+
+		var alert map[string]any
+		if err := json.Unmarshal(envelope.Data, &alert); err != nil {
+			s.logger.Warn("failed to parse dco.alert_received", "error", err)
+			return
+		}
+
+		ctx := context.Background()
+
+		// Rate limit: check concurrent execution count
+		var inflight int
+		err := s.db.QueryRow(ctx,
+			`SELECT count(*) FROM playbook_executions WHERE status IN ('pending', 'running')`).Scan(&inflight)
+		if err == nil && inflight >= autoTriggerMaxConcurrent {
+			s.logger.Warn("auto-trigger skipped: too many in-flight playbook executions",
+				"inflight", inflight, "max", autoTriggerMaxConcurrent)
+			return
+		}
+
+		// Load all active playbook definitions
+		rows, err := s.db.Query(ctx,
+			`SELECT id, name, description, trigger_conditions, workflow_id, is_active, priority, classification, created_at, updated_at
+			 FROM playbook_definitions WHERE is_active = true ORDER BY priority DESC`)
+		if err != nil {
+			s.logger.Error("failed to load playbooks for auto-trigger", "error", err)
+			return
+		}
+		defer rows.Close()
+
+		var bestMatch *PlaybookDefinition
+		for rows.Next() {
+			pb, err := scanPlaybookRow(rows)
+			if err != nil {
+				continue
+			}
+			if matchPlaybookTrigger(pb.TriggerConditions, alert) {
+				bestMatch = &pb
+				break // already sorted by priority DESC, first match is highest priority
+			}
+		}
+
+		if bestMatch == nil {
+			return
+		}
+
+		// Dedup: check if this playbook+source+severity was triggered recently
+		dedupKey := autoTriggerDedupKey(bestMatch.ID, alert)
+		s.autoTriggerMu.Lock()
+		if lastTrigger, ok := s.autoTriggerDedup[dedupKey]; ok {
+			if time.Since(lastTrigger) < autoTriggerDedupWindow {
+				s.autoTriggerMu.Unlock()
+				s.logger.Warn("auto-trigger skipped: duplicate within dedup window",
+					"dedup_key", dedupKey, "last_trigger", lastTrigger)
+				return
+			}
+		}
+		s.autoTriggerDedup[dedupKey] = time.Now()
+		s.autoTriggerMu.Unlock()
+
+		alertID, _ := alert["alert_id"].(string)
+		var alertIDPtr *string
+		if alertID != "" {
+			alertIDPtr = &alertID
+		}
+
+		exec, err := s.createPlaybookExecution(ctx, bestMatch.ID, nil, alertIDPtr, "system:auto-trigger", bestMatch.WorkflowID)
+		if err != nil {
+			s.logger.Error("auto-trigger playbook failed", "error", err, "playbook_id", bestMatch.ID)
+			return
+		}
+
+		s.publishEvent("dco.playbook_triggered", map[string]any{
+			"playbook_id":  bestMatch.ID,
+			"execution_id": exec.ID,
+			"alert_id":     alertID,
+			"triggered_by": "system:auto-trigger",
+		})
+
+		s.logger.Info("auto-triggered playbook from alert",
+			"playbook_id", bestMatch.ID, "alert_id", alertID, "execution_id", exec.ID)
+	})
+
+	if err != nil {
+		s.logger.Error("failed to subscribe to dco.alert_received", "error", err)
+	} else {
+		s.logger.Info("subscribed to dco.alert_received for playbook auto-trigger")
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Server startup
 // ---------------------------------------------------------------------------
 
@@ -3295,8 +4044,22 @@ func (s *Server) Start(ctx context.Context) {
 	mux.HandleFunc("GET /api/v1/workflow-runs/{id}/history", s.handleGetRunHistory)
 	mux.HandleFunc("PATCH /api/v1/workflow-runs/{id}/context", s.handleUpdateRunContext)
 
+	// Playbook CRUD (DCO/SOC M13)
+	mux.HandleFunc("GET /api/v1/workflows/playbooks", s.handleListPlaybooks)
+	mux.HandleFunc("POST /api/v1/workflows/playbooks", s.handleCreatePlaybook)
+	mux.HandleFunc("PATCH /api/v1/workflows/playbooks/{id}", s.handleUpdatePlaybook)
+	mux.HandleFunc("DELETE /api/v1/workflows/playbooks/{id}", s.handleDeletePlaybook)
+	mux.HandleFunc("POST /api/v1/workflows/playbooks/{id}/trigger", s.handleTriggerPlaybook)
+
+	// Playbook Executions (DCO/SOC M13)
+	mux.HandleFunc("GET /api/v1/workflows/playbook-executions", s.handleListPlaybookExecutions)
+	mux.HandleFunc("GET /api/v1/workflows/playbook-executions/{id}", s.handleGetPlaybookExecution)
+
 	// Subscribe to ticket events
 	s.subscribeTicketEvents()
+
+	// Subscribe to DCO alert events for playbook auto-trigger
+	s.subscribeDCOAlerts()
 
 	// Start escalation ticker
 	go s.runEscalationTicker(ctx)

@@ -1,0 +1,78 @@
+---
+# Monitoring role (optional) — deploy Prometheus + Grafana stack
+
+- name: Create monitoring directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0755"
+  loop:
+    - "{{ ems_home }}/data/prometheus"
+    - "{{ ems_home }}/data/grafana"
+    - "{{ ems_home }}/config/prometheus"
+
+- name: Create Prometheus configuration
+  ansible.builtin.copy:
+    dest: "{{ ems_home }}/config/prometheus/prometheus.yml"
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0644"
+    content: |
+      global:
+        scrape_interval: 15s
+        evaluation_interval: 15s
+
+      scrape_configs:
+        - job_name: 'traefik'
+          static_configs:
+            - targets: ['ems-traefik-{{ enclave }}:8080']
+
+        - job_name: 'nats'
+          static_configs:
+            - targets: ['ems-nats-{{ enclave }}:{{ nats_monitor_port }}']
+
+        - job_name: 'ems-services'
+          static_configs:
+            - targets:
+                - 'ems-auth-{{ enclave }}:3001'
+                - 'ems-workflow-{{ enclave }}:3002'
+                - 'ems-ticket-{{ enclave }}:3003'
+                - 'ems-dashboard-{{ enclave }}:3004'
+                - 'ems-c2-gateway-{{ enclave }}:3005'
+                - 'ems-audit-{{ enclave }}:3006'
+                - 'ems-notification-{{ enclave }}:3007'
+                - 'ems-endpoint-{{ enclave }}:3008'
+                - 'ems-ws-relay-{{ enclave }}:3009'
+
+- name: Deploy Prometheus container
+  community.docker.docker_container:
+    name: "ems-prometheus-{{ enclave }}"
+    image: "prom/prometheus:latest"
+    state: started
+    restart_policy: unless-stopped
+    volumes:
+      - "{{ ems_home }}/config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro"
+      - "{{ ems_home }}/data/prometheus:/prometheus"
+    ports:
+      - "{{ prometheus_port }}:9090"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+  when: monitoring_enabled | default(false)
+
+- name: Deploy Grafana container
+  community.docker.docker_container:
+    name: "ems-grafana-{{ enclave }}"
+    image: "grafana/grafana:latest"
+    state: started
+    restart_policy: unless-stopped
+    env:
+      GF_SECURITY_ADMIN_PASSWORD: "{{ vault_grafana_password | default('admin') }}"
+    volumes:
+      - "{{ ems_home }}/data/grafana:/var/lib/grafana"
+    ports:
+      - "{{ grafana_port }}:3000"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+  when: monitoring_enabled | default(false)

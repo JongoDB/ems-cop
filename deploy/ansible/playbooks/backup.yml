@@ -1,0 +1,99 @@
+---
+# EMS-COP Backup Playbook
+# Creates backups of all persistent data stores
+# Usage:
+#   ansible-playbook playbooks/backup.yml
+#   ansible-playbook playbooks/backup.yml -i inventory/production.yml
+
+- name: Backup EMS-COP data
+  hosts: low_enclave:high_enclave
+  tags: [backup]
+  vars:
+    backup_dir: "{{ ems_home }}/backups/{{ ansible_date_time.iso8601_basic_short }}"
+
+  tasks:
+    - name: Create backup directory
+      ansible.builtin.file:
+        path: "{{ backup_dir }}"
+        state: directory
+        owner: "{{ ems_user }}"
+        group: "{{ ems_group }}"
+        mode: "0700"
+
+    # ── PostgreSQL Backup ──
+    - name: Backup PostgreSQL
+      ansible.builtin.command:
+        cmd: >
+          docker exec ems-postgres-{{ enclave }}
+          pg_dump -U {{ postgres_user }} -d {{ postgres_db }}
+          --format=custom --compress=9
+          -f /tmp/ems_pg_backup.dump
+      changed_when: true
+
+    - name: Copy PostgreSQL backup from container
+      ansible.builtin.command:
+        cmd: >
+          docker cp ems-postgres-{{ enclave }}:/tmp/ems_pg_backup.dump
+          {{ backup_dir }}/postgres_{{ enclave }}.dump
+      changed_when: true
+
+    # ── ClickHouse Backup ──
+    - name: Backup ClickHouse audit data
+      ansible.builtin.command:
+        cmd: >
+          docker exec ems-clickhouse-{{ enclave }}
+          clickhouse-client --database {{ clickhouse_db }}
+          --query "SELECT * FROM audit_events FORMAT Native"
+          --output /tmp/audit_backup.native
+      changed_when: true
+      ignore_errors: true
+
+    - name: Copy ClickHouse backup from container
+      ansible.builtin.command:
+        cmd: >
+          docker cp ems-clickhouse-{{ enclave }}:/tmp/audit_backup.native
+          {{ backup_dir }}/clickhouse_{{ enclave }}.native
+      changed_when: true
+      ignore_errors: true
+
+    # ── Redis Backup ──
+    - name: Trigger Redis background save
+      ansible.builtin.command:
+        cmd: >
+          docker exec ems-redis-{{ enclave }}
+          redis-cli -a {{ redis_password }} BGSAVE
+      changed_when: true
+      no_log: true
+
+    - name: Wait for Redis save to complete
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Copy Redis RDB file
+      ansible.builtin.command:
+        cmd: >
+          docker cp ems-redis-{{ enclave }}:/data/dump.rdb
+          {{ backup_dir }}/redis_{{ enclave }}.rdb
+      changed_when: true
+      ignore_errors: true
+
+    # ── MinIO Backup ──
+    - name: Backup MinIO buckets
+      ansible.builtin.command:
+        cmd: >
+          mc mirror ems-{{ enclave }}/{{ item }}
+          {{ backup_dir }}/minio_{{ item }}/
+      loop: "{{ minio_buckets }}"
+      changed_when: true
+      ignore_errors: true
+
+    # ── Report ──
+    - name: List backup contents
+      ansible.builtin.find:
+        paths: "{{ backup_dir }}"
+        recurse: true
+      register: backup_files
+
+    - name: Report backup summary
+      ansible.builtin.debug:
+        msg: "Backup complete: {{ backup_files.matched }} files in {{ backup_dir }}"

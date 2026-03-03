@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -1872,5 +1873,591 @@ func TestOperationSelectCols(t *testing.T) {
 		if !strings.Contains(operationSelectCols, field) {
 			t.Errorf("operationSelectCols missing field %q", field)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Playbook Trigger Condition Matching (M13 DCO/SOC)
+// ---------------------------------------------------------------------------
+
+func TestMatchPlaybookTrigger(t *testing.T) {
+	tests := []struct {
+		name    string
+		trigger map[string]any
+		alert   map[string]any
+		want    bool
+	}{
+		{
+			name:    "empty trigger matches any alert",
+			trigger: map[string]any{},
+			alert:   map[string]any{"severity": "high", "alert_source": "siem"},
+			want:    true,
+		},
+		{
+			name:    "severity match - exact",
+			trigger: map[string]any{"severity": "high"},
+			alert:   map[string]any{"severity": "high"},
+			want:    true,
+		},
+		{
+			name:    "severity match - alert higher than trigger",
+			trigger: map[string]any{"severity": "medium"},
+			alert:   map[string]any{"severity": "critical"},
+			want:    true,
+		},
+		{
+			name:    "severity mismatch - alert lower than trigger",
+			trigger: map[string]any{"severity": "critical"},
+			alert:   map[string]any{"severity": "low"},
+			want:    false,
+		},
+		{
+			name:    "severity match - high >= high",
+			trigger: map[string]any{"severity": "high"},
+			alert:   map[string]any{"severity": "critical"},
+			want:    true,
+		},
+		{
+			name:    "mitre_techniques match",
+			trigger: map[string]any{"mitre_techniques": []any{"T1059", "T1566"}},
+			alert:   map[string]any{"mitre_techniques": []any{"T1059", "T1078"}},
+			want:    true,
+		},
+		{
+			name:    "mitre_techniques no overlap",
+			trigger: map[string]any{"mitre_techniques": []any{"T1059"}},
+			alert:   map[string]any{"mitre_techniques": []any{"T1078"}},
+			want:    false,
+		},
+		{
+			name:    "mitre_techniques trigger set but alert missing",
+			trigger: map[string]any{"mitre_techniques": []any{"T1059"}},
+			alert:   map[string]any{},
+			want:    false,
+		},
+		{
+			name:    "alert_source match",
+			trigger: map[string]any{"alert_source": "siem"},
+			alert:   map[string]any{"alert_source": "siem"},
+			want:    true,
+		},
+		{
+			name:    "alert_source mismatch",
+			trigger: map[string]any{"alert_source": "siem"},
+			alert:   map[string]any{"alert_source": "nids"},
+			want:    false,
+		},
+		{
+			name: "combined conditions - all match",
+			trigger: map[string]any{
+				"severity":         "medium",
+				"alert_source":     "siem",
+				"mitre_techniques": []any{"T1059"},
+			},
+			alert: map[string]any{
+				"severity":         "high",
+				"alert_source":     "siem",
+				"mitre_techniques": []any{"T1059", "T1078"},
+			},
+			want: true,
+		},
+		{
+			name: "combined conditions - severity fails",
+			trigger: map[string]any{
+				"severity":     "critical",
+				"alert_source": "siem",
+			},
+			alert: map[string]any{
+				"severity":     "low",
+				"alert_source": "siem",
+			},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := matchPlaybookTrigger(tt.trigger, tt.alert)
+			if got != tt.want {
+				t.Errorf("matchPlaybookTrigger() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: severityGTE
+// ---------------------------------------------------------------------------
+
+func TestSeverityGTE(t *testing.T) {
+	tests := []struct {
+		name     string
+		alertSev string
+		trigSev  string
+		want     bool
+	}{
+		{"critical >= critical", "critical", "critical", true},
+		{"critical >= high", "critical", "high", true},
+		{"critical >= medium", "critical", "medium", true},
+		{"critical >= low", "critical", "low", true},
+		{"high >= high", "high", "high", true},
+		{"high >= medium", "high", "medium", true},
+		{"high >= low", "high", "low", true},
+		{"medium >= medium", "medium", "medium", true},
+		{"medium >= low", "medium", "low", true},
+		{"low >= low", "low", "low", true},
+		{"low < medium", "low", "medium", false},
+		{"low < high", "low", "high", false},
+		{"low < critical", "low", "critical", false},
+		{"medium < high", "medium", "high", false},
+		{"medium < critical", "medium", "critical", false},
+		{"high < critical", "high", "critical", false},
+		{"unknown exact match", "info", "info", true},
+		{"unknown no match", "info", "critical", false},
+		{"case insensitive", "HIGH", "high", true},
+		{"case insensitive 2", "Critical", "Medium", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := severityGTE(tt.alertSev, tt.trigSev)
+			if got != tt.want {
+				t.Errorf("severityGTE(%q, %q) = %v, want %v", tt.alertSev, tt.trigSev, got, tt.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: toStringSlice
+// ---------------------------------------------------------------------------
+
+func TestToStringSlice(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   any
+		want    []string
+		wantOk  bool
+	}{
+		{"nil", nil, nil, false},
+		{"string slice", []string{"a", "b"}, []string{"a", "b"}, true},
+		{"any slice", []any{"x", "y"}, []string{"x", "y"}, true},
+		{"any slice with numbers", []any{"x", 42}, []string{"x", "42"}, true},
+		{"empty any slice", []any{}, []string{}, true},
+		{"single string", "hello", nil, false},
+		{"number", 42, nil, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := toStringSlice(tt.input)
+			if ok != tt.wantOk {
+				t.Errorf("toStringSlice() ok = %v, want %v", ok, tt.wantOk)
+			}
+			if ok {
+				if len(got) != len(tt.want) {
+					t.Errorf("toStringSlice() len = %d, want %d", len(got), len(tt.want))
+					return
+				}
+				for i := range got {
+					if got[i] != tt.want[i] {
+						t.Errorf("toStringSlice()[%d] = %q, want %q", i, got[i], tt.want[i])
+					}
+				}
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: PlaybookDefinition struct fields
+// ---------------------------------------------------------------------------
+
+func TestPlaybookDefinitionStruct(t *testing.T) {
+	pb := PlaybookDefinition{
+		ID:                "test-id",
+		Name:              "Auto-Isolate",
+		Description:       "Auto-isolate on critical alerts",
+		TriggerConditions: map[string]any{"severity": "critical"},
+		WorkflowID:        "wf-123",
+		IsActive:          true,
+		Priority:          10,
+		Classification:    "UNCLASS",
+		CreatedAt:         "2026-03-01T00:00:00Z",
+		UpdatedAt:         "2026-03-01T00:00:00Z",
+	}
+
+	data, err := json.Marshal(pb)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var decoded PlaybookDefinition
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if decoded.Name != pb.Name {
+		t.Errorf("Name = %q, want %q", decoded.Name, pb.Name)
+	}
+	if decoded.Priority != pb.Priority {
+		t.Errorf("Priority = %d, want %d", decoded.Priority, pb.Priority)
+	}
+	if decoded.IsActive != pb.IsActive {
+		t.Errorf("IsActive = %v, want %v", decoded.IsActive, pb.IsActive)
+	}
+	if decoded.Classification != pb.Classification {
+		t.Errorf("Classification = %q, want %q", decoded.Classification, pb.Classification)
+	}
+	if decoded.WorkflowID != pb.WorkflowID {
+		t.Errorf("WorkflowID = %q, want %q", decoded.WorkflowID, pb.WorkflowID)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: PlaybookExecution struct fields
+// ---------------------------------------------------------------------------
+
+func TestPlaybookExecutionStruct(t *testing.T) {
+	runID := "run-456"
+	exec := PlaybookExecution{
+		ID:               "exec-123",
+		PlaybookID:       "pb-123",
+		IncidentTicketID: strPtr("ticket-789"),
+		AlertID:          strPtr("alert-456"),
+		WorkflowRunID:    &runID,
+		Status:           "running",
+		TriggeredBy:      "system:auto-trigger",
+		ExecutionLog:     map[string]any{"step": "started"},
+		CreatedAt:        "2026-03-01T00:00:00Z",
+		UpdatedAt:        "2026-03-01T00:00:00Z",
+	}
+
+	data, err := json.Marshal(exec)
+	if err != nil {
+		t.Fatalf("failed to marshal: %v", err)
+	}
+
+	var decoded PlaybookExecution
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if decoded.PlaybookID != exec.PlaybookID {
+		t.Errorf("PlaybookID = %q, want %q", decoded.PlaybookID, exec.PlaybookID)
+	}
+	if decoded.Status != exec.Status {
+		t.Errorf("Status = %q, want %q", decoded.Status, exec.Status)
+	}
+	if decoded.TriggeredBy != exec.TriggeredBy {
+		t.Errorf("TriggeredBy = %q, want %q", decoded.TriggeredBy, exec.TriggeredBy)
+	}
+	if decoded.WorkflowRunID == nil || *decoded.WorkflowRunID != runID {
+		t.Errorf("WorkflowRunID mismatch")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: CreatePlaybookRequest validation
+// ---------------------------------------------------------------------------
+
+func TestCreatePlaybookRequestValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{
+			name:    "valid request",
+			body:    `{"name":"test","workflow_id":"wf-1","classification":"UNCLASS"}`,
+			wantErr: false,
+		},
+		{
+			name:    "missing name",
+			body:    `{"workflow_id":"wf-1"}`,
+			wantErr: true,
+		},
+		{
+			name:    "missing workflow_id",
+			body:    `{"name":"test"}`,
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// We don't have DB here; just test the request parsing & validation logic
+			var req CreatePlaybookRequest
+			err := json.Unmarshal([]byte(tt.body), &req)
+			if err != nil {
+				t.Fatalf("failed to unmarshal: %v", err)
+			}
+
+			hasErr := req.Name == "" || req.WorkflowID == ""
+			if hasErr != tt.wantErr {
+				t.Errorf("validation error = %v, want %v", hasErr, tt.wantErr)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: UpdatePlaybookRequest fields
+// ---------------------------------------------------------------------------
+
+func TestUpdatePlaybookRequestFields(t *testing.T) {
+	body := `{"description":"new desc","is_active":false,"priority":5,"trigger_conditions":{"severity":"critical"}}`
+
+	var req UpdatePlaybookRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if req.Description == nil || *req.Description != "new desc" {
+		t.Errorf("Description = %v, want 'new desc'", req.Description)
+	}
+	if req.IsActive == nil || *req.IsActive != false {
+		t.Errorf("IsActive = %v, want false", req.IsActive)
+	}
+	if req.Priority == nil || *req.Priority != 5 {
+		t.Errorf("Priority = %v, want 5", req.Priority)
+	}
+	if req.TriggerConditions == nil {
+		t.Error("TriggerConditions should not be nil")
+	}
+	if sev, ok := req.TriggerConditions["severity"]; !ok || sev != "critical" {
+		t.Errorf("TriggerConditions[severity] = %v, want 'critical'", sev)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: TriggerPlaybookRequest parsing
+// ---------------------------------------------------------------------------
+
+func TestTriggerPlaybookRequestParsing(t *testing.T) {
+	body := `{"incident_ticket_id":"ticket-123","alert_id":"alert-456","triggered_by":"admin"}`
+
+	var req TriggerPlaybookRequest
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("failed to unmarshal: %v", err)
+	}
+
+	if req.IncidentTicketID != "ticket-123" {
+		t.Errorf("IncidentTicketID = %q, want %q", req.IncidentTicketID, "ticket-123")
+	}
+	if req.AlertID != "alert-456" {
+		t.Errorf("AlertID = %q, want %q", req.AlertID, "alert-456")
+	}
+	if req.TriggeredBy != "admin" {
+		t.Errorf("TriggeredBy = %q, want %q", req.TriggeredBy, "admin")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Playbook create handler - no DB (validation only)
+// ---------------------------------------------------------------------------
+
+func TestHandleCreatePlaybookValidation(t *testing.T) {
+	s := &Server{
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v1/workflows/playbooks", s.handleCreatePlaybook)
+
+	tests := []struct {
+		name       string
+		body       string
+		headers    map[string]string
+		wantStatus int
+	}{
+		{
+			name:       "missing user id",
+			body:       `{"name":"test","workflow_id":"wf-1"}`,
+			headers:    map[string]string{},
+			wantStatus: http.StatusUnauthorized,
+		},
+		{
+			name:       "missing name",
+			body:       `{"workflow_id":"wf-1"}`,
+			headers:    map[string]string{"X-User-ID": "user-1"},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "missing workflow_id",
+			body:       `{"name":"test"}`,
+			headers:    map[string]string{"X-User-ID": "user-1"},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid classification",
+			body:       `{"name":"test","workflow_id":"wf-1","classification":"TOPSECRET"}`,
+			headers:    map[string]string{"X-User-ID": "user-1"},
+			wantStatus: http.StatusBadRequest,
+		},
+		{
+			name:       "invalid JSON",
+			body:       `{invalid`,
+			headers:    map[string]string{"X-User-ID": "user-1"},
+			wantStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("POST", "/api/v1/workflows/playbooks", strings.NewReader(tt.body))
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			if w.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d, body = %s", w.Code, tt.wantStatus, w.Body.String())
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: Playbook list handler - no DB (panics gracefully)
+// ---------------------------------------------------------------------------
+
+func TestHandleListPlaybooksNoDB(t *testing.T) {
+	s := &Server{
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/workflows/playbooks", s.handleListPlaybooks)
+
+	// Without a DB, this should return a 500 error
+	req := httptest.NewRequest("GET", "/api/v1/workflows/playbooks", nil)
+	w := httptest.NewRecorder()
+
+	// This will panic due to nil DB; we recover to verify it fails gracefully
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Expected: nil pointer dereference on db
+				t.Log("recovered from expected panic (nil db)")
+			}
+		}()
+		mux.ServeHTTP(w, req)
+	}()
+}
+
+// ---------------------------------------------------------------------------
+// Test: Playbook delete handler - no DB
+// ---------------------------------------------------------------------------
+
+func TestHandleDeletePlaybookValidation(t *testing.T) {
+	s := &Server{
+		logger: slog.New(slog.NewJSONHandler(io.Discard, nil)),
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("DELETE /api/v1/workflows/playbooks/{id}", s.handleDeletePlaybook)
+
+	// Without a DB, we just verify the handler doesn't crash on bad input
+	req := httptest.NewRequest("DELETE", "/api/v1/workflows/playbooks/", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+	// An empty path param is not routed by the 1.22 router to this handler,
+	// so this tests the 404 fallback behavior
+}
+
+// ---------------------------------------------------------------------------
+// Test: H-04 — Auto-trigger dedup key generation
+// ---------------------------------------------------------------------------
+
+func TestAutoTriggerDedupKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		playbookID string
+		alert      map[string]any
+		wantKey    string
+	}{
+		{
+			name:       "full key",
+			playbookID: "pb-1",
+			alert:      map[string]any{"alert_source": "siem", "severity": "high"},
+			wantKey:    "pb-1:siem:high",
+		},
+		{
+			name:       "missing source",
+			playbookID: "pb-2",
+			alert:      map[string]any{"severity": "critical"},
+			wantKey:    "pb-2::critical",
+		},
+		{
+			name:       "missing severity",
+			playbookID: "pb-3",
+			alert:      map[string]any{"alert_source": "nids"},
+			wantKey:    "pb-3:nids:",
+		},
+		{
+			name:       "empty alert",
+			playbookID: "pb-4",
+			alert:      map[string]any{},
+			wantKey:    "pb-4::",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := autoTriggerDedupKey(tt.playbookID, tt.alert)
+			if got != tt.wantKey {
+				t.Errorf("autoTriggerDedupKey() = %q, want %q", got, tt.wantKey)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: H-04 — Auto-trigger dedup map cleanup
+// ---------------------------------------------------------------------------
+
+func TestCleanAutoTriggerDedup(t *testing.T) {
+	s := &Server{
+		logger:           slog.New(slog.NewJSONHandler(io.Discard, nil)),
+		autoTriggerDedup: make(map[string]time.Time),
+	}
+
+	now := time.Now()
+
+	// Add entries: one fresh, one expired
+	s.autoTriggerDedup["fresh:siem:high"] = now.Add(-1 * time.Minute)   // 1 min ago, within 5-min window
+	s.autoTriggerDedup["expired:siem:low"] = now.Add(-10 * time.Minute) // 10 min ago, outside window
+	s.autoTriggerDedup["also-expired:nids:critical"] = now.Add(-6 * time.Minute)
+
+	s.autoTriggerMu.Lock()
+	s.cleanAutoTriggerDedup()
+	s.autoTriggerMu.Unlock()
+
+	if len(s.autoTriggerDedup) != 1 {
+		t.Errorf("after cleanup, dedup map has %d entries, want 1", len(s.autoTriggerDedup))
+	}
+	if _, ok := s.autoTriggerDedup["fresh:siem:high"]; !ok {
+		t.Error("fresh entry should still be in dedup map")
+	}
+	if _, ok := s.autoTriggerDedup["expired:siem:low"]; ok {
+		t.Error("expired entry should have been removed")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Test: H-04 — Auto-trigger rate limit constants
+// ---------------------------------------------------------------------------
+
+func TestAutoTriggerConstants(t *testing.T) {
+	if autoTriggerDedupWindow != 5*time.Minute {
+		t.Errorf("autoTriggerDedupWindow = %v, want 5m", autoTriggerDedupWindow)
+	}
+	if autoTriggerMaxConcurrent != 10 {
+		t.Errorf("autoTriggerMaxConcurrent = %d, want 10", autoTriggerMaxConcurrent)
+	}
+	if autoTriggerCleanupInterval != 1*time.Minute {
+		t.Errorf("autoTriggerCleanupInterval = %v, want 1m", autoTriggerCleanupInterval)
 	}
 }

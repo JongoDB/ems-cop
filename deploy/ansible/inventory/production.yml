@@ -1,0 +1,32 @@
+---
+# EMS-COP Production Inventory
+# Dual-enclave HA deployment
+# IMPORTANT: Replace placeholder IPs with actual production hosts
+all:
+  children:
+    low_enclave:
+      hosts:
+        prod-low-01:
+          ansible_host: 10.100.1.10
+          ansible_port: 22
+          ansible_user: ems
+        prod-low-02:
+          ansible_host: 10.100.1.11
+          ansible_port: 22
+          ansible_user: ems
+    high_enclave:
+      hosts:
+        prod-high-01:
+          ansible_host: 10.100.2.10
+          ansible_port: 22
+          ansible_user: ems
+        prod-high-02:
+          ansible_host: 10.100.2.11
+          ansible_port: 22
+          ansible_user: ems
+    cti_zone:
+      hosts:
+        prod-cti-01:
+          ansible_host: 10.100.3.10
+          ansible_port: 22
+          ansible_user: ems

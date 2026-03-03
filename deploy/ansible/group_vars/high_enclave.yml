@@ -1,0 +1,64 @@
+---
+# EMS-COP High-Side Enclave Variables
+# SECRET / strategic planning and analysis
+
+# ════════════════════════════════════════════
+#  Enclave Identity
+# ════════════════════════════════════════════
+enclave: high
+enclave_label: "High-Side (Strategic)"
+max_classification: "SECRET"  # Full classification range
+
+# ════════════════════════════════════════════
+#  Compose Configuration
+# ════════════════════════════════════════════
+compose_file: docker-compose.high.yml
+env_file: .env.high
+traefik_dynamic_config: dynamic-high.yml
+
+# ════════════════════════════════════════════
+#  Secrets (use Ansible Vault in production)
+# ════════════════════════════════════════════
+postgres_password: "{{ vault_high_postgres_password | default('CHANGE_ME') }}"
+redis_password: "{{ vault_high_redis_password | default('CHANGE_ME') }}"
+clickhouse_password: "{{ vault_high_clickhouse_password | default('CHANGE_ME') }}"
+minio_access_key: "{{ vault_high_minio_access_key | default('CHANGE_ME') }}"
+minio_secret_key: "{{ vault_high_minio_secret_key | default('CHANGE_ME') }}"
+jwt_secret: "{{ vault_high_jwt_secret | default('CHANGE_ME') }}"
+
+# ════════════════════════════════════════════
+#  Network Ports (high-side specific — offset from low)
+# ════════════════════════════════════════════
+traefik_http_port: 28080
+traefik_https_port: 28443
+allowed_origins: "https://high.ems-cop.example.com"
+
+# ════════════════════════════════════════════
+#  High-Side Specific Services
+# ════════════════════════════════════════════
+# No Sliver C2 on high side — strategic planning only
+sliver_enabled: false
+
+# No direct endpoint access on high side
+endpoint_net_enabled: false
+
+# ════════════════════════════════════════════
+#  CTI Bridge (high-side connection)
+# ════════════════════════════════════════════
+cti_relay_enabled: true
+cti_api_token: "{{ vault_cti_api_token | default('CHANGE_ME') }}"
+
+# ════════════════════════════════════════════
+#  SMTP / Notifications
+# ════════════════════════════════════════════
+smtp_host: ""
+smtp_port: 587
+smtp_from: "noreply@ems-cop-high.local"
+
+# ════════════════════════════════════════════
+#  Additional Security (high-side hardening)
+# ════════════════════════════════════════════
+# Disable all dev convenience ports
+traefik_dashboard_enabled: false
+expose_db_ports: false
+expose_nats_ports: false

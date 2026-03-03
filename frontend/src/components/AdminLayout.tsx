@@ -1,5 +1,5 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
-import { Database, FileCode, GitBranch, ExternalLink, Server, Activity } from 'lucide-react'
+import { Database, FileCode, GitBranch, ExternalLink, Server, Activity, BookOpen } from 'lucide-react'
 
 const ADMIN_TABS = [
   { path: '/admin/display-schemas', label: 'Display Schemas', icon: Database },
@@ -8,6 +8,7 @@ const ADMIN_TABS = [
   { path: '/admin/jira', label: 'Jira Sync', icon: ExternalLink },
   { path: '/admin/c2-backends', label: 'C2 Backends', icon: Server },
   { path: '/admin/nifi', label: 'NiFi Flows', icon: Activity },
+  { path: '/admin/playbooks', label: 'Playbooks', icon: BookOpen },
 ]
 
 export default function AdminLayout() {

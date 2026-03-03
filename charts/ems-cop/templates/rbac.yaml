@@ -1,0 +1,46 @@
+{{- if .Values.serviceAccount.create }}
+# ════════════════════════════════════════════════════════════════
+#  RBAC — minimal permissions per service
+#  Services only need read access to their own ConfigMaps/Secrets
+# ════════════════════════════════════════════════════════════════
+
+{{- $allServices := list "auth" "workflow-engine" "ticket" "dashboard" "c2-gateway" "audit" "notification" "endpoint" "ws-relay" "frontend" "cti-relay" }}
+
+{{- range $svc := $allServices }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $.Release.Name }}-{{ $svc }}
+  labels:
+    {{- include "ems-cop.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc }}
+rules:
+  # Allow reading own ConfigMaps
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["{{ $.Release.Name }}-{{ $svc }}-config"]
+    verbs: ["get", "watch"]
+  # Allow reading own Secrets
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["{{ $.Release.Name }}-{{ $svc }}-secret"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $.Release.Name }}-{{ $svc }}
+  labels:
+    {{- include "ems-cop.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $.Release.Name }}-{{ $svc }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $.Release.Name }}-{{ $svc }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

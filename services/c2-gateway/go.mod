@@ -1,6 +1,6 @@
 module github.com/ems-cop/c2-gateway
 
-go 1.24
+go 1.24.0
 
 require (
 	github.com/bishopfox/sliver v1.5.42

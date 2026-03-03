@@ -1,0 +1,66 @@
+---
+# PostgreSQL role — deploy PostgreSQL 16 via Docker
+# Creates database, runs migrations from infra/db/postgres/migrations/
+
+- name: Create PostgreSQL data directory
+  ansible.builtin.file:
+    path: "{{ ems_home }}/data/postgres"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0700"
+
+- name: Create PostgreSQL migrations directory
+  ansible.builtin.file:
+    path: "{{ ems_home }}/config/postgres/migrations"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0755"
+
+- name: Copy migration files
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../../infra/db/postgres/migrations/"
+    dest: "{{ ems_home }}/config/postgres/migrations/"
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0644"
+
+- name: Pull PostgreSQL image
+  community.docker.docker_image:
+    name: "postgres:{{ postgres_version }}-alpine"
+    source: pull
+
+- name: Deploy PostgreSQL container
+  community.docker.docker_container:
+    name: "ems-postgres-{{ enclave }}"
+    image: "postgres:{{ postgres_version }}-alpine"
+    state: started
+    restart_policy: unless-stopped
+    env:
+      POSTGRES_DB: "{{ postgres_db }}"
+      POSTGRES_USER: "{{ postgres_user }}"
+      POSTGRES_PASSWORD: "{{ postgres_password }}"
+    volumes:
+      - "{{ ems_home }}/data/postgres:/var/lib/postgresql/data"
+      - "{{ ems_home }}/config/postgres/migrations:/docker-entrypoint-initdb.d:ro"
+    ports:
+      - "{{ postgres_port }}:5432"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ postgres_user }} -d {{ postgres_db }}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+- name: Wait for PostgreSQL to be healthy
+  ansible.builtin.command:
+    cmd: >
+      docker exec ems-postgres-{{ enclave }}
+      pg_isready -U {{ postgres_user }} -d {{ postgres_db }}
+  register: pg_ready
+  retries: 30
+  delay: 2
+  until: pg_ready.rc == 0
+  changed_when: false

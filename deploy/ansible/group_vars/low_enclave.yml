@@ -1,0 +1,64 @@
+---
+# EMS-COP Low-Side Enclave Variables
+# UNCLASSIFIED / CUI tactical operations
+
+# ════════════════════════════════════════════
+#  Enclave Identity
+# ════════════════════════════════════════════
+enclave: low
+enclave_label: "Low-Side (Tactical)"
+max_classification: "CUI"  # No SECRET on low side
+
+# ════════════════════════════════════════════
+#  Compose Configuration
+# ════════════════════════════════════════════
+compose_file: docker-compose.low.yml
+env_file: .env.low
+traefik_dynamic_config: dynamic-low.yml
+
+# ════════════════════════════════════════════
+#  Secrets (use Ansible Vault in production)
+# ════════════════════════════════════════════
+# Override these with ansible-vault encrypted values:
+#   ansible-vault encrypt_string 'your_password' --name 'postgres_password'
+postgres_password: "{{ vault_low_postgres_password | default('CHANGE_ME') }}"
+redis_password: "{{ vault_low_redis_password | default('CHANGE_ME') }}"
+clickhouse_password: "{{ vault_low_clickhouse_password | default('CHANGE_ME') }}"
+minio_access_key: "{{ vault_low_minio_access_key | default('CHANGE_ME') }}"
+minio_secret_key: "{{ vault_low_minio_secret_key | default('CHANGE_ME') }}"
+jwt_secret: "{{ vault_low_jwt_secret | default('CHANGE_ME') }}"
+
+# ════════════════════════════════════════════
+#  Network Ports (low-side specific)
+# ════════════════════════════════════════════
+traefik_http_port: 18080
+traefik_https_port: 18443
+allowed_origins: "https://low.ems-cop.example.com"
+
+# ════════════════════════════════════════════
+#  Low-Side Specific Services
+# ════════════════════════════════════════════
+sliver_enabled: true
+sliver_grpc_port: 31337
+
+# C2 providers available on low side
+c2_providers:
+  - sliver
+  # - mythic   # Enable if Mythic is deployed
+  # - havoc    # Enable if Havoc is deployed
+
+# Endpoint network (isolated — only c2-gateway bridges)
+endpoint_net_enabled: true
+
+# ════════════════════════════════════════════
+#  CTI Bridge (low-side connection)
+# ════════════════════════════════════════════
+cti_relay_enabled: true
+cti_api_token: "{{ vault_cti_api_token | default('CHANGE_ME') }}"
+
+# ════════════════════════════════════════════
+#  SMTP / Notifications
+# ════════════════════════════════════════════
+smtp_host: ""
+smtp_port: 587
+smtp_from: "noreply@ems-cop-low.local"

@@ -1,0 +1,153 @@
+---
+# Common role — base system setup for all EMS-COP hosts
+# Installs Docker, configures firewall, NTP, syslog, creates service user
+
+- name: Update apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+  when: ansible_os_family == "Debian"
+
+- name: Install prerequisite packages
+  ansible.builtin.apt:
+    name:
+      - apt-transport-https
+      - ca-certificates
+      - curl
+      - gnupg
+      - lsb-release
+      - python3-pip
+      - ufw
+      - chrony
+      - rsyslog
+      - jq
+      - unzip
+    state: present
+  when: ansible_os_family == "Debian"
+
+# ════════════════════════════════════════════
+#  System User
+# ════════════════════════════════════════════
+- name: Create EMS-COP system group
+  ansible.builtin.group:
+    name: "{{ ems_group }}"
+    system: true
+
+- name: Create EMS-COP system user
+  ansible.builtin.user:
+    name: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    home: "{{ ems_home }}"
+    shell: /bin/bash
+    system: true
+    create_home: true
+
+- name: Create EMS-COP directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0755"
+  loop:
+    - "{{ ems_home }}"
+    - "{{ ems_home }}/config"
+    - "{{ ems_home }}/data"
+    - "{{ ems_home }}/logs"
+    - "{{ ems_home }}/certs"
+    - "{{ ems_home }}/backups"
+
+# ════════════════════════════════════════════
+#  Docker Installation
+# ════════════════════════════════════════════
+- name: Add Docker GPG key
+  ansible.builtin.apt_key:
+    url: https://download.docker.com/linux/ubuntu/gpg
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Add Docker repository
+  ansible.builtin.apt_repository:
+    repo: "deb https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Install Docker Engine
+  ansible.builtin.apt:
+    name:
+      - docker-ce
+      - docker-ce-cli
+      - containerd.io
+      - docker-compose-plugin
+    state: present
+  when: ansible_os_family == "Debian"
+
+- name: Add EMS user to docker group
+  ansible.builtin.user:
+    name: "{{ ems_user }}"
+    groups: docker
+    append: true
+
+- name: Enable and start Docker
+  ansible.builtin.systemd:
+    name: docker
+    enabled: true
+    state: started
+
+# ════════════════════════════════════════════
+#  Firewall (UFW)
+# ════════════════════════════════════════════
+- name: Set UFW default deny incoming
+  community.general.ufw:
+    direction: incoming
+    policy: deny
+
+- name: Set UFW default allow outgoing
+  community.general.ufw:
+    direction: outgoing
+    policy: allow
+
+- name: Allow configured firewall ports
+  community.general.ufw:
+    rule: allow
+    port: "{{ item.port }}"
+    proto: "{{ item.proto }}"
+    comment: "{{ item.comment }}"
+  loop: "{{ firewall_allowed_ports }}"
+
+- name: Enable UFW
+  community.general.ufw:
+    state: enabled
+
+# ════════════════════════════════════════════
+#  NTP (chrony)
+# ════════════════════════════════════════════
+- name: Enable and start chrony
+  ansible.builtin.systemd:
+    name: chrony
+    enabled: true
+    state: started
+
+# ════════════════════════════════════════════
+#  Syslog
+# ════════════════════════════════════════════
+- name: Enable and start rsyslog
+  ansible.builtin.systemd:
+    name: rsyslog
+    enabled: true
+    state: started
+
+# ════════════════════════════════════════════
+#  Kernel Tuning (for containers)
+# ════════════════════════════════════════════
+- name: Set sysctl parameters for containers
+  ansible.posix.sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: true
+    reload: true
+  loop:
+    - { key: "net.core.somaxconn", value: "65535" }
+    - { key: "vm.overcommit_memory", value: "1" }
+    - { key: "net.ipv4.ip_forward", value: "1" }
+  ignore_errors: true

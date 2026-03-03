@@ -1,0 +1,23 @@
+---
+# EMS-COP Staging Inventory
+# Dual-enclave deployment on dedicated hosts
+all:
+  children:
+    low_enclave:
+      hosts:
+        stg-low-01:
+          ansible_host: 10.200.1.10
+          ansible_port: 22
+          ansible_user: ems
+    high_enclave:
+      hosts:
+        stg-high-01:
+          ansible_host: 10.200.2.10
+          ansible_port: 22
+          ansible_user: ems
+    cti_zone:
+      hosts:
+        stg-cti-01:
+          ansible_host: 10.200.3.10
+          ansible_port: 22
+          ansible_user: ems

@@ -1,0 +1,52 @@
+{{- if .Values.hpa.enabled }}
+# ════════════════════════════════════════════════════════════════
+#  HorizontalPodAutoscaler — stateless services only
+# ════════════════════════════════════════════════════════════════
+
+{{- $statelessServices := list "auth" "ticket" "dashboard" "notification" "ws-relay" }}
+
+{{- range $svc := $statelessServices }}
+{{- $svcValues := index $.Values $svc | default dict }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $.Release.Name }}-{{ $svc }}
+  labels:
+    {{- include "ems-cop.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $.Release.Name }}-{{ $svc }}
+  minReplicas: {{ $.Values.hpa.minReplicas | default 1 }}
+  maxReplicas: {{ $.Values.hpa.maxReplicas | default 5 }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $.Values.hpa.targetCPUUtilization | default 70 }}
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: {{ $.Values.hpa.targetMemoryUtilization | default 80 }}
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+{{- end }}
+{{- end }}

@@ -1,0 +1,24 @@
+{{- if .Values.pdb.enabled }}
+# ════════════════════════════════════════════════════════════════
+#  PodDisruptionBudget — ensure minimum availability during updates
+# ════════════════════════════════════════════════════════════════
+
+{{- $allServices := list "auth" "workflow-engine" "ticket" "dashboard" "c2-gateway" "audit" "notification" "endpoint" "ws-relay" "frontend" }}
+
+{{- range $svc := $allServices }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $.Release.Name }}-{{ $svc }}
+  labels:
+    {{- include "ems-cop.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $svc }}
+spec:
+  minAvailable: {{ $.Values.pdb.minAvailable | default 1 }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $svc }}
+      app.kubernetes.io/instance: {{ $.Release.Name }}
+{{- end }}
+{{- end }}

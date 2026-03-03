@@ -275,6 +275,67 @@ spec:
       services:
         - name: {{ .Release.Name }}-endpoint
           port: 3008
+
+    # ── M13 DCO/SOC Routes ──
+    # ── endpoint-service (alerts) ──
+    - match: "PathPrefix(`/api/v1/endpoints/alerts`)"
+      kind: Rule
+      priority: 55
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+
+    # ── endpoint-service (IOCs) ──
+    - match: "PathPrefix(`/api/v1/endpoints/iocs`)"
+      kind: Rule
+      priority: 55
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-endpoint
+          port: 3008
+
+    # ── c2-gateway (containment) ──
+    - match: "PathPrefix(`/api/v1/c2/containment`)"
+      kind: Rule
+      priority: 55
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-c2-gateway
+          port: 3005
+
+    # ── workflow-engine (playbooks) ──
+    - match: "PathPrefix(`/api/v1/workflows/playbooks`)"
+      kind: Rule
+      priority: 55
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-workflow-engine
+          port: 3002
+
+    # ── workflow-engine (playbook-executions) ──
+    - match: "PathPrefix(`/api/v1/workflows/playbook-executions`)"
+      kind: Rule
+      priority: 55
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-workflow-engine
+          port: 3002
+
+    # ── ticket-service (incidents) ──
+    - match: "PathPrefix(`/api/v1/tickets/incidents`)"
+      kind: Rule
+      priority: 55
+      middlewares:
+        - name: {{ .Release.Name }}-forward-auth
+      services:
+        - name: {{ .Release.Name }}-ticket
+          port: 3003
 {{- end }}
 
 {{- if .Values.ingress.standard.enabled }}
@@ -451,6 +512,49 @@ spec:
                 name: {{ $.Release.Name }}-endpoint
                 port:
                   number: 3008
+          # ── M13 DCO/SOC Routes ──
+          - path: /api/v1/endpoints/alerts
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          - path: /api/v1/endpoints/iocs
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-endpoint
+                port:
+                  number: 3008
+          - path: /api/v1/c2/containment
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-c2-gateway
+                port:
+                  number: 3005
+          - path: /api/v1/workflows/playbooks
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-workflow-engine
+                port:
+                  number: 3002
+          - path: /api/v1/workflows/playbook-executions
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-workflow-engine
+                port:
+                  number: 3002
+          - path: /api/v1/tickets/incidents
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $.Release.Name }}-ticket
+                port:
+                  number: 3003
           # ── ws-relay ──
           - path: /ws
             pathType: Prefix

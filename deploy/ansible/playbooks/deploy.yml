@@ -1,0 +1,8 @@
+---
+# EMS-COP Fresh Deployment Playbook
+# Usage:
+#   ansible-playbook playbooks/deploy.yml -i inventory/staging.yml
+#   ansible-playbook playbooks/deploy.yml -i inventory/production.yml --limit low_enclave
+
+- name: Deploy EMS-COP
+  ansible.builtin.import_playbook: ../site.yml

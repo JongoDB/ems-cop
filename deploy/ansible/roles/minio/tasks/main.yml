@@ -1,0 +1,69 @@
+---
+# MinIO role — deploy MinIO S3-compatible object storage
+
+- name: Create MinIO data directory
+  ansible.builtin.file:
+    path: "{{ ems_home }}/data/minio"
+    state: directory
+    owner: "{{ ems_user }}"
+    group: "{{ ems_group }}"
+    mode: "0700"
+
+- name: Pull MinIO image
+  community.docker.docker_image:
+    name: "minio/minio:latest"
+    source: pull
+
+- name: Deploy MinIO container
+  community.docker.docker_container:
+    name: "ems-minio-{{ enclave }}"
+    image: "minio/minio:latest"
+    state: started
+    restart_policy: unless-stopped
+    command: "server /data --console-address :{{ minio_console_port }}"
+    env:
+      MINIO_ROOT_USER: "{{ minio_access_key }}"
+      MINIO_ROOT_PASSWORD: "{{ minio_secret_key }}"
+    volumes:
+      - "{{ ems_home }}/data/minio:/data"
+    ports:
+      - "{{ minio_port }}:9000"
+      - "{{ minio_console_port }}:{{ minio_console_port }}"
+    networks:
+      - name: "ems-net-{{ enclave }}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9000/minio/health/live || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+- name: Wait for MinIO to be healthy
+  ansible.builtin.uri:
+    url: "http://localhost:{{ minio_port }}/minio/health/live"
+    method: GET
+  register: minio_health
+  retries: 15
+  delay: 2
+  until: minio_health.status == 200
+  changed_when: false
+
+- name: Install MinIO client (mc)
+  ansible.builtin.get_url:
+    url: "https://dl.min.io/client/mc/release/linux-amd64/mc"
+    dest: /usr/local/bin/mc
+    mode: "0755"
+
+- name: Configure mc alias
+  ansible.builtin.command:
+    cmd: >
+      mc alias set ems-{{ enclave }}
+      http://localhost:{{ minio_port }}
+      {{ minio_access_key }} {{ minio_secret_key }}
+  changed_when: false
+  no_log: true
+
+- name: Create MinIO buckets
+  ansible.builtin.command:
+    cmd: "mc mb --ignore-existing ems-{{ enclave }}/{{ item }}"
+  loop: "{{ minio_buckets }}"
+  changed_when: false

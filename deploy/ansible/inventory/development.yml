@@ -1,0 +1,26 @@
+---
+# EMS-COP Development Inventory
+# Single-node deployment for local development / CI testing
+all:
+  children:
+    low_enclave:
+      hosts:
+        dev-low-01:
+          ansible_host: 127.0.0.1
+          ansible_port: 22
+          ansible_user: ems
+          ansible_connection: local
+    high_enclave:
+      hosts:
+        dev-high-01:
+          ansible_host: 127.0.0.1
+          ansible_port: 22
+          ansible_user: ems
+          ansible_connection: local
+    cti_zone:
+      hosts:
+        dev-cti-01:
+          ansible_host: 127.0.0.1
+          ansible_port: 22
+          ansible_user: ems
+          ansible_connection: local
