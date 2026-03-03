@@ -101,6 +101,7 @@ services:
       - ./infra/db/clickhouse/002_classification.sql:/docker-entrypoint-initdb.d/002_classification.sql:ro
       - ./infra/db/clickhouse/003_cti_provenance.sql:/docker-entrypoint-initdb.d/003_cti_provenance.sql:ro
       - ./infra/db/clickhouse/004_consolidated_audit.sql:/docker-entrypoint-initdb.d/004_consolidated_audit.sql:ro
+      - ./infra/db/clickhouse/005_dco_events.sql:/docker-entrypoint-initdb.d/005_dco_events.sql:ro
     ports:
       - "${CH_HTTP_PORT:-18123}:8123"  # HTTP interface (dev only)
       - "${CH_NATIVE_PORT:-19000}:9000"  # Native protocol
