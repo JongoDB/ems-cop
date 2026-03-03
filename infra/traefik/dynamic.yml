@@ -21,7 +21,8 @@ http:
         # For Docker dev, this is hardcoded. For Kubernetes, use the Helm chart's
         # global.allowedOrigins value which is passed to each service's ALLOWED_ORIGINS env var.
         accessControlAllowOriginList:
-          - "http://localhost:18080"
+          - "http://localhost"
+          - "https://localhost"
         accessControlAllowMethods:
           - "GET"
           - "POST"
@@ -49,172 +50,195 @@ http:
     # Auth endpoints (login, refresh) — must be public
     auth-public:
       rule: "PathPrefix(`/api/v1/auth/login`) || PathPrefix(`/api/v1/auth/refresh`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: auth
       middlewares: [cors-headers, security-headers]
       priority: 100
+      tls: {}
 
     # C2 shell WebSocket — auth handled by c2-gateway via query param token
     c2-shell:
       rule: "PathRegexp(`/api/v1/c2/sessions/.+/shell`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: c2
       middlewares: [cors-headers, security-headers]
       priority: 90
+      tls: {}
 
     # C2 VNC WebSocket — auth handled by c2-gateway via query param token
     c2-vnc:
       rule: "PathPrefix(`/api/v1/c2/vnc`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: c2
       middlewares: [cors-headers, security-headers]
       priority: 90
+      tls: {}
 
     # Jira inbound webhook — auth via shared secret, not ForwardAuth
     jira-webhook:
       rule: "Path(`/api/v1/notifications/jira/webhook`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: notification
       middlewares: [cors-headers, security-headers]
       priority: 90
+      tls: {}
 
     # Frontend SPA — public
     frontend:
       rule: "PathPrefix(`/`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: frontend
       middlewares: [security-headers]
       priority: 1
+      tls: {}
 
   # ════════════════════════════════════════════
   #  ROUTERS — PROTECTED (auth-verify middleware)
   # ════════════════════════════════════════════
     auth:
       rule: "PathPrefix(`/api/v1/auth`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: auth
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     workflow:
       rule: "PathPrefix(`/api/v1/workflows`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: workflow
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     ticket:
       rule: "PathPrefix(`/api/v1/tickets`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: ticket
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     commands:
       rule: "PathPrefix(`/api/v1/commands`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: ticket
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     dashboard-api:
       rule: "PathPrefix(`/api/v1/dashboards`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: dashboard-api
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     c2:
       rule: "PathPrefix(`/api/v1/c2`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: c2
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     audit:
       rule: "PathPrefix(`/api/v1/audit`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: audit
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     notification:
       rule: "PathPrefix(`/api/v1/notifications`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: notification
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     workflow-runs:
       rule: "PathPrefix(`/api/v1/workflow-runs`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: workflow
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     operations:
       rule: "PathPrefix(`/api/v1/operations`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: workflow
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     networks:
       rule: "PathPrefix(`/api/v1/networks`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: endpoint
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     nodes:
       rule: "PathPrefix(`/api/v1/nodes`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: endpoint
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     edges:
       rule: "PathPrefix(`/api/v1/edges`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: endpoint
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     display-schemas:
       rule: "PathPrefix(`/api/v1/display-schemas`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: endpoint
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     import-parsers:
       rule: "PathPrefix(`/api/v1/import-parsers`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: endpoint
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     findings:
       rule: "PathPrefix(`/api/v1/findings`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: ticket
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     endpoint:
       rule: "PathPrefix(`/api/v1/endpoints`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: endpoint
       middlewares: [auth-verify, cors-headers, security-headers]
       priority: 50
+      tls: {}
 
     # WebSocket relay — auth handled by ws-relay via handshake token
     ws:
       rule: "PathPrefix(`/ws`)"
-      entryPoints: [web]
+      entryPoints: [web, websecure]
       service: ws
       middlewares: [cors-headers, security-headers]
       priority: 80
+      tls: {}
 
   # ════════════════════════════════════════════
   #  SERVICES (backend targets)

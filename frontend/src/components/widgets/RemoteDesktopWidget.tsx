@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { Monitor, Settings, Wifi, WifiOff, Maximize2, Camera } from 'lucide-react'
-import RFB from '@novnc/novnc/core/rfb'
+import RFB from '@novnc/novnc/lib/rfb'
 import { getAccessToken } from '../../lib/api'
 import { useWidgetEventBus } from '../../stores/widgetEventBus'
 import type { WidgetProps } from './WidgetRegistry'
@@ -145,7 +145,7 @@ export default function RemoteDesktopWidget({ id, config, onConfigChange }: Widg
   useEffect(() => () => disconnect(), [disconnect])
 
   const saveSettings = () => {
-    onConfigChange?.({ ...config, host, port, password })
+    onConfigChange?.({ ...config, host, port })
     setShowSettings(false)
   }
 

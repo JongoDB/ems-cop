@@ -3,5 +3,6 @@ WORKDIR /app
 COPY package*.json ./
 RUN npm ci --production 2>/dev/null || npm install --production
 COPY . .
-EXPOSE 3000
+EXPOSE 3003
+USER node
 CMD ["node", "src/index.js"]

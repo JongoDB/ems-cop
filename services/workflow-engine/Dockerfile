@@ -7,6 +7,8 @@ RUN CGO_ENABLED=0 GOOS=linux go build -o /service .
 
 FROM alpine:3.19
 RUN apk add --no-cache ca-certificates
+RUN adduser -D -u 1001 appuser
 COPY --from=builder /service /usr/local/bin/service
 EXPOSE 3002
+USER appuser
 CMD ["service"]

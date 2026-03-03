@@ -130,7 +130,7 @@ describe('InlineText', () => {
 
     await user.click(screen.getByText('Same'));
 
-    const input = screen.getByDisplayValue('Same');
+    screen.getByDisplayValue('Same');
     await user.keyboard('{Enter}');
 
     expect(mockOnSave).not.toHaveBeenCalled();

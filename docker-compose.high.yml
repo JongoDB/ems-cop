@@ -101,7 +101,10 @@ services:
       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
     volumes:
       - clickhouse-high-data:/var/lib/clickhouse
-      - ./infra/db/clickhouse/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./infra/db/clickhouse/init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+      - ./infra/db/clickhouse/002_classification.sql:/docker-entrypoint-initdb.d/002_classification.sql:ro
+      - ./infra/db/clickhouse/003_cti_provenance.sql:/docker-entrypoint-initdb.d/003_cti_provenance.sql:ro
+      - ./infra/db/clickhouse/004_consolidated_audit.sql:/docker-entrypoint-initdb.d/004_consolidated_audit.sql:ro
     ports:
       - "${CH_HTTP_PORT:-28123}:8123"
       - "${CH_NATIVE_PORT:-29000}:9000"

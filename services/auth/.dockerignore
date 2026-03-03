@@ -1,0 +1,7 @@
+.env
+*.test.go
+*_test.go
+**/*_test.go
+README.md
+.git
+.gitignore
