@@ -23,6 +23,7 @@ vi.mock('lucide-react', () => ({
   ChevronRight: () => <svg data-testid="chevron-right" />,
   Plus: () => <svg data-testid="plus" />,
   Clock: () => <svg data-testid="clock" />,
+  AlertTriangle: () => <svg data-testid="alert-triangle" />,
 }));
 
 function renderPage() {
@@ -136,7 +137,7 @@ describe('IncidentsPage', () => {
     });
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText('No incidents found')).toBeInTheDocument();
+      expect(screen.getByText('NO INCIDENTS')).toBeInTheDocument();
     });
   });
 });

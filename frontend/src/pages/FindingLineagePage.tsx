@@ -7,6 +7,7 @@ import {
   Search, ArrowRight, FileSearch, Plus, Eye,
 } from 'lucide-react'
 import ClassificationBadge from '../components/ClassificationBadge'
+import EmptyState, { TableSkeleton } from '../components/EmptyState'
 
 // ════════════════════════════════════════════
 //  TYPES
@@ -190,9 +191,17 @@ function FindingLineageList() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={7} className="table-empty">Loading...</td></tr>
+              <TableSkeleton rows={6} cols={7} />
             ) : findings.length === 0 ? (
-              <tr><td colSpan={7} className="table-empty">No findings with lineage found</td></tr>
+              <tr>
+                <td colSpan={7} className="table-empty" style={{ padding: 0 }}>
+                  <EmptyState
+                    icon={FileSearch}
+                    title="NO FINDINGS WITH LINEAGE"
+                    description="Findings transferred from another enclave or escalated through a workflow show their lineage here. None match the current filter."
+                  />
+                </td>
+              </tr>
             ) : (
               findings.map((f) => (
                 <tr key={f.id} className="ticket-row" onClick={() => navigate(`/findings/${f.id}/lineage`)}>

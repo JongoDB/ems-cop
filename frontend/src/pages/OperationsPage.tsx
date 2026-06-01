@@ -1,10 +1,11 @@
 import { useState, useCallback, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { apiFetch } from '../lib/api'
-import { Plus, Search, ChevronLeft, ChevronRight, X } from 'lucide-react'
+import { Plus, Search, ChevronLeft, ChevronRight, X, Crosshair } from 'lucide-react'
 import ClassificationBadge from '../components/ClassificationBadge'
 import ClassificationFilter from '../components/ClassificationFilter'
 import ClassificationSelect from '../components/ClassificationSelect'
+import EmptyState, { TableSkeleton } from '../components/EmptyState'
 import type { Classification } from '../components/ClassificationBadge'
 
 interface OperationRecord {
@@ -188,9 +189,23 @@ export default function OperationsPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={8} className="table-empty">Loading...</td></tr>
+              <TableSkeleton rows={6} cols={8} />
             ) : operations.length === 0 ? (
-              <tr><td colSpan={8} className="table-empty">No operations found</td></tr>
+              <tr>
+                <td colSpan={8} className="table-empty" style={{ padding: 0 }}>
+                  <EmptyState
+                    icon={Crosshair}
+                    title="NO OPERATIONS YET"
+                    description="Operations group offensive and defensive activity into auditable, approval-gated campaigns. Spin one up to start tracking findings, networks, and C2 sessions."
+                    action={
+                      <button onClick={() => setShowCreate(true)} className="create-btn">
+                        <Plus size={14} />
+                        NEW OPERATION
+                      </button>
+                    }
+                  />
+                </td>
+              </tr>
             ) : (
               operations.map((op) => (
                 <tr

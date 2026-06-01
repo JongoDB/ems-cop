@@ -5,8 +5,9 @@ import MitreBadge from '../components/MitreBadge'
 import AlertFeed from '../components/AlertFeed'
 import {
   Search, ChevronLeft, ChevronRight,
-  ChevronDown, ChevronUp, CheckSquare, AlertTriangle,
+  ChevronDown, ChevronUp, CheckSquare, AlertTriangle, Bell,
 } from 'lucide-react'
+import EmptyState, { TableSkeleton } from '../components/EmptyState'
 
 interface AlertRecord {
   id: string
@@ -302,9 +303,17 @@ export default function AlertsPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={8} className="table-empty">Loading...</td></tr>
+              <TableSkeleton rows={6} cols={8} />
             ) : alerts.length === 0 ? (
-              <tr><td colSpan={8} className="table-empty">No alerts found</td></tr>
+              <tr>
+                <td colSpan={8} className="table-empty" style={{ padding: 0 }}>
+                  <EmptyState
+                    icon={Bell}
+                    title="NO ALERTS"
+                    description="When detection sources fire, alerts land here for triage. Adjust filters above if you expected results — otherwise this is a quiet day."
+                  />
+                </td>
+              </tr>
             ) : (
               alerts.map((alert) => (
                 <tr key={alert.id} className="ticket-row">

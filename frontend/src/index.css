@@ -2665,3 +2665,31 @@ select.filter-select {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
+
+/* ═══════════════════════════════════════════
+   SKELETON LOADERS
+   ═══════════════════════════════════════════ */
+@keyframes skelPulse {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 0.95; }
+}
+
+.skel-bar {
+  display: inline-block;
+  height: 10px;
+  width: 60%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, var(--color-bg-surface) 0%, var(--color-bg-hover) 50%, var(--color-bg-surface) 100%);
+  background-size: 200% 100%;
+  animation: skelPulse 1.4s ease-in-out infinite;
+}
+
+.skel-block {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: var(--radius);
+  background: linear-gradient(90deg, var(--color-bg-surface) 0%, var(--color-bg-hover) 50%, var(--color-bg-surface) 100%);
+  background-size: 200% 100%;
+  animation: skelPulse 1.4s ease-in-out infinite;
+}

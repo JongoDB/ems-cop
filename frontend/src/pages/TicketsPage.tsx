@@ -8,11 +8,12 @@ import WorkflowRunViewer from '../components/workflow/WorkflowRunViewer'
 import type { WorkflowRun, Workflow } from '../types/workflow'
 import {
   Plus, Search, ChevronLeft, ChevronRight,
-  X, MessageSquare, ArrowRight, ExternalLink, RefreshCw,
+  X, MessageSquare, ArrowRight, ExternalLink, RefreshCw, Ticket,
 } from 'lucide-react'
 import ClassificationBadge from '../components/ClassificationBadge'
 import ClassificationFilter from '../components/ClassificationFilter'
 import ClassificationSelect from '../components/ClassificationSelect'
+import EmptyState, { TableSkeleton } from '../components/EmptyState'
 import type { Classification } from '../components/ClassificationBadge'
 
 interface TicketRecord {
@@ -337,9 +338,23 @@ export default function TicketsPage() {
               </thead>
               <tbody>
                 {loading ? (
-                  <tr><td colSpan={8} className="table-empty">Loading...</td></tr>
+                  <TableSkeleton rows={6} cols={8} />
                 ) : tickets.length === 0 ? (
-                  <tr><td colSpan={8} className="table-empty">No tickets found</td></tr>
+                  <tr>
+                    <td colSpan={8} className="table-empty" style={{ padding: 0 }}>
+                      <EmptyState
+                        icon={Ticket}
+                        title="NO TICKETS YET"
+                        description="Tickets are the unit of approval and assignment in EMS-COP. Open one to request action, kick off a workflow, or escalate a finding."
+                        action={
+                          <button onClick={() => { setShowCreate(true); setSelectedTicket(null) }} className="create-btn">
+                            <Plus size={14} />
+                            NEW TICKET
+                          </button>
+                        }
+                      />
+                    </td>
+                  </tr>
                 ) : (
                   tickets.map((t) => (
                     <tr key={t.id} onClick={() => openDetail(t)} className="ticket-row">

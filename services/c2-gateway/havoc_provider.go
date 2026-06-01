@@ -646,3 +646,25 @@ func (p *HavocProvider) SubscribeTelemetry(_ context.Context, _ *TelemetryFilter
 	// implemented yet. Return an open (but empty) channel.
 	return ch, nil
 }
+
+// ────────────────────────────────────────────
+// Tunnels — not yet implemented for Havoc
+// ────────────────────────────────────────────
+
+func (p *HavocProvider) ListTunnels(_ context.Context, _ TunnelFilter) ([]Tunnel, error) {
+	return []Tunnel{}, nil
+}
+
+func (p *HavocProvider) CreateTunnel(_ context.Context, _ TunnelSpec) (Tunnel, error) {
+	return Tunnel{}, fmt.Errorf("tunnels not yet implemented for havoc")
+}
+
+func (p *HavocProvider) DeleteTunnel(_ context.Context, _ string) error {
+	return fmt.Errorf("tunnels not yet implemented for havoc")
+}
+
+func (p *HavocProvider) SubscribeTunnels(_ context.Context, _ TunnelFilter) (<-chan TunnelEvent, error) {
+	ch := make(chan TunnelEvent)
+	close(ch)
+	return ch, nil
+}

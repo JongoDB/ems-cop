@@ -13,6 +13,16 @@ build/
 *.dll
 *.so
 *.dylib
+*.tsbuildinfo
+frontend/vite.config.d.ts
+
+# Compiled Go service binaries (built inside Docker; never committed)
+services/audit/audit
+services/auth/auth
+services/c2-gateway/c2-gateway
+services/cti-relay/cti-relay
+services/endpoint/endpoint
+services/workflow-engine/workflow-engine
 
 # IDE
 .idea/

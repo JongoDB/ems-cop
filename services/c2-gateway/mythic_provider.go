@@ -908,3 +908,25 @@ func (p *MythicProvider) SubscribeTelemetry(_ context.Context, _ *TelemetryFilte
 	// implemented yet. Return an open (but empty) channel.
 	return ch, nil
 }
+
+// ────────────────────────────────────────────
+// Tunnels — not yet implemented for Mythic
+// ────────────────────────────────────────────
+
+func (p *MythicProvider) ListTunnels(_ context.Context, _ TunnelFilter) ([]Tunnel, error) {
+	return []Tunnel{}, nil
+}
+
+func (p *MythicProvider) CreateTunnel(_ context.Context, _ TunnelSpec) (Tunnel, error) {
+	return Tunnel{}, fmt.Errorf("tunnels not yet implemented for mythic")
+}
+
+func (p *MythicProvider) DeleteTunnel(_ context.Context, _ string) error {
+	return fmt.Errorf("tunnels not yet implemented for mythic")
+}
+
+func (p *MythicProvider) SubscribeTunnels(_ context.Context, _ TunnelFilter) (<-chan TunnelEvent, error) {
+	ch := make(chan TunnelEvent)
+	close(ch)
+	return ch, nil
+}
