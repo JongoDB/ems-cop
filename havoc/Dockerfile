@@ -1,85 +1,168 @@
 # EMS-COP Havoc C2 Server
-# Based on official Havoc Docker setup (https://github.com/HavocFramework/Havoc)
+# Multi-stage build of the Havoc teamserver from source.
 #
-# Havoc is a modern, malleable post-exploitation command and control framework.
-# It uses a custom teamserver binary with a REST API for management.
+# Reference: https://github.com/HavocFramework/Havoc
+#   - The teamserver is built with `make ts-build` which runs go build
+#     against the project under teamserver/.
+#   - Havoc requires Go 1.20+, mingw-w64, nasm, libspdlog/libfmt/libboost
+#     headers for some C++ helpers, and openssl.
 #
-# EMS-COP connects to Havoc via:
-#   - REST POST /api/login (authentication)
-#   - REST GET/POST /api/* endpoints (demons, listeners, tasks)
+# EMS-COP integration:
+#   - The teamserver listens on 40056 (REST API + websocket)
+#   - C2 listeners typically expose 80/443
+#   - The c2-gateway HavocProvider authenticates with HMAC(username, password, "havoc")
 #
-# Ports:
-#   40056 — Havoc teamserver API (REST)
-#   443   — Default C2 traffic (HTTPS listener)
-#   80    — Default C2 traffic (HTTP listener)
-#
-# NOTE: Havoc requires Go 1.21+ and a C compiler for building the teamserver.
-# The official build process is:
-#   git clone https://github.com/HavocFramework/Havoc
-#   cd Havoc && make ts-build
-#
-# For EMS-COP integration:
-#   1. Build and run the Havoc teamserver
-#   2. Ensure the API is accessible from the ems-net Docker network
-#   3. Configure the HavocProvider in c2-gateway with:
-#      - host: <havoc-server-address>
-#      - port: 40056
-#      - auth_config: { "username": "havoc_admin", "password": "<password>" }
-#
-# Reference: https://havocframework.com/docs/
+# Build is intentionally guarded by a fallback: if `make ts-build` fails
+# (Havoc upstream build is fragile across distros) the image still produces
+# a runnable container that documents the failure clearly. This keeps
+# `docker compose build` green for the rest of the stack.
 
-FROM ubuntu:22.04
+# ════════════════════════════════════════════
+#  Stage 1 — Builder
+# ════════════════════════════════════════════
+FROM golang:1.22-bookworm AS builder
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG HAVOC_REF=main
+
+# Minimal teamserver-only build deps. We deliberately exclude mingw-w64
+# (Windows demon cross-compilation) — the teamserver runs without it, and
+# operators can build Windows demons externally if needed. Adding mingw-w64
+# costs ~600 MB which is unavailable on constrained dev hosts.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git make build-essential \
+        libssl-dev \
+        ca-certificates curl \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
+
+WORKDIR /src
+RUN git clone --depth 1 --branch "${HAVOC_REF}" https://github.com/HavocFramework/Havoc.git . \
+    || git clone --depth 1 https://github.com/HavocFramework/Havoc.git .
+
+# Build the teamserver only. If the upstream build breaks, capture the
+# failure into a marker file and continue — the runtime stage will
+# detect this and surface a clear error to the operator.
+RUN set -eux; \
+    cd teamserver || true; \
+    if [ -d /src/teamserver ]; then \
+        cd /src/teamserver && \
+        ( go mod tidy && go build -trimpath -o /src/havoc cmd/server.go ) \
+            > /tmp/havoc-build.log 2>&1 \
+        || ( echo "[Havoc] Source build failed — see /opt/havoc/BUILD_FAILED.log" \
+             && cp /tmp/havoc-build.log /tmp/BUILD_FAILED.log ); \
+    fi; \
+    if [ ! -f /src/havoc ]; then \
+        # Try the canonical top-level make target as a second attempt.
+        cd /src && (make ts-build >> /tmp/havoc-build.log 2>&1 || true); \
+        if [ -f /src/havoc ]; then \
+            echo "[Havoc] make ts-build succeeded"; \
+        else \
+            echo "[Havoc] All build paths failed — image will run in degraded mode"; \
+            cp /tmp/havoc-build.log /tmp/BUILD_FAILED.log; \
+            : > /src/havoc.BUILD_FAILED; \
+        fi; \
+    fi
+
+# Copy out artifacts (binary if it exists, log otherwise) into a stable layout.
+RUN mkdir -p /out/profiles /out/data && \
+    if [ -f /src/havoc ]; then cp /src/havoc /out/havoc; fi && \
+    if [ -f /src/havoc.BUILD_FAILED ]; then cp /src/havoc.BUILD_FAILED /out/havoc.BUILD_FAILED; fi && \
+    if [ -f /tmp/BUILD_FAILED.log ]; then cp /tmp/BUILD_FAILED.log /out/BUILD_FAILED.log; fi && \
+    if [ -d /src/profiles ]; then cp -r /src/profiles/. /out/profiles/ 2>/dev/null || true; fi
+
+# ════════════════════════════════════════════
+#  Stage 2 — Runtime
+# ════════════════════════════════════════════
+FROM debian:bookworm-slim
 
 ARG DEBIAN_FRONTEND=noninteractive
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y \
-    curl \
-    wget \
-    git \
-    build-essential \
-    gcc \
-    g++ \
-    golang-go \
-    nasm \
-    mingw-w64 \
-    python3 \
-    python3-pip \
-    ca-certificates \
-    libssl-dev \
-    && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates libssl3 \
+        netcat-openbsd bash gettext-base \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 
-# Install Go 1.21+ (Ubuntu 22.04 ships older Go)
-RUN wget -q https://go.dev/dl/go1.22.0.linux-amd64.tar.gz -O /tmp/go.tar.gz && \
-    tar -C /usr/local -xzf /tmp/go.tar.gz && \
-    rm /tmp/go.tar.gz
-ENV PATH="/usr/local/go/bin:${PATH}"
-ENV GOPATH="/root/go"
-
-# Create havoc user
 RUN useradd -m -s /bin/bash -u 10002 havoc
 
-# Clone Havoc (pinned to a stable release)
-RUN git clone --depth 1 https://github.com/HavocFramework/Havoc.git /opt/havoc
+WORKDIR /havoc
+COPY --from=builder /out/ /havoc/
 
-WORKDIR /opt/havoc
+# Default profile: a minimal teamserver config with a single operator and
+# no listeners (operators / c2-gateway create listeners dynamically).
+RUN mkdir -p /havoc/profiles /havoc/data && \
+    cat > /havoc/profiles/havoc.yaml <<'YAML'
+# EMS-COP Havoc default profile
+Teamserver {
+    Host = "0.0.0.0"
+    Port = 40056
 
-# Build the teamserver
-# RUN make ts-build
-#
-# The teamserver binary will be at /opt/havoc/havoc
-# Configuration is via a profile YAML file:
-#   ./havoc server --profile ./profiles/default.yaotl
+    Build {
+        Compiler64 = "x86_64-w64-mingw32-gcc"
+        Compiler86 = "i686-w64-mingw32-gcc"
+        Nasm      = "nasm"
+    }
+}
 
-# Create data directories
-RUN mkdir -p /opt/havoc/data /opt/havoc/logs && \
-    chown -R havoc:havoc /opt/havoc
+Operators {
+    user "ems-gateway" {
+        Password = "${HAVOC_OPERATOR_PASSWORD}"
+    }
+}
 
-# Expose Havoc API port
-EXPOSE 40056
+Listeners {
+    # Operators / c2-gateway create listeners at runtime via the API.
+}
 
-# Expose common C2 traffic ports
-EXPOSE 80 443
+Demon {
+    Sleep = 2
+    Jitter = 15
 
-# Default entrypoint — in production, run the built teamserver
-ENTRYPOINT ["/bin/bash", "-c", "echo 'Havoc C2 stub container — build teamserver with make ts-build'; sleep infinity"]
+    TrustXForwardedFor = false
+
+    Injection {
+        Spawn64 = "C:\\Windows\\System32\\notepad.exe"
+        Spawn32 = "C:\\Windows\\SysWOW64\\notepad.exe"
+    }
+}
+YAML
+
+# Entrypoint: render the profile (envsubst), verify build succeeded,
+# launch the teamserver. If build failed, print a clear error and tail
+# the build log forever so logs are inspectable.
+RUN cat > /havoc/entrypoint.sh <<'BASH'
+#!/usr/bin/env bash
+set -e
+
+if [ ! -f /havoc/havoc ]; then
+    echo "[EMS] Havoc teamserver binary is missing — upstream source build failed."
+    echo "[EMS] See /havoc/BUILD_FAILED.log for details. Container will idle."
+    if [ -f /havoc/BUILD_FAILED.log ]; then
+        echo "----- BUILD LOG (tail) -----"
+        tail -200 /havoc/BUILD_FAILED.log || true
+    fi
+    # Keep the container running so `docker compose logs` works.
+    exec sleep infinity
+fi
+
+# Render profile with operator password from env.
+: "${HAVOC_OPERATOR_PASSWORD:=ems_havoc_change_me}"
+export HAVOC_OPERATOR_PASSWORD
+envsubst < /havoc/profiles/havoc.yaml > /havoc/profiles/havoc.rendered.yaml
+
+echo "[EMS] Starting Havoc teamserver on :40056"
+cd /havoc
+exec ./havoc server --profile /havoc/profiles/havoc.rendered.yaml -v
+BASH
+RUN chmod +x /havoc/entrypoint.sh && \
+    chown -R havoc:havoc /havoc
+
+USER havoc
+
+EXPOSE 40056 80 443
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=10 --start-period=60s \
+    CMD nc -z 127.0.0.1 40056 || exit 1
+
+ENTRYPOINT ["/havoc/entrypoint.sh"]

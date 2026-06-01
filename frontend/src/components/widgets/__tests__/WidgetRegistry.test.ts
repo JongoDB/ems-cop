@@ -21,8 +21,8 @@ afterEach(() => {
 
 describe('WidgetRegistry', () => {
   describe('widget registration', () => {
-    it('has all 18 default widgets registered', () => {
-      expect(widgetRegistry.size).toBe(18);
+    it('has all 19 default widgets registered', () => {
+      expect(widgetRegistry.size).toBe(19);
     });
 
     it('contains expected widget types', () => {

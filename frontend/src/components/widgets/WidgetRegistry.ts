@@ -54,6 +54,7 @@ const AlertStats = lazy(() => import('./AlertStatsWidget'));
 const IncidentTimeline = lazy(() => import('./IncidentTimelineWidget'));
 const IOCHits = lazy(() => import('./IOCHitsWidget'));
 const MitreHeatmap = lazy(() => import('./MitreHeatmapWidget'));
+const TunnelTopology = lazy(() => import('./TunnelTopologyWidget'));
 
 // ════════════════════════════════════════════
 //  WIDGET REGISTRY
@@ -256,6 +257,17 @@ export const widgetRegistry: Map<string, WidgetDefinition> = new Map([
     defaultSize: { w: 8, h: 4 },
     minSize: { w: 6, h: 3 },
     component: MitreHeatmap as ComponentType<WidgetProps>,
+  }],
+
+  ['tunnel_topology', {
+    type: 'tunnel_topology',
+    name: 'Tunnel Topology',
+    description: 'Live graph of C2 implants and tunnels (port-fwds, SOCKS5, pivot relays)',
+    icon: 'Network',
+    category: 'c2',
+    defaultSize: { w: 8, h: 6 },
+    minSize: { w: 4, h: 4 },
+    component: TunnelTopology as ComponentType<WidgetProps>,
   }],
 ]);
 

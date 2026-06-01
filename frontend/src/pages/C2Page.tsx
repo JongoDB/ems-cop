@@ -4,11 +4,12 @@ import { apiFetch } from '../lib/api'
 import {
   Terminal, RefreshCw, Wifi, WifiOff,
   Plus, Lock, Pencil, Trash2, X, Server,
-  ArrowRightLeft,
+  ArrowRightLeft, Cpu,
 } from 'lucide-react'
 import TerminalPanel from '../components/TerminalPanel'
 import C2ProviderSelect, { useC2Providers } from '../components/C2ProviderSelect'
 import CrossDomainCommandPanel from '../components/CrossDomainCommandPanel'
+import GenerateImplantModal from '../components/c2/GenerateImplantModal'
 import { useEnclaveStore } from '../stores/enclaveStore'
 
 interface C2Session {
@@ -101,6 +102,9 @@ export default function C2Page() {
   // Context menu
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; preset: CommandPreset } | null>(null)
   const contextMenuRef = useRef<HTMLDivElement>(null)
+
+  // Generate Implant modal
+  const [showGenerate, setShowGenerate] = useState(false)
 
   const isAdmin = roles.includes('admin')
 
@@ -252,6 +256,14 @@ export default function C2Page() {
                 {aliveSessions} / {sessions.length} alive
               </span>
               <button
+                onClick={() => setShowGenerate(true)}
+                className="c2-refresh-btn"
+                title="Generate a new implant binary"
+                aria-label="Generate implant"
+              >
+                <Cpu size={12} />
+              </button>
+              <button
                 onClick={fetchSessions}
                 className="c2-refresh-btn"
                 title="Refresh sessions"
@@ -302,9 +314,21 @@ export default function C2Page() {
 
           <div className="c2-session-list">
             {loading ? (
-              <div className="c2-session-empty">Loading sessions...</div>
+              <div className="c2-session-empty">
+                <div className="skel-bar" style={{ width: '70%', marginBottom: 8 }} />
+                <div className="skel-bar" style={{ width: '50%', marginBottom: 8 }} />
+                <div className="skel-bar" style={{ width: '60%' }} />
+              </div>
             ) : sessions.length === 0 ? (
-              <div className="c2-session-empty">No sessions found</div>
+              <div className="c2-session-empty" style={{ padding: '24px 12px', textAlign: 'center' }}>
+                <Terminal size={28} strokeWidth={1.25} style={{ color: 'var(--color-border-strong)', marginBottom: 8 }} />
+                <div style={{ fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: 1, color: 'var(--color-text-bright)', marginBottom: 6 }}>
+                  NO SESSIONS
+                </div>
+                <div style={{ fontFamily: 'var(--font-body)', fontSize: 11, color: 'var(--color-text-muted)', lineHeight: 1.5 }}>
+                  Implants will appear here when they call back. Generate one from an operation's C2 tab.
+                </div>
+              </div>
             ) : (
               sessions.map((session) => (
                 <button
@@ -487,6 +511,13 @@ export default function C2Page() {
           </button>
         </div>
       )}
+
+      {/* Generate Implant Modal */}
+      <GenerateImplantModal
+        open={showGenerate}
+        onClose={() => setShowGenerate(false)}
+        defaultProvider={selectedProvider ?? undefined}
+      />
 
       {/* Add/Edit Preset Modal */}
       {showPresetModal && (

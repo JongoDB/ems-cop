@@ -1,0 +1,91 @@
+# EMS-COP Mythic C2 Sidecar
+#
+# Run with:
+#   docker compose -f docker-compose.yml -f docker-compose.mythic.yml up -d
+#
+# Mythic ships its own multi-container stack orchestrated by `mythic-cli`.
+# We don't try to embed that stack inside the main compose file because:
+#   1. mythic-cli writes to its own checkout (relative paths into ./Mythic/),
+#   2. the bootstrap installs Docker images on the host's daemon directly,
+#   3. the official upstream is updated frequently and pinning fights the tool.
+#
+# Instead, this file provides a *bootstrap* container that clones the
+# upstream Mythic repo into a named volume and lets the operator drive
+# `mythic-cli` from there. For most deployments the recommended path is to
+# run scripts/start-mythic.sh on the host (see that script for details).
+#
+# This sidecar keeps everything inside Docker for environments where the
+# host can't run mythic-cli directly.
+
+services:
+
+  mythic-bootstrap:
+    image: alpine/git:latest
+    container_name: ems-mythic-bootstrap
+    user: "0:0"
+    volumes:
+      - mythic-src:/mythic
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ ! -d /mythic/.git ]; then
+            echo "[EMS] Cloning Mythic upstream into /mythic"
+            git clone --depth 1 https://github.com/its-a-feature/Mythic.git /mythic
+        else
+            echo "[EMS] Mythic checkout already present, fetching latest"
+            git -C /mythic fetch --depth 1 origin
+        fi
+        chmod -R a+rwX /mythic
+        echo "[EMS] Mythic source ready at /mythic"
+    restart: "no"
+
+  # mythic-server runs mythic-cli inside Docker. It needs the host docker
+  # socket because mythic-cli starts additional containers on the host's
+  # daemon. This is intentional and only suitable for trusted environments.
+  mythic-server:
+    image: docker:25-cli
+    container_name: ems-mythic
+    depends_on:
+      mythic-bootstrap:
+        condition: service_completed_successfully
+    environment:
+      MYTHIC_ADMIN_USER: ${MYTHIC_USERNAME:-mythic_admin}
+      MYTHIC_ADMIN_PASSWORD: ${MYTHIC_PASSWORD:-mythic_admin_change_me}
+      MYTHIC_SERVER_HOST: ${MYTHIC_HOST:-mythic-server}
+      MYTHIC_SERVER_PORT: "${MYTHIC_PORT:-7443}"
+    working_dir: /mythic
+    volumes:
+      - mythic-src:/mythic
+      - /var/run/docker.sock:/var/run/docker.sock
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        cd /mythic
+        if [ ! -x ./mythic-cli ]; then
+            echo "[EMS] Building mythic-cli"
+            apk add --no-cache go make >/dev/null 2>&1 || true
+            (cd Mythic_CLI/src && go build -o ../../mythic-cli .) || \
+                make mythic-cli
+        fi
+        ./mythic-cli config set admin_user "$$MYTHIC_ADMIN_USER" || true
+        ./mythic-cli config set admin_password "$$MYTHIC_ADMIN_PASSWORD" || true
+        ./mythic-cli config set server_bind_port "$$MYTHIC_SERVER_PORT" || true
+        echo "[EMS] Starting Mythic via mythic-cli"
+        exec ./mythic-cli start
+    ports:
+      - "${MYTHIC_PORT:-7443}:7443"
+    networks:
+      - ems-net
+    restart: unless-stopped
+
+networks:
+  ems-net:
+    external: true
+    name: ems-net
+
+volumes:
+  mythic-src:

@@ -104,6 +104,26 @@ func (m *MockC2Provider) SubscribeTelemetry(ctx context.Context, filter *Telemet
 	return ch, nil
 }
 
+// Tunnel methods — empty defaults for tests; override via fakeTunnelProvider in
+// tunnels_test.go where richer behavior is needed.
+func (m *MockC2Provider) ListTunnels(ctx context.Context, filter TunnelFilter) ([]Tunnel, error) {
+	return []Tunnel{}, nil
+}
+func (m *MockC2Provider) CreateTunnel(ctx context.Context, spec TunnelSpec) (Tunnel, error) {
+	return Tunnel{
+		Provider:     m.name,
+		Type:         spec.Type,
+		SrcSessionID: spec.SrcSessionID,
+		Status:       "pending",
+	}, nil
+}
+func (m *MockC2Provider) DeleteTunnel(ctx context.Context, tunnelID string) error { return nil }
+func (m *MockC2Provider) SubscribeTunnels(ctx context.Context, filter TunnelFilter) (<-chan TunnelEvent, error) {
+	ch := make(chan TunnelEvent)
+	close(ch)
+	return ch, nil
+}
+
 // Compile-time check: MockC2Provider must implement C2Provider.
 var _ C2Provider = (*MockC2Provider)(nil)
 

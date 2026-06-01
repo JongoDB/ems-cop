@@ -8,6 +8,7 @@ import {
   Search, ChevronLeft, ChevronRight, Plus, X,
   Upload, ToggleLeft, ToggleRight,
 } from 'lucide-react'
+import EmptyState, { TableSkeleton } from '../components/EmptyState'
 
 interface IOCRecord {
   id: string
@@ -270,9 +271,23 @@ export default function IOCsPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={9} className="table-empty">Loading...</td></tr>
+              <TableSkeleton rows={6} cols={9} />
             ) : iocs.length === 0 ? (
-              <tr><td colSpan={9} className="table-empty">No IOCs found</td></tr>
+              <tr>
+                <td colSpan={9} className="table-empty" style={{ padding: 0 }}>
+                  <EmptyState
+                    icon={Search}
+                    title="NO IOCs"
+                    description="Indicators of compromise — IPs, domains, hashes, URLs — feed your detection pipeline. Add one manually or import a CSV to get started."
+                    action={
+                      <button onClick={() => setShowCreate(true)} className="create-btn">
+                        <Plus size={14} />
+                        ADD IOC
+                      </button>
+                    }
+                  />
+                </td>
+              </tr>
             ) : (
               iocs.map((ioc) => (
                 <tr key={ioc.id} className="ticket-row">

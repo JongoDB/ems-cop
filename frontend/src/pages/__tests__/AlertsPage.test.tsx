@@ -23,6 +23,7 @@ vi.mock('lucide-react', () => ({
   ChevronUp: () => <svg data-testid="chevron-up" />,
   CheckSquare: () => <svg data-testid="check-square" />,
   AlertTriangle: () => <svg data-testid="alert-triangle" />,
+  Bell: () => <svg data-testid="bell-icon" />,
 }));
 
 // Mock AlertFeed to avoid duplicate content
@@ -87,8 +88,9 @@ describe('AlertsPage', () => {
 
   it('shows loading state initially', () => {
     mockApiFetch.mockReturnValue(new Promise(() => {})); // never resolves
-    renderPage();
-    expect(screen.getByText('Loading...')).toBeInTheDocument();
+    const { container } = renderPage();
+    // Skeleton rows render shimmer bars instead of plain "Loading..." text.
+    expect(container.querySelectorAll('.skel-bar').length).toBeGreaterThan(0);
   });
 
   it('renders table headers', async () => {
@@ -114,7 +116,7 @@ describe('AlertsPage', () => {
     mockApiFetch.mockResolvedValue({ data: [], pagination: { total: 0 } });
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText('No alerts found')).toBeInTheDocument();
+      expect(screen.getByText('NO ALERTS')).toBeInTheDocument();
     });
   });
 });

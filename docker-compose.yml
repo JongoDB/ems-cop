@@ -44,6 +44,8 @@ volumes:
   nats-data:
   sliver-config:
   sliver-builds:
+  havoc-data:
+  merlin-data:
 
 services:
 
@@ -102,6 +104,7 @@ services:
       - ./infra/db/clickhouse/003_cti_provenance.sql:/docker-entrypoint-initdb.d/003_cti_provenance.sql:ro
       - ./infra/db/clickhouse/004_consolidated_audit.sql:/docker-entrypoint-initdb.d/004_consolidated_audit.sql:ro
       - ./infra/db/clickhouse/005_dco_events.sql:/docker-entrypoint-initdb.d/005_dco_events.sql:ro
+      - ./infra/db/clickhouse/007_c2_tunnel_throughput.sql:/docker-entrypoint-initdb.d/007_c2_tunnel_throughput.sql:ro
     ports:
       - "${CH_HTTP_PORT:-18123}:8123"  # HTTP interface (dev only)
       - "${CH_NATIVE_PORT:-19000}:9000"  # Native protocol
@@ -297,6 +300,20 @@ services:
       SLIVER_GRPC_HOST: sliver-server
       SLIVER_GRPC_PORT: "31337"
       SLIVER_OPERATOR_CONFIG: /home/sliver/.sliver/configs/ems-operator.cfg
+      HAVOC_ENABLED: "${HAVOC_ENABLED:-false}"
+      HAVOC_HOST: havoc-server
+      HAVOC_PORT: "40056"
+      HAVOC_USERNAME: ems-gateway
+      HAVOC_PASSWORD: ${HAVOC_OPERATOR_PASSWORD:-ems_havoc_change_me}
+      MERLIN_ENABLED: "${MERLIN_ENABLED:-false}"
+      MERLIN_HOST: merlin-server
+      MERLIN_PORT: "50051"
+      MERLIN_PSK: ${MERLIN_PSK:-ems_merlin_change_me}
+      MYTHIC_ENABLED: "${MYTHIC_ENABLED:-false}"
+      MYTHIC_HOST: ${MYTHIC_HOST:-mythic-server}
+      MYTHIC_PORT: ${MYTHIC_PORT:-7443}
+      MYTHIC_USERNAME: ${MYTHIC_USERNAME:-mythic_admin}
+      MYTHIC_PASSWORD: ${MYTHIC_PASSWORD:-}
     volumes:
       - sliver-config:/home/sliver/.sliver:ro
     depends_on:
@@ -304,6 +321,11 @@ services:
         condition: service_healthy
       sliver-server:
         condition: service_started
+      # merlin-server and havoc-server are profile-gated (opt-in) due to disk
+      # cost of upstream source builds. Enable via:
+      #   docker compose --profile merlin up -d
+      #   docker compose --profile havoc up -d
+      # When enabled, c2-gateway resolves them via DNS at runtime.
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:3005/health || exit 1"]
       interval: 10s
@@ -479,6 +501,49 @@ services:
         ipv4_address: 10.100.0.100
       endpoint-net:
         ipv4_address: 10.101.0.100
+    restart: unless-stopped
+
+  havoc-server:
+    # Opt-in. The Havoc upstream build pulls a large dep tree (mingw-w64 etc.)
+    # and is heavy on disk. Run with `docker compose --profile havoc up -d`.
+    profiles: ["havoc"]
+    build:
+      context: ./havoc
+      dockerfile: Dockerfile
+    container_name: ems-havoc
+    environment:
+      HAVOC_OPERATOR_PASSWORD: ${HAVOC_OPERATOR_PASSWORD:-ems_havoc_change_me}
+    volumes:
+      - havoc-data:/havoc/data
+    ports:
+      - "${HAVOC_API_PORT:-40056}:40056"
+    networks:
+      ems-net:
+        ipv4_address: 10.100.0.101
+      endpoint-net:
+        ipv4_address: 10.101.0.101
+    restart: unless-stopped
+
+  merlin-server:
+    # Opt-in. Building Merlin from source needs ~500 MB free disk for the Go
+    # module / build cache. Run with `docker compose --profile merlin up -d`.
+    profiles: ["merlin"]
+    build:
+      context: ./merlin
+      dockerfile: Dockerfile
+    container_name: ems-merlin
+    environment:
+      MERLIN_PSK: ${MERLIN_PSK:-ems_merlin_change_me}
+    volumes:
+      - merlin-data:/opt/merlin/data
+    ports:
+      - "${MERLIN_C2_PORT:-8443}:8443"
+      - "${MERLIN_API_PORT:-50051}:50051"
+    networks:
+      ems-net:
+        ipv4_address: 10.100.0.102
+      endpoint-net:
+        ipv4_address: 10.101.0.102
     restart: unless-stopped
 
   # ════════════════════════════════════════════

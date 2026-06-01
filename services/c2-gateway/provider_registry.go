@@ -196,7 +196,7 @@ func (r *ProviderRegistry) DisconnectAll() {
 }
 
 // CreateProviderByType is a factory that instantiates the correct provider
-// struct for the given type string ("sliver", "mythic", "havoc").
+// struct for the given type string ("sliver", "mythic", "havoc", "merlin").
 func CreateProviderByType(providerType string, logger *slog.Logger) (C2Provider, error) {
 	switch providerType {
 	case "sliver":
@@ -205,6 +205,8 @@ func CreateProviderByType(providerType string, logger *slog.Logger) (C2Provider,
 		return NewMythicProvider(logger), nil
 	case "havoc":
 		return NewHavocProvider(logger), nil
+	case "merlin":
+		return NewMerlinProvider(logger), nil
 	default:
 		return nil, fmt.Errorf("unknown provider type: %s", providerType)
 	}

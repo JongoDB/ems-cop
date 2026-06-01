@@ -1,6 +1,6 @@
 import { Outlet, Link, useLocation } from 'react-router-dom'
 import { useAuth } from '../hooks/useAuth'
-import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal, ArrowRightLeft, ScrollText, FileSearch, Bell, AlertTriangle, Search } from 'lucide-react'
+import { Shield, LogOut, Crosshair, Ticket, LayoutDashboard, Settings, Terminal, ArrowRightLeft, ScrollText, FileSearch, Bell, AlertTriangle, Search, Network } from 'lucide-react'
 import { APP_VERSION } from '../version'
 import NotificationBell from './NotificationBell'
 import EnclaveBanner from './EnclaveBanner'
@@ -13,6 +13,7 @@ const NAV_ITEMS = [
   { path: '/tickets', label: 'TICKETS', icon: Ticket },
   { path: '/dashboards', label: 'DASHBOARDS', icon: LayoutDashboard },
   { path: '/c2', label: 'C2', icon: Terminal },
+  { path: '/c2/topology', label: 'TOPOLOGY', icon: Network },
 ]
 
 const DCO_ITEMS = [

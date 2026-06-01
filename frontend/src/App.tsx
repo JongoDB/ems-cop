@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import LoginPage from './pages/LoginPage'
 import TicketsPage from './pages/TicketsPage'
 import C2Page from './pages/C2Page'
+import C2TopologyPage from './pages/C2TopologyPage'
 import OperationsPage from './pages/OperationsPage'
 import OperationDetailPage from './pages/OperationDetailPage'
 import DashboardsPage from './pages/DashboardsPage'
@@ -31,14 +32,18 @@ import PlaybookEditorPage from './pages/admin/PlaybookEditorPage'
 import ProtectedRoute from './components/ProtectedRoute'
 import AppLayout from './components/AppLayout'
 import AdminLayout from './components/AdminLayout'
+import ErrorBoundary from './components/ErrorBoundary'
+import CommandPalette from './components/CommandPalette'
 
 const queryClient = new QueryClient()
 
 function App() {
   return (
-    <QueryClientProvider client={queryClient}>
-      <BrowserRouter>
-        <Routes>
+    <ErrorBoundary>
+      <QueryClientProvider client={queryClient}>
+        <BrowserRouter>
+          <CommandPalette />
+          <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route element={<ProtectedRoute><AppLayout /></ProtectedRoute>}>
             <Route path="/operations" element={<OperationsPage />} />
@@ -56,6 +61,7 @@ function App() {
             <Route path="/incidents/:id" element={<IncidentDetailPage />} />
             <Route path="/iocs" element={<IOCsPage />} />
             <Route path="/c2" element={<C2Page />} />
+            <Route path="/c2/topology" element={<C2TopologyPage />} />
             <Route path="/dashboards" element={<DashboardsPage />} />
             <Route path="/dashboards/:id" element={<DashboardsPage />} />
             <Route path="/transfers/approvals" element={<TransferApprovalsPage />} />
@@ -78,8 +84,9 @@ function App() {
           </Route>
           <Route path="*" element={<Navigate to="/operations" replace />} />
         </Routes>
-      </BrowserRouter>
-    </QueryClientProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
+    </ErrorBoundary>
   )
 }
 

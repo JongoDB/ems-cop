@@ -46,6 +46,13 @@ if [ ! -f "$OPERATOR_CONFIG" ]; then
     echo "[EMS] Operator config saved to $OPERATOR_CONFIG"
 fi
 
+# Make operator config world-readable so c2-gateway (different UID) can mount it RO and read it.
+# This is acceptable in a lab/dev container; production should share a secret store instead.
+if [ -f "$OPERATOR_CONFIG" ]; then
+    chmod 0644 "$OPERATOR_CONFIG" || true
+    chmod 0755 "$(dirname "$OPERATOR_CONFIG")" || true
+fi
+
 echo "[EMS] Sliver C2 server is ready."
 echo "[EMS] gRPC listening on :31337"
 

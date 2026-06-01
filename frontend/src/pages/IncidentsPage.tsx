@@ -5,8 +5,9 @@ import SeverityBadge from '../components/SeverityBadge'
 import MitreBadge from '../components/MitreBadge'
 import {
   Search, ChevronLeft, ChevronRight, Plus,
-  Clock,
+  Clock, AlertTriangle,
 } from 'lucide-react'
+import EmptyState, { TableSkeleton } from '../components/EmptyState'
 
 interface IncidentRecord {
   id: string
@@ -283,9 +284,17 @@ export default function IncidentsPage() {
           </thead>
           <tbody>
             {loading ? (
-              <tr><td colSpan={8} className="table-empty">Loading...</td></tr>
+              <TableSkeleton rows={6} cols={8} />
             ) : incidents.length === 0 ? (
-              <tr><td colSpan={8} className="table-empty">No incidents found</td></tr>
+              <tr>
+                <td colSpan={8} className="table-empty" style={{ padding: 0 }}>
+                  <EmptyState
+                    icon={AlertTriangle}
+                    title="NO INCIDENTS"
+                    description="Incidents are escalated alerts that need active response. None are currently open — that's a good thing."
+                  />
+                </td>
+              </tr>
             ) : (
               incidents.map((inc) => (
                 <tr

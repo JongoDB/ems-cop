@@ -68,6 +68,63 @@ type C2Provider interface {
 
 	// Telemetry
 	SubscribeTelemetry(ctx context.Context, filter *TelemetryFilter) (<-chan TelemetryEvent, error)
+
+	// Tunnels (Phase 3 — port-forwards, SOCKS proxies, pivot relays)
+	ListTunnels(ctx context.Context, filter TunnelFilter) ([]Tunnel, error)
+	CreateTunnel(ctx context.Context, spec TunnelSpec) (Tunnel, error)
+	DeleteTunnel(ctx context.Context, tunnelID string) error
+	SubscribeTunnels(ctx context.Context, filter TunnelFilter) (<-chan TunnelEvent, error)
+}
+
+// ════════════════════════════════════════════
+//  TUNNEL TYPES (C2-agnostic)
+// ════════════════════════════════════════════
+
+// Tunnel represents a port-forward, SOCKS proxy, or pivot relay
+// established through a C2 implant.
+type Tunnel struct {
+	ID             string `json:"id"`
+	Provider       string `json:"provider"`
+	Type           string `json:"type"` // portfwd_local | portfwd_remote | socks5 | pivot_relay
+	SrcSessionID   string `json:"src_session_id"`
+	SrcImplantName string `json:"src_implant_name,omitempty"`
+	DstHost        string `json:"dst_host,omitempty"`
+	DstPort        int    `json:"dst_port,omitempty"`
+	ListenHost     string `json:"listen_host,omitempty"`
+	ListenPort     int    `json:"listen_port,omitempty"`
+	Status         string `json:"status"`
+	Classification string `json:"classification,omitempty"`
+}
+
+// TunnelSpec is the request body for creating a tunnel.
+type TunnelSpec struct {
+	OperationID    string `json:"operation_id,omitempty"`
+	Provider       string `json:"provider,omitempty"`
+	Type           string `json:"type"`
+	SrcSessionID   string `json:"src_session_id"`
+	SrcImplantName string `json:"src_implant_name,omitempty"`
+	DstHost        string `json:"dst_host,omitempty"`
+	DstPort        int    `json:"dst_port,omitempty"`
+	ListenHost     string `json:"listen_host,omitempty"`
+	ListenPort     int    `json:"listen_port,omitempty"`
+	ParentTunnelID string `json:"parent_tunnel_id,omitempty"`
+	Classification string `json:"classification,omitempty"`
+}
+
+// TunnelFilter narrows tunnel listings.
+type TunnelFilter struct {
+	OperationID  string `json:"operation_id,omitempty"`
+	Provider     string `json:"provider,omitempty"`
+	Type         string `json:"type,omitempty"`
+	Status       string `json:"status,omitempty"`
+	SrcSessionID string `json:"src_session_id,omitempty"`
+}
+
+// TunnelEvent is emitted by SubscribeTunnels when a tunnel changes state.
+type TunnelEvent struct {
+	Timestamp time.Time `json:"timestamp"`
+	EventType string    `json:"event_type"` // created | updated | closed | error
+	Tunnel    Tunnel    `json:"tunnel"`
 }
 
 // ════════════════════════════════════════════
@@ -425,6 +482,7 @@ type C2GatewayServer struct {
 	jwtSecret  []byte
 	httpServer *http.Server
 	cti        *ctiHealth
+	tunnels    *TunnelManager
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +626,14 @@ func (s *C2GatewayServer) Start() error {
 	mux.HandleFunc("GET /api/v1/c2/cross-domain/commands", s.handleListCrossDomainCommands)
 	mux.HandleFunc("GET /api/v1/c2/cross-domain/commands/{id}", s.handleGetCrossDomainCommand)
 	mux.HandleFunc("POST /api/v1/c2/cross-domain/commands/{id}/approve", s.handleApproveCrossDomainCommand)
+
+	// Tunnels (Phase 3 — port-forwards, SOCKS, pivot relays)
+	mux.HandleFunc("GET /api/v1/c2/tunnels", s.handleListTunnels)
+	mux.HandleFunc("POST /api/v1/c2/tunnels", s.handleCreateTunnel)
+	mux.HandleFunc("GET /api/v1/c2/tunnels/{id}", s.handleGetTunnel)
+	mux.HandleFunc("DELETE /api/v1/c2/tunnels/{id}", s.handleDeleteTunnel)
+	mux.HandleFunc("GET /api/v1/c2/tunnels/{id}/throughput", s.handleTunnelThroughput)
+	mux.HandleFunc("GET /api/v1/c2/topology", s.handleTopology)
 
 	// Containment actions (DCO/SOC M13)
 	mux.HandleFunc("POST /api/v1/c2/containment/execute", s.handleExecuteContainment)
@@ -1707,7 +1773,7 @@ func (s *C2GatewayServer) handleVNCProxy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	target := fmt.Sprintf("%s:%s", host, vncPort)
+	target := net.JoinHostPort(host, vncPort)
 	s.logger.Info("vnc proxy connecting", "target", target, "user", userID)
 
 	// Dial the VNC server via raw TCP
@@ -2532,6 +2598,440 @@ func (p *SliverProvider) SubscribeTelemetry(ctx context.Context, filter *Telemet
 	return ch, nil
 }
 
+// ── Tunnels (Phase 3) ───────────────────────
+//
+// Sliver supports portfwd / RPortfwd / socks5 RPCs (see
+// rpcpb.SliverRPCClient.Portfwd / SocksProxy). Wiring those into a
+// streaming relay is non-trivial — we leave the bytes-on-the-wire layer as
+// a TODO and currently provide registration-only semantics so the gateway
+// can persist tunnel state, emit audit events, and surface them via REST.
+//
+// Direction:
+//   - portfwd_local  → operator listens on listen_host/port, packets relayed
+//     through the implant to dst_host/dst_port.
+//   - portfwd_remote → implant listens on listen_host/port (target's view)
+//     and relays to operator-reachable dst_host/dst_port.
+//   - socks5         → operator opens a SOCKS5 listener routed via the implant.
+//   - pivot_relay    → child implants chain through this implant.
+
+func (p *SliverProvider) ListTunnels(ctx context.Context, filter TunnelFilter) ([]Tunnel, error) {
+	if !p.IsConnected() {
+		return nil, fmt.Errorf("not connected to sliver")
+	}
+	// TODO: enumerate via rpc.GetPortfwd / rpc.GetSocksProxies once those
+	// helpers are added to the gateway. For now provider-level listing is
+	// empty and the TunnelManager DB is the source of truth.
+	return []Tunnel{}, nil
+}
+
+func (p *SliverProvider) CreateTunnel(ctx context.Context, spec TunnelSpec) (Tunnel, error) {
+	if !p.IsConnected() {
+		return Tunnel{}, fmt.Errorf("not connected to sliver")
+	}
+	// TODO: invoke rpc.Portfwd / SocksProxy and capture the resulting
+	// tunnel_id. For now we acknowledge the request and let the
+	// TunnelManager persist it; bytes are not yet relayed.
+	t := Tunnel{
+		ID:             "", // filled in by TunnelManager from the DB row
+		Provider:       "sliver",
+		Type:           spec.Type,
+		SrcSessionID:   spec.SrcSessionID,
+		SrcImplantName: spec.SrcImplantName,
+		DstHost:        spec.DstHost,
+		DstPort:        spec.DstPort,
+		ListenHost:     spec.ListenHost,
+		ListenPort:     spec.ListenPort,
+		Status:         "pending",
+		Classification: spec.Classification,
+	}
+	return t, nil
+}
+
+func (p *SliverProvider) DeleteTunnel(ctx context.Context, tunnelID string) error {
+	if !p.IsConnected() {
+		return fmt.Errorf("not connected to sliver")
+	}
+	// TODO: call rpc.ClosePortfwd / rpc.CloseSocksProxy when the
+	// tunnel-id mapping is persisted.
+	return nil
+}
+
+func (p *SliverProvider) SubscribeTunnels(ctx context.Context, filter TunnelFilter) (<-chan TunnelEvent, error) {
+	ch := make(chan TunnelEvent)
+	close(ch)
+	return ch, nil
+}
+
+// ════════════════════════════════════════════
+//  TUNNEL HANDLERS (Phase 3)
+// ════════════════════════════════════════════
+
+func (s *C2GatewayServer) requireTunnels(w http.ResponseWriter) bool {
+	if s.tunnels == nil {
+		writeError(w, http.StatusServiceUnavailable, "TUNNELS_UNAVAILABLE",
+			"Tunnel manager is not configured (database required)")
+		return false
+	}
+	return true
+}
+
+func (s *C2GatewayServer) handleListTunnels(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTunnels(w) {
+		return
+	}
+	q := r.URL.Query()
+	filter := TunnelFilter{
+		OperationID:  q.Get("operation_id"),
+		Provider:     q.Get("provider"),
+		Type:         q.Get("type"),
+		Status:       q.Get("status"),
+		SrcSessionID: q.Get("src_session_id"),
+	}
+
+	actor := r.Header.Get("X-User-ID")
+	roles := r.Header.Get("X-User-Roles")
+
+	// If the caller filters to a specific operation, gate it on access.
+	if filter.OperationID != "" {
+		ok, err := s.actorCanAccessOperation(r.Context(), actor, roles, filter.OperationID)
+		if err != nil {
+			s.logger.Warn("operation access check failed", "handler", "handleListTunnels", "error", err)
+		}
+		if !ok {
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "no access to operation")
+			return
+		}
+	}
+
+	tunnels, err := s.tunnels.List(r.Context(), filter)
+	if err != nil {
+		s.logger.Error("handler failed", "handler", "handleListTunnels", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to list tunnels")
+		return
+	}
+
+	// When no operation filter was supplied, restrict the result to the
+	// operations the actor is permitted to see.
+	if filter.OperationID == "" {
+		visibleIDs, scoped := s.visibleOperationIDs(r.Context(), actor, roles)
+		if scoped {
+			allowed := make(map[string]bool, len(visibleIDs))
+			for _, id := range visibleIDs {
+				allowed[id] = true
+			}
+			scopedTunnels := make([]TunnelDB, 0, len(tunnels))
+			for _, t := range tunnels {
+				// Tunnels with no operation_id are operator-scoped; only
+				// privileged roles see them. roleAllowsTunnelAccess covers
+				// that fallback.
+				if t.OperationID == nil || *t.OperationID == "" {
+					if roleAllowsTunnelAccess(roles) {
+						scopedTunnels = append(scopedTunnels, t)
+					}
+					continue
+				}
+				if allowed[*t.OperationID] {
+					scopedTunnels = append(scopedTunnels, t)
+				}
+			}
+			tunnels = scopedTunnels
+		} else if !roleAllowsTunnelAccess(roles) && !hasRole(roles, "admin") {
+			// No visibility scope and no privileged role → no access.
+			writeError(w, http.StatusForbidden, "FORBIDDEN", "no access to operation")
+			return
+		}
+	}
+
+	// Compute the maximum classification across the result set so the
+	// response header reflects the most sensitive item served.
+	classes := make([]string, 0, len(tunnels))
+	for _, t := range tunnels {
+		classes = append(classes, t.Classification)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Classification", maxClassification(classes...))
+	json.NewEncoder(w).Encode(map[string]any{"tunnels": tunnels})
+}
+
+func (s *C2GatewayServer) handleCreateTunnel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTunnels(w) {
+		return
+	}
+	var spec TunnelSpec
+	if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
+		writeError(w, http.StatusBadRequest, "INVALID_JSON", "Failed to parse request body")
+		return
+	}
+	if spec.Provider == "" {
+		// fall back to query param or the gateway's default provider
+		if pn := r.URL.Query().Get("provider"); pn != "" {
+			spec.Provider = pn
+		} else if s.provider != nil {
+			spec.Provider = s.provider.Name()
+		}
+	}
+	actor := r.Header.Get("X-User-ID")
+	roles := r.Header.Get("X-User-Roles")
+
+	// Gate on operation membership before persisting / dispatching to a
+	// provider. If no operation_id is supplied, fall back to role check.
+	ok, accessErr := s.actorCanAccessOperation(r.Context(), actor, roles, spec.OperationID)
+	if accessErr != nil {
+		s.logger.Warn("operation access check failed", "handler", "handleCreateTunnel", "error", accessErr)
+	}
+	if !ok {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "no access to operation")
+		return
+	}
+
+	t, err := s.tunnels.Create(r.Context(), spec, actor)
+	if err != nil {
+		s.logger.Error("create tunnel failed", "error", err, "provider", spec.Provider, "type", spec.Type)
+		// Map validation errors to 400, provider errors to 502.
+		if strings.Contains(err.Error(), "required") || strings.Contains(err.Error(), "invalid") {
+			writeError(w, http.StatusBadRequest, "VALIDATION_ERROR", err.Error())
+			return
+		}
+		if strings.Contains(err.Error(), "not registered") {
+			writeError(w, http.StatusBadRequest, "PROVIDER_NOT_FOUND", err.Error())
+			return
+		}
+		// Provider rejected the request — return 502 but include the persisted (error-state) row.
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Classification", t.Classification)
+		w.WriteHeader(http.StatusBadGateway)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error":  map[string]string{"code": "PROVIDER_ERROR", "message": err.Error()},
+			"tunnel": t,
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Classification", t.Classification)
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(t)
+}
+
+func (s *C2GatewayServer) handleGetTunnel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTunnels(w) {
+		return
+	}
+	id := r.PathValue("id")
+	t, err := s.tunnels.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Tunnel not found")
+		return
+	}
+
+	actor := r.Header.Get("X-User-ID")
+	roles := r.Header.Get("X-User-Roles")
+	opID := ""
+	if t.OperationID != nil {
+		opID = *t.OperationID
+	}
+	ok, accessErr := s.actorCanAccessOperation(r.Context(), actor, roles, opID)
+	if accessErr != nil {
+		s.logger.Warn("operation access check failed", "handler", "handleGetTunnel", "error", accessErr)
+	}
+	if !ok {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "no access to operation")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Classification", canonicalClassification(t.Classification))
+	json.NewEncoder(w).Encode(t)
+}
+
+func (s *C2GatewayServer) handleDeleteTunnel(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTunnels(w) {
+		return
+	}
+	id := r.PathValue("id")
+	actor := r.Header.Get("X-User-ID")
+	roles := r.Header.Get("X-User-Roles")
+
+	// Look up the tunnel first to learn its operation, then gate access.
+	existing, err := s.tunnels.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Tunnel not found")
+		return
+	}
+	opID := ""
+	if existing.OperationID != nil {
+		opID = *existing.OperationID
+	}
+	ok, accessErr := s.actorCanAccessOperation(r.Context(), actor, roles, opID)
+	if accessErr != nil {
+		s.logger.Warn("operation access check failed", "handler", "handleDeleteTunnel", "error", accessErr)
+	}
+	if !ok {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "no access to operation")
+		return
+	}
+
+	t, err := s.tunnels.Delete(r.Context(), id, actor)
+	if err != nil {
+		s.logger.Error("delete tunnel failed", "id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to close tunnel")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Classification", canonicalClassification(t.Classification))
+	json.NewEncoder(w).Encode(t)
+}
+
+func (s *C2GatewayServer) handleTunnelThroughput(w http.ResponseWriter, r *http.Request) {
+	if !s.requireTunnels(w) {
+		return
+	}
+	id := r.PathValue("id")
+
+	// Load the parent tunnel first so we can both authorize the actor and
+	// emit the correct X-Classification header.
+	tunnel, err := s.tunnels.Get(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "Tunnel not found")
+		return
+	}
+	actor := r.Header.Get("X-User-ID")
+	roles := r.Header.Get("X-User-Roles")
+	opID := ""
+	if tunnel.OperationID != nil {
+		opID = *tunnel.OperationID
+	}
+	ok, accessErr := s.actorCanAccessOperation(r.Context(), actor, roles, opID)
+	if accessErr != nil {
+		s.logger.Warn("operation access check failed", "handler", "handleTunnelThroughput", "error", accessErr)
+	}
+	if !ok {
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "no access to operation")
+		return
+	}
+
+	var fromT, toT time.Time
+	if v := r.URL.Query().Get("from"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			fromT = t
+		}
+	}
+	if v := r.URL.Query().Get("to"); v != "" {
+		if t, err := time.Parse(time.RFC3339, v); err == nil {
+			toT = t
+		}
+	}
+	gran := r.URL.Query().Get("granularity")
+
+	samples, err := s.tunnels.QueryThroughput(r.Context(), id, fromT, toT, gran)
+	if err != nil {
+		// ClickHouse unavailable is not a 500; report 503 with a clear message.
+		if strings.Contains(err.Error(), "not configured") {
+			writeError(w, http.StatusServiceUnavailable, "CLICKHOUSE_UNAVAILABLE",
+				"Throughput logging is not configured")
+			return
+		}
+		s.logger.Error("query throughput failed", "id", id, "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "Failed to query throughput")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Classification", canonicalClassification(tunnel.Classification))
+	json.NewEncoder(w).Encode(map[string]any{
+		"tunnel_id": id,
+		"samples":   samples,
+	})
+}
+
+// handleTopology returns an aggregated view of sessions, tunnels, and providers.
+func (s *C2GatewayServer) handleTopology(w http.ResponseWriter, r *http.Request) {
+	out := map[string]any{
+		"providers": []ProviderStatus{},
+		"sessions":  []Session{},
+		"tunnels":   []TunnelDB{},
+	}
+
+	actor := r.Header.Get("X-User-ID")
+	roles := r.Header.Get("X-User-Roles")
+
+	if s.registry != nil {
+		out["providers"] = s.registry.List()
+	}
+
+	// Sessions across all enabled providers
+	sessions := make([]Session, 0)
+	if s.registry != nil {
+		for _, st := range s.registry.List() {
+			if !st.Enabled || !st.Connected {
+				continue
+			}
+			p := s.registry.Get(st.Name)
+			if p == nil {
+				continue
+			}
+			ss, err := p.ListSessions(r.Context(), nil)
+			if err != nil {
+				s.logger.Warn("topology: ListSessions failed", "provider", st.Name, "error", err)
+				continue
+			}
+			sessions = append(sessions, ss...)
+		}
+	} else if s.provider != nil {
+		if ss, err := s.provider.ListSessions(r.Context(), nil); err == nil {
+			sessions = ss
+		}
+	}
+	out["sessions"] = sessions
+
+	tunnels := []TunnelDB{}
+	if s.tunnels != nil {
+		if tt, err := s.tunnels.List(r.Context(), TunnelFilter{}); err == nil {
+			tunnels = tt
+		}
+	}
+
+	// Scope to operations the actor can see (admins / DB-less fallback skip
+	// scoping). Tunnels with no operation_id are only shown to privileged
+	// roles via the role-based fallback.
+	visibleIDs, scoped := s.visibleOperationIDs(r.Context(), actor, roles)
+	if scoped {
+		allowed := make(map[string]bool, len(visibleIDs))
+		for _, id := range visibleIDs {
+			allowed[id] = true
+		}
+		scopedTunnels := make([]TunnelDB, 0, len(tunnels))
+		for _, t := range tunnels {
+			if t.OperationID == nil || *t.OperationID == "" {
+				if roleAllowsTunnelAccess(roles) {
+					scopedTunnels = append(scopedTunnels, t)
+				}
+				continue
+			}
+			if allowed[*t.OperationID] {
+				scopedTunnels = append(scopedTunnels, t)
+			}
+		}
+		tunnels = scopedTunnels
+	} else if !roleAllowsTunnelAccess(roles) && !hasRole(roles, "admin") {
+		// Fallback path with a non-privileged role: deny.
+		writeError(w, http.StatusForbidden, "FORBIDDEN", "no access to operation")
+		return
+	}
+	out["tunnels"] = tunnels
+
+	// X-Classification is the max across the visible tunnels (Session has
+	// no classification field today; if added it should be folded in here).
+	classes := make([]string, 0, len(tunnels))
+	for _, t := range tunnels {
+		classes = append(classes, t.Classification)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Classification", maxClassification(classes...))
+	json.NewEncoder(w).Encode(out)
+}
+
 // ════════════════════════════════════════════
 //  CONTAINMENT ACTIONS (DCO/SOC M13)
 // ════════════════════════════════════════════
@@ -2961,6 +3461,82 @@ func (s *C2GatewayServer) handleRollbackContainmentAction(w http.ResponseWriter,
 //  MAIN
 // ════════════════════════════════════════════
 
+// initSecondaryProviders inspects the environment for *_ENABLED=true flags
+// and registers Mythic, Havoc, and Merlin providers when present. Each
+// registration is fail-soft — connection failures are logged but never
+// crash the gateway.
+func initSecondaryProviders(ctx context.Context, registry *ProviderRegistry, logger *slog.Logger) {
+	// Mythic
+	if strings.EqualFold(os.Getenv("MYTHIC_ENABLED"), "true") {
+		host := getEnv("MYTHIC_HOST", "mythic-server")
+		port := envOrInt("MYTHIC_PORT", 7443)
+		user := os.Getenv("MYTHIC_USERNAME")
+		pass := os.Getenv("MYTHIC_PASSWORD")
+		if user == "" || pass == "" {
+			logger.Warn("mythic enabled but MYTHIC_USERNAME/MYTHIC_PASSWORD missing — skipping registration")
+		} else {
+			p := NewMythicProvider(logger)
+			cfg := ProviderConfig{Host: host, Port: port, Options: map[string]string{
+				"username": user, "password": pass,
+			}}
+			if err := p.Connect(ctx, cfg); err != nil {
+				logger.Warn("mythic connect failed (registered as disconnected)", "error", err)
+			}
+			registry.Register("mythic", p, RegistryProviderConfig{
+				Name: "mythic", Type: "mythic", Host: host, Port: port,
+				Mode: "external", Enabled: true, AuthType: "username_password",
+			})
+		}
+	}
+
+	// Havoc
+	if strings.EqualFold(os.Getenv("HAVOC_ENABLED"), "true") {
+		host := getEnv("HAVOC_HOST", "havoc-server")
+		port := envOrInt("HAVOC_PORT", 40056)
+		user := os.Getenv("HAVOC_USERNAME")
+		pass := os.Getenv("HAVOC_PASSWORD")
+		if user == "" || pass == "" {
+			logger.Warn("havoc enabled but HAVOC_USERNAME/HAVOC_PASSWORD missing — skipping registration")
+		} else {
+			p := NewHavocProvider(logger)
+			cfg := ProviderConfig{Host: host, Port: port, Options: map[string]string{
+				"username": user, "password": pass,
+			}}
+			if err := p.Connect(ctx, cfg); err != nil {
+				logger.Warn("havoc connect failed (registered as disconnected)", "error", err)
+			}
+			registry.Register("havoc", p, RegistryProviderConfig{
+				Name: "havoc", Type: "havoc", Host: host, Port: port,
+				Mode: "external", Enabled: true, AuthType: "username_password",
+			})
+		}
+	}
+
+	// Merlin
+	if strings.EqualFold(os.Getenv("MERLIN_ENABLED"), "true") {
+		host := getEnv("MERLIN_HOST", "merlin-server")
+		port := envOrInt("MERLIN_PORT", 50051)
+		psk := os.Getenv("MERLIN_PSK")
+		if psk == "" {
+			logger.Warn("merlin enabled but MERLIN_PSK missing — skipping registration")
+		} else {
+			tlsInsecure := getEnv("MERLIN_TLS_INSECURE", "true")
+			p := NewMerlinProvider(logger)
+			cfg := ProviderConfig{Host: host, Port: port, Options: map[string]string{
+				"psk":          psk,
+				"tls_insecure": tlsInsecure,
+			}}
+			if err := p.Connect(ctx, cfg); err != nil {
+				logger.Warn("merlin connect failed (registered as disconnected)", "error", err)
+			}
+			registry.Register("merlin", p, RegistryProviderConfig{
+				Name: "merlin", Type: "merlin", Host: host, Port: port,
+				Mode: "external", Enabled: true, AuthType: "psk",
+			})
+		}
+	}
+}
+
 func maxBodyMiddleware(maxBytes int64, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Body != nil {
@@ -3091,6 +3667,31 @@ func main() {
 		Enabled: true,
 	})
 	server.registry = registry
+
+	// Auto-load secondary providers from environment (Mythic, Havoc, Merlin).
+	// Each registration is fail-soft: failures are logged but never crash the
+	// gateway.
+	initSecondaryProviders(ctx, registry, logger)
+
+	// Tunnel manager — lifecycles tunnels across providers and persists in pg.
+	if db != nil {
+		tm := NewTunnelManager(db, nc, registry, logger)
+		// Optional: enable ClickHouse throughput logging if env is set.
+		if chHost := os.Getenv("CLICKHOUSE_HOST"); chHost != "" {
+			// CLICKHOUSE_PORT in compose is the HTTP port (8123). If a separate
+			// CLICKHOUSE_HTTP_PORT is provided, prefer that.
+			chPort := getEnv("CLICKHOUSE_HTTP_PORT", getEnv("CLICKHOUSE_PORT", "8123"))
+			chDB := getEnv("CLICKHOUSE_DB", "ems_audit")
+			chUser := getEnv("CLICKHOUSE_USER", "ems_audit")
+			chPass := os.Getenv("CLICKHOUSE_PASSWORD")
+			tm.WithClickHouse(fmt.Sprintf("http://%s:%s", chHost, chPort), chDB, chUser, chPass)
+			logger.Info("tunnel throughput logging enabled", "clickhouse", chHost)
+		}
+		tm.StartSubscriptions(ctx)
+		server.tunnels = tm
+	} else {
+		logger.Warn("postgres unavailable — tunnel manager disabled")
+	}
 
 	// Start cross-domain command relay (low side) or result listener (high side)
 	server.startCommandRelay(ctx)

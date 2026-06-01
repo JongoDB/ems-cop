@@ -137,7 +137,7 @@ describe('IOCsPage', () => {
     mockApiFetch.mockResolvedValue({ data: [], pagination: { total: 0 } });
     renderPage();
     await waitFor(() => {
-      expect(screen.getByText('No IOCs found')).toBeInTheDocument();
+      expect(screen.getByText('NO IOCs')).toBeInTheDocument();
     });
   });
 });
