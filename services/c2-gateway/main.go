@@ -1877,6 +1877,9 @@ func (p *SliverProvider) Connect(ctx context.Context, config ProviderConfig) err
 	conn, err := grpc.DialContext(ctx, target,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)),
 		grpc.WithPerRPCCredentials(TokenAuth{token: opConfig.Token}),
+		// Sliver implant binaries are routinely 5-25 MB; default 4 MB receive
+		// limit cuts off Generate responses with ResourceExhausted.
+		grpc.WithDefaultCallOptions(grpc.MaxCallRecvMsgSize(64*1024*1024)),
 	)
 	if err != nil {
 		return fmt.Errorf("grpc dial: %w", err)
