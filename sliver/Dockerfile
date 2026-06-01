@@ -23,12 +23,14 @@ RUN apt-get update && apt-get install -y \
 # Create sliver user
 RUN useradd -m -s /bin/bash -u 10000 sliver
 
-# Download and install latest Sliver server (detect architecture)
-RUN SLIVER_VERSION=$(curl -s https://api.github.com/repos/BishopFox/sliver/releases/latest | grep '"tag_name"' | sed -E 's/.*"v?([^"]+)".*/\1/') && \
-    ARCH=$(dpkg --print-architecture) && \
-    case "$ARCH" in amd64) SLIVER_ARCH="amd64" ;; arm64|aarch64) SLIVER_ARCH="arm64" ;; *) SLIVER_ARCH="amd64" ;; esac && \
-    echo "Installing Sliver v${SLIVER_VERSION} for linux-${SLIVER_ARCH}" && \
-    curl -L -f -o /opt/sliver-server "https://github.com/BishopFox/sliver/releases/download/v${SLIVER_VERSION}/sliver-server_linux-${SLIVER_ARCH}" && \
+# Pin Sliver server to v1.5.42 — matches the protobuf surface vendored by
+# services/c2-gateway (go.mod: github.com/bishopfox/sliver v1.5.42).
+# v1.7.x reorganized ImplantConfig field numbers incompatibly; client+server
+# must agree on the wire format. Bump in lockstep with the c2-gateway dep.
+# v1.5.x only shipped a linux amd64 binary; the release URL has no arch suffix.
+RUN SLIVER_VERSION=1.5.42 && \
+    echo "Installing Sliver v${SLIVER_VERSION} (linux/amd64)" && \
+    curl -L -f -o /opt/sliver-server "https://github.com/BishopFox/sliver/releases/download/v${SLIVER_VERSION}/sliver-server_linux" && \
     chmod +x /opt/sliver-server
 
 # Create directories
