@@ -144,29 +144,31 @@ jobs:
         env:
           DOCKER_BUILDKIT: 1
 
-      - name: Run Trivy vulnerability scanner
+      # docker compose build with project=ems-cop produces images named
+      # `ems-cop-<compose-service>:latest` — that is the canonical ref to scan.
+      - name: Run Trivy vulnerability scanner (auth — gating)
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: "image"
-          image-ref: "ems-cop/auth:latest"
+          image-ref: "ems-cop-auth-service:latest"
           format: "table"
           exit-code: "1"
           severity: "CRITICAL,HIGH"
           ignore-unfixed: true
 
-      - name: Scan all service images
+      - name: Scan all service images (warning-only)
         run: |
-          services=(auth workflow-engine ticket dashboard c2-gateway audit notification endpoint ws-relay frontend)
+          services=(auth-service workflow-engine ticket-service dashboard-service c2-gateway audit-service notification-service endpoint-service ws-relay frontend)
           failed=0
           for svc in "${services[@]}"; do
-            echo "=== Scanning ems-cop/${svc}:latest ==="
+            echo "=== Scanning ems-cop-${svc}:latest ==="
             docker run --rm \
               -v /var/run/docker.sock:/var/run/docker.sock \
               aquasec/trivy:latest image \
               --severity CRITICAL,HIGH \
               --ignore-unfixed \
               --exit-code 0 \
-              "ems-cop/${svc}:latest" || failed=1
+              "ems-cop-${svc}:latest" || failed=1
           done
           if [ "$failed" -eq 1 ]; then
             echo "::warning::Some images have known vulnerabilities"
