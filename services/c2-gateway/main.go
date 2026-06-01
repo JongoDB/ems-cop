@@ -1773,7 +1773,7 @@ func (s *C2GatewayServer) handleVNCProxy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	target := fmt.Sprintf("%s:%s", host, vncPort)
+	target := net.JoinHostPort(host, vncPort)
 	s.logger.Info("vnc proxy connecting", "target", target, "user", userID)
 
 	// Dial the VNC server via raw TCP
